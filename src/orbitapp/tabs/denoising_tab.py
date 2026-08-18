@@ -32,7 +32,8 @@ from ..workers import FunctionWorker, run_worker
 
 _WAVELETS = ("sym4", "db4", "haar", "coif2")
 _THRESHOLD_METHODS = ("bayes", "universal")
-_N_TRACE_PLOTS = 4  # 2 correlation-peak locations + 2 low-correlation locations
+_N_PEAK_TRACE_PLOTS = 2  # correlation-peak ("signal") locations
+_N_LOW_TRACE_PLOTS = 2  # low-correlation ("noise") locations
 
 # (combo box label, dispatch key) -- key is deliberately not called
 # "method", since the wavelet threshold method ("bayes"/"universal") is
@@ -137,21 +138,34 @@ class DenoisingTab(QWidget):
         self.metrics_label = QLabel("Run denoising to see quality metrics.")
         self.panel.add_metric_widget(self.metrics_label)
 
+        # Red X's on the Raw panel mark exactly which pixels these traces
+        # come from -- titling each small trace plot made them unreadable
+        # unless the window was huge, so the location lives on the image instead.
+        self._location_markers = pg.ScatterPlotItem(symbol="x", size=14, pen=pg.mkPen("r", width=2), brush=None)
+        self.panel.before_view.getView().addItem(self._location_markers)
+
         traces_container = QWidget()
         traces_layout = QGridLayout(traces_container)
-        traces_layout.addWidget(
-            QLabel("Representative pixel traces -- 2 local-correlation peaks, 2 low-correlation (before vs. after)"),
-            0, 0, 1, 2,
-        )
-        self.trace_plots = []
-        for i in range(_N_TRACE_PLOTS):
+        traces_layout.addWidget(QLabel("Example signal pixels"), 0, 0)
+        traces_layout.addWidget(QLabel("Example noise pixels"), 0, 1)
+        self.peak_trace_plots = self._make_trace_plots(_N_PEAK_TRACE_PLOTS)
+        self.low_trace_plots = self._make_trace_plots(_N_LOW_TRACE_PLOTS)
+        for i, plot in enumerate(self.peak_trace_plots):
+            traces_layout.addWidget(plot, 1 + i, 0)
+        for i, plot in enumerate(self.low_trace_plots):
+            traces_layout.addWidget(plot, 1 + i, 1)
+        self.panel.add_metric_widget(traces_container)
+
+    @staticmethod
+    def _make_trace_plots(count: int) -> list[pg.PlotWidget]:
+        plots = []
+        for _ in range(count):
             plot = pg.PlotWidget()
             plot.addLegend()
             plot.setLabel("bottom", "frame")
             plot.setLabel("left", "intensity")
-            traces_layout.addWidget(plot, 1 + i // 2, i % 2)
-            self.trace_plots.append(plot)
-        self.panel.add_metric_widget(traces_container)
+            plots.append(plot)
+        return plots
 
     def _update_visible_params(self, label: str) -> None:
         """Only the fields relevant to the selected algorithm are shown
@@ -165,6 +179,7 @@ class DenoisingTab(QWidget):
         self.commit_controls.set_apply_enabled(movie is not None)
         self.commit_controls.set_commit_enabled(False)
         self._pending_result = None
+        self._location_markers.clear()
         if movie is not None:
             self.panel.before_view.setImage(movie.mean(axis=2))
             self.panel.set_before_movie(movie)
@@ -212,13 +227,19 @@ class DenoisingTab(QWidget):
             f"{result['corr_before']:.3f} -> {result['corr_after']:.3f}"
         )
 
-        for plot in self.trace_plots:
-            plot.clear()
-            plot.setTitle("")
-        for plot, sample in zip(self.trace_plots, result["qc_traces"]):
-            plot.plot(sample["before"], pen="r", name="Before")
-            plot.plot(sample["after"], pen="g", name="After")
-            plot.setTitle(f"{sample['kind']} @ ({sample['row']}, {sample['col']}), corr={sample['corr']:.2f}")
+        qc_traces = result["qc_traces"]
+        self._location_markers.setData(
+            [s["row"] + 0.5 for s in qc_traces], [s["col"] + 0.5 for s in qc_traces]
+        )
+
+        peak_samples = [s for s in qc_traces if s["kind"] == "peak"]
+        low_samples = [s for s in qc_traces if s["kind"] == "low"]
+        for plots, samples in ((self.peak_trace_plots, peak_samples), (self.low_trace_plots, low_samples)):
+            for plot in plots:
+                plot.clear()
+            for plot, sample in zip(plots, samples):
+                plot.plot(sample["before"], pen="r", name="Before")
+                plot.plot(sample["after"], pen="g", name="After")
 
         self.busy_bar.stop("")
         self.status_label.setText(
