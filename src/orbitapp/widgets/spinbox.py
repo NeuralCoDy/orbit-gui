@@ -1,6 +1,6 @@
 """Shared QSpinBox/QDoubleSpinBox construction -- every stage tab with
-several numeric parameters (motion correction now; normalization, ...
-later) needs the same range/step/value boilerplate repeated per field.
+several numeric parameters needs the same range/step/value boilerplate
+repeated per field.
 """
 
 from __future__ import annotations

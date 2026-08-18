@@ -5,21 +5,15 @@ images rather than as an afterthought -- mMD/mCM/ECC (PatchWarp) plus
 singular-value-spectrum tightening and spatial PC maps (halo/crescent
 inspection).
 
-Registration + metrics run together in one background FunctionWorker
-(tens of seconds on a real recording) behind a busy indicator, so the
-GUI thread never blocks. "Apply" only ever produces a *candidate*
-result previewed in this tab -- the shared active dataset (and hence
-every other tab) is untouched until "Commit to Active Dataset" is
-clicked explicitly, at which point the step is also recorded in the
-header's pipeline breadcrumb.
+Same Apply-produces-a-candidate / Commit-makes-it-active pattern as
+every StageTab -- see that module's docstring.
 """
 
 from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from orbit.motion_correction import motion_correct
 from orbit.motion_metrics import (
@@ -30,8 +24,9 @@ from orbit.motion_metrics import (
 )
 
 from ..state import AppState
-from ..widgets import BusyBar, CommitControls, ImageSlideshow, ParametersDialog, StagePanel, make_spinbox
-from ..workers import FunctionWorker, run_worker
+from ..widgets import ImageSlideshow, ParametersDialog, make_spinbox
+from ..workers import run_worker
+from .stage_tab import StageTab
 
 _DEFAULT_N_COMPONENTS = 20
 
@@ -61,19 +56,14 @@ def _run_and_assess(movie: np.ndarray, method: str, n_components: int, **kwargs)
     }
 
 
-class MotionCorrectionTab(QWidget):
-    data_changed = Signal()  # emitted only on Commit, not on Apply
+class MotionCorrectionTab(StageTab):
+    _stage_name = "Motion correction"
+    _result_key = "registered"
 
     def __init__(self, state: AppState, parent=None) -> None:
-        super().__init__(parent)
-        self.state = state
-        self.worker: FunctionWorker | None = None
-        self._input_movie: np.ndarray | None = None
-        self._pending_result: dict | None = None
-        self._pending_step_label: str | None = None
+        super().__init__(state, apply_label="Apply Motion Correction", parent=parent)
 
-        layout = QVBoxLayout(self)
-
+    def _build_controls_row(self) -> QHBoxLayout:
         # All per-algorithm parameters live in the ParametersDialog popup
         # below rather than sprawling across the tab -- this row is the
         # only thing always visible: which algorithm, its parameters
@@ -102,11 +92,6 @@ class MotionCorrectionTab(QWidget):
         self.params_dialog.add_row("pyramid_levels (PatchWarp only)", self.pyramid_levels_spin)
         self.params_dialog.add_row("number of spatial PCs (spectrum + slideshow)", self.pc_count_spin)
 
-        self.commit_controls = CommitControls(apply_label="Apply Motion Correction")
-        self.commit_controls.set_apply_enabled(False)
-        self.commit_controls.apply_clicked.connect(self._apply)
-        self.commit_controls.commit_clicked.connect(self._commit)
-
         controls_row = QHBoxLayout()
         controls_row.addWidget(QLabel("Method:"))
         controls_row.addWidget(self.method_combo)
@@ -115,17 +100,9 @@ class MotionCorrectionTab(QWidget):
         controls_row.addWidget(self.params_btn)
         controls_row.addWidget(self.commit_controls)
         controls_row.addStretch()
-        layout.addLayout(controls_row)
+        return controls_row
 
-        self.busy_bar = BusyBar()
-        layout.addWidget(self.busy_bar)
-
-        self.status_label = QLabel("No data loaded.")
-        layout.addWidget(self.status_label)
-
-        self.panel = StagePanel(before_title="Raw (mean projection)", after_title="Candidate (mean projection)")
-        layout.addWidget(self.panel)
-
+    def _build_metrics(self) -> None:
         self.metrics_label = QLabel("Run motion correction to see quality metrics.")
         self.panel.add_metric_widget(self.metrics_label)
 
@@ -142,27 +119,7 @@ class MotionCorrectionTab(QWidget):
         pc_layout.addWidget(self.pc_slideshow)
         self.panel.add_metric_widget(pc_container)
 
-    def on_data_loaded(self) -> None:
-        movie = self.state.active_data()
-        self.commit_controls.set_apply_enabled(movie is not None)
-        self.commit_controls.set_commit_enabled(False)
-        self._pending_result = None
-        self._pending_step_label = None
-        if movie is not None:
-            self.panel.before_view.setImage(movie.mean(axis=2))
-            self.panel.set_before_movie(movie)
-            self.status_label.setText(f"Ready. shape={movie.shape}")
-
-    def _apply(self) -> None:
-        movie = self.state.active_data()
-        if movie is None:
-            QMessageBox.warning(self, "No data", "Load data on the Load tab first.")
-            return
-
-        self._input_movie = movie
-        self.commit_controls.set_apply_enabled(False)
-        self.commit_controls.set_commit_enabled(False)
-
+    def _start_worker(self, movie: np.ndarray) -> None:
         method_text = self.method_combo.currentText()
         if method_text.startswith("Rigid"):
             method = "rigid"
@@ -201,9 +158,7 @@ class MotionCorrectionTab(QWidget):
             _run_and_assess, movie, method, on_success=self._on_finished, on_failure=self._on_failed, **kwargs,
         )
 
-    def _on_finished(self, result: dict) -> None:
-        self._pending_result = result
-
+    def _render_result(self, result: dict) -> None:
         self.panel.before_view.setImage(self._input_movie.mean(axis=2))
         self.panel.after_view.setImage(result["registered"].mean(axis=2))
         self.panel.set_after_movie(result["registered"])
@@ -223,25 +178,3 @@ class MotionCorrectionTab(QWidget):
         self.sv_plot.plot(result["sv_after"] / norm, pen="g", name="After")
 
         self.pc_slideshow.set_stack(result["pc_after"])
-
-        self.busy_bar.stop("")
-        self.status_label.setText(
-            f"Candidate ready (shape={result['registered'].shape}). "
-            "Click 'Commit to Active Dataset' to keep it, or Apply again to discard and retry."
-        )
-        self.commit_controls.set_apply_enabled(True)
-        self.commit_controls.set_commit_enabled(True)
-
-    def _on_failed(self, message: str) -> None:
-        self.busy_bar.stop("Failed.")
-        self.status_label.setText(f"Failed: {message}")
-        QMessageBox.critical(self, "Motion correction failed", message)
-        self.commit_controls.set_apply_enabled(True)
-
-    def _commit(self) -> None:
-        if self._pending_result is None:
-            return
-        self.state.commit(self._pending_result["registered"], self._pending_step_label)
-        self.status_label.setText(f"Committed as pipeline step '{self._pending_step_label}'.")
-        self.commit_controls.set_commit_enabled(False)
-        self.data_changed.emit()

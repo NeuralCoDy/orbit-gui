@@ -17,6 +17,8 @@ import pyqtgraph as pg
 from movieslider.gui.movie_slider_widget import MovieSliderWidget
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
+from .movie_popout import show_movie_popout
+
 
 class StagePanel(QWidget):
     def __init__(self, before_title: str = "Before", after_title: str = "After", parent=None) -> None:
@@ -61,12 +63,4 @@ class StagePanel(QWidget):
         movie = self._movies[key]
         if movie is None:
             return
-        player = self._players[key]
-        if player is None:
-            player = MovieSliderWidget()
-            self._players[key] = player
-        player.show_movie(movie)
-        player.setWindowTitle(f"Movie Player - {self._titles[key]}")
-        player.show()
-        player.raise_()
-        player.activateWindow()
+        self._players[key] = show_movie_popout(self._players[key], movie, f"Movie Player - {self._titles[key]}")

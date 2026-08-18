@@ -1,6 +1,6 @@
 import numpy as np
 
-from orbit.normalization import normalize_movie, robust_std, summary_stats
+from orbit.normalization import normalize_movie, pixel_value_histogram, robust_std, summary_stats
 
 
 def test_robust_std_matches_std_for_normal_data():
@@ -66,3 +66,28 @@ def test_summary_stats_reports_expected_keys_and_values():
     assert stats["max"] == 4.0
     assert stats["mean"] == 2.5
     assert np.isclose(stats["std"], movie.std())
+
+
+def test_pixel_value_histogram_reports_correct_mean_and_median():
+    trace = np.array([1.0, 2.0, 3.0, 4.0, 100.0])
+    hist = pixel_value_histogram(trace)
+    assert np.isclose(hist["mean"], trace.mean())
+    assert np.isclose(hist["median"], np.median(trace))
+    assert len(hist["edges"]) == len(hist["counts"]) + 1
+    assert hist["counts"].sum() == trace.size
+
+
+def test_pixel_value_histogram_constant_trace_is_a_single_bin():
+    trace = np.full(10, 5.0)
+    hist = pixel_value_histogram(trace)
+    assert hist["mean"] == 5.0
+    assert hist["median"] == 5.0
+    assert hist["mode"] == 5.0
+    assert hist["counts"].sum() == trace.size
+
+
+def test_pixel_value_histogram_bin_count_matches_n_bins():
+    rng = np.random.default_rng(9)
+    trace = rng.standard_normal(500)
+    hist = pixel_value_histogram(trace, n_bins=15)
+    assert len(hist["counts"]) == 15

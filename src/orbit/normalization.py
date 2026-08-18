@@ -89,3 +89,17 @@ def summary_stats(movie: np.ndarray) -> dict[str, float]:
         "mean": float(movie.mean()),
         "std": float(movie.std()),
     }
+
+
+def pixel_value_histogram(trace: np.ndarray, n_bins: int = 20) -> dict:
+    """Binned histogram of one pixel's value distribution over time,
+    plus its mean/median/mode."""
+    trace = np.asarray(trace, dtype=float)
+    counts, edges = np.histogram(trace, bins=n_bins)
+    return {
+        "edges": edges,
+        "counts": counts,
+        "mean": float(trace.mean()),
+        "median": float(np.median(trace)),
+        "mode": float(_half_sample_mode_1d(trace)),
+    }

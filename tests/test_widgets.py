@@ -11,8 +11,10 @@ from orbitapp.widgets import (  # noqa: E402
     HeaderBar,
     ImageSlideshow,
     ParametersDialog,
+    QCPlotGrid,
     StagePanel,
     make_spinbox,
+    split_by_kind,
 )
 
 
@@ -293,3 +295,30 @@ def test_image_slideshow_set_stack_clears():
 
     show.set_stack(None)
     assert show.index_label.text() == "0 / 0"
+
+
+def test_split_by_kind_separates_peak_and_low_samples():
+    samples = [{"kind": "peak", "id": 1}, {"kind": "low", "id": 2}, {"kind": "peak", "id": 3}]
+    peaks, lows = split_by_kind(samples)
+    assert [s["id"] for s in peaks] == [1, 3]
+    assert [s["id"] for s in lows] == [2]
+
+
+def test_qc_plot_grid_one_plot_per_sample_fills_left_and_right_columns():
+    grid = QCPlotGrid("Signal", "Noise", n_rows=2, plots_per_sample=1)
+    assert len(grid.left_rows) == 2
+    assert all(len(plots) == 1 for plots in grid.left_rows + grid.right_rows)
+
+    calls = []
+    grid.fill([{"id": "p1"}, {"id": "p2"}], [{"id": "l1"}], lambda plots, sample: calls.append((len(plots), sample["id"])))
+    assert calls == [(1, "p1"), (1, "p2"), (1, "l1")]
+
+
+def test_qc_plot_grid_multiple_plots_per_sample():
+    grid = QCPlotGrid("Signal", "Noise", n_rows=1, plots_per_sample=2, sub_labels=["Before", "After"])
+    assert len(grid.left_rows[0]) == 2
+    assert len(grid.right_rows[0]) == 2
+
+    calls = []
+    grid.fill([{"id": "p1"}], [{"id": "l1"}], lambda plots, sample: calls.append((len(plots), sample["id"])))
+    assert calls == [(2, "p1"), (2, "l1")]

@@ -1,5 +1,5 @@
 """Reusable Apply/Commit button pair for any stage that transforms the
-movie (motion correction now; normalization, demixing, ... later).
+movie (motion correction, denoising, normalization, ...).
 Running a stage ("Apply") never touches the shared active dataset by
 itself -- it only produces a candidate result for that tab to preview.
 The change only becomes part of the pipeline once the user explicitly

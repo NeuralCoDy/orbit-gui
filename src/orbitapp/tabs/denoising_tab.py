@@ -6,34 +6,31 @@ should raise it, since it suppresses spatially-independent noise while
 preserving spatially-coherent signal) are shown alongside the images.
 
 Same Apply-produces-a-candidate / Commit-makes-it-active pattern as
-Motion Correction -- see that tab's module docstring.
+every StageTab -- see that module's docstring.
 """
 
 from __future__ import annotations
 
 import numpy as np
-import pyqtgraph as pg
-from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QComboBox, QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton
 
 from orbit.denoising import (
     denoise_gaussian,
     denoise_median,
     denoise_wavelet_space,
     denoise_wavelet_time,
-    qc_trace_samples,
     residual_energy_fraction,
 )
 from orbit.projections import local_correlation_projection
+from orbit.qc_traces import qc_trace_samples
 
 from ..state import AppState
-from ..widgets import BusyBar, CommitControls, ParametersDialog, StagePanel, make_spinbox
-from ..workers import FunctionWorker, run_worker
+from ..widgets import ParametersDialog, QCPlotGrid, add_location_markers, make_spinbox, split_by_kind
+from ..workers import run_worker
+from .stage_tab import StageTab
 
 _WAVELETS = ("sym4", "db4", "haar", "coif2")
 _THRESHOLD_METHODS = ("bayes", "universal")
-_N_PEAK_TRACE_PLOTS = 2  # correlation-peak ("signal") locations
-_N_LOW_TRACE_PLOTS = 2  # low-correlation ("noise") locations
 
 # (combo box label, dispatch key) -- key is deliberately not called
 # "method", since the wavelet threshold method ("bayes"/"universal") is
@@ -61,6 +58,15 @@ _GROUP_BY_ALGORITHM = {
     "gaussian": "gaussian",
     "median": "median",
 }
+# Pipeline-breadcrumb label per algorithm -- specific enough to tell
+# denoising methods apart in the header ("Load > Gaussian Denoising >
+# ...") rather than a single generic "Denoise" for all of them.
+_PIPELINE_LABELS = {
+    "wavelet_time": "Wavelet Denoising (Temporal)",
+    "wavelet_space": "Wavelet Denoising (Spatial)",
+    "gaussian": "Gaussian Denoising",
+    "median": "Median Filtering",
+}
 
 
 def _run_and_assess(movie: np.ndarray, algorithm: str, **kwargs) -> dict:
@@ -75,18 +81,20 @@ def _run_and_assess(movie: np.ndarray, algorithm: str, **kwargs) -> dict:
     }
 
 
-class DenoisingTab(QWidget):
-    data_changed = Signal()  # emitted only on Commit, not on Apply
+def _plot_trace(plots, sample: dict) -> None:
+    plot = plots[0]
+    plot.plot(sample["before"], pen="r", name="Before")
+    plot.plot(sample["after"], pen="g", name="After")
+
+
+class DenoisingTab(StageTab):
+    _stage_name = "Denoising"
+    _result_key = "denoised"
 
     def __init__(self, state: AppState, parent=None) -> None:
-        super().__init__(parent)
-        self.state = state
-        self.worker: FunctionWorker | None = None
-        self._input_movie: np.ndarray | None = None
-        self._pending_result: dict | None = None
+        super().__init__(state, apply_label="Apply Denoising", parent=parent)
 
-        layout = QVBoxLayout(self)
-
+    def _build_controls_row(self) -> QHBoxLayout:
         self.method_combo = QComboBox()
         self.method_combo.addItems([label for label, _key in _ALGORITHMS])
         self.method_combo.currentTextChanged.connect(self._update_visible_params)
@@ -111,11 +119,6 @@ class DenoisingTab(QWidget):
         self.params_dialog.add_row("time_window", self.median_time_spin, group="median")
         self._update_visible_params(self.method_combo.currentText())
 
-        self.commit_controls = CommitControls(apply_label="Apply Denoising")
-        self.commit_controls.set_apply_enabled(False)
-        self.commit_controls.apply_clicked.connect(self._apply)
-        self.commit_controls.commit_clicked.connect(self._commit)
-
         controls_row = QHBoxLayout()
         controls_row.addWidget(QLabel("Method:"))
         controls_row.addWidget(self.method_combo)
@@ -124,48 +127,15 @@ class DenoisingTab(QWidget):
         controls_row.addWidget(self.params_btn)
         controls_row.addWidget(self.commit_controls)
         controls_row.addStretch()
-        layout.addLayout(controls_row)
+        return controls_row
 
-        self.busy_bar = BusyBar()
-        layout.addWidget(self.busy_bar)
-
-        self.status_label = QLabel("No data loaded.")
-        layout.addWidget(self.status_label)
-
-        self.panel = StagePanel(before_title="Raw (mean projection)", after_title="Candidate (mean projection)")
-        layout.addWidget(self.panel)
-
+    def _build_metrics(self) -> None:
         self.metrics_label = QLabel("Run denoising to see quality metrics.")
         self.panel.add_metric_widget(self.metrics_label)
 
-        # Red X's on the Raw panel mark exactly which pixels these traces
-        # come from -- titling each small trace plot made them unreadable
-        # unless the window was huge, so the location lives on the image instead.
-        self._location_markers = pg.ScatterPlotItem(symbol="x", size=14, pen=pg.mkPen("r", width=2), brush=None)
-        self.panel.before_view.getView().addItem(self._location_markers)
-
-        traces_container = QWidget()
-        traces_layout = QGridLayout(traces_container)
-        traces_layout.addWidget(QLabel("Example signal pixels"), 0, 0)
-        traces_layout.addWidget(QLabel("Example noise pixels"), 0, 1)
-        self.peak_trace_plots = self._make_trace_plots(_N_PEAK_TRACE_PLOTS)
-        self.low_trace_plots = self._make_trace_plots(_N_LOW_TRACE_PLOTS)
-        for i, plot in enumerate(self.peak_trace_plots):
-            traces_layout.addWidget(plot, 1 + i, 0)
-        for i, plot in enumerate(self.low_trace_plots):
-            traces_layout.addWidget(plot, 1 + i, 1)
-        self.panel.add_metric_widget(traces_container)
-
-    @staticmethod
-    def _make_trace_plots(count: int) -> list[pg.PlotWidget]:
-        plots = []
-        for _ in range(count):
-            plot = pg.PlotWidget()
-            plot.addLegend()
-            plot.setLabel("bottom", "frame")
-            plot.setLabel("left", "intensity")
-            plots.append(plot)
-        return plots
+        self._location_markers = add_location_markers(self.panel.before_view)
+        self.trace_grid = QCPlotGrid("Example signal pixels", "Example noise pixels", xlabel="frame", ylabel="intensity")
+        self.panel.add_metric_widget(self.trace_grid)
 
     def _update_visible_params(self, label: str) -> None:
         """Only the fields relevant to the selected algorithm are shown
@@ -174,28 +144,12 @@ class DenoisingTab(QWidget):
         group = _GROUP_BY_ALGORITHM[_ALGORITHM_KEYS[label]]
         self.params_dialog.show_only_group(group)
 
-    def on_data_loaded(self) -> None:
-        movie = self.state.active_data()
-        self.commit_controls.set_apply_enabled(movie is not None)
-        self.commit_controls.set_commit_enabled(False)
-        self._pending_result = None
+    def _on_data_reset(self) -> None:
         self._location_markers.clear()
-        if movie is not None:
-            self.panel.before_view.setImage(movie.mean(axis=2))
-            self.panel.set_before_movie(movie)
-            self.status_label.setText(f"Ready. shape={movie.shape}")
 
-    def _apply(self) -> None:
-        movie = self.state.active_data()
-        if movie is None:
-            QMessageBox.warning(self, "No data", "Load data on the Load tab first.")
-            return
-
-        self._input_movie = movie
-        self.commit_controls.set_apply_enabled(False)
-        self.commit_controls.set_commit_enabled(False)
-
+    def _start_worker(self, movie: np.ndarray) -> None:
         algorithm = _ALGORITHM_KEYS[self.method_combo.currentText()]
+        self._pending_step_label = _PIPELINE_LABELS[algorithm]
         if algorithm in ("wavelet_time", "wavelet_space"):
             kwargs = dict(
                 wavelet=self.wavelet_combo.currentText(),
@@ -214,9 +168,7 @@ class DenoisingTab(QWidget):
             _run_and_assess, movie, algorithm, on_success=self._on_finished, on_failure=self._on_failed, **kwargs,
         )
 
-    def _on_finished(self, result: dict) -> None:
-        self._pending_result = result
-
+    def _render_result(self, result: dict) -> None:
         self.panel.before_view.setImage(self._input_movie.mean(axis=2))
         self.panel.after_view.setImage(result["denoised"].mean(axis=2))
         self.panel.set_after_movie(result["denoised"])
@@ -228,37 +180,6 @@ class DenoisingTab(QWidget):
         )
 
         qc_traces = result["qc_traces"]
-        self._location_markers.setData(
-            [s["row"] + 0.5 for s in qc_traces], [s["col"] + 0.5 for s in qc_traces]
-        )
-
-        peak_samples = [s for s in qc_traces if s["kind"] == "peak"]
-        low_samples = [s for s in qc_traces if s["kind"] == "low"]
-        for plots, samples in ((self.peak_trace_plots, peak_samples), (self.low_trace_plots, low_samples)):
-            for plot in plots:
-                plot.clear()
-            for plot, sample in zip(plots, samples):
-                plot.plot(sample["before"], pen="r", name="Before")
-                plot.plot(sample["after"], pen="g", name="After")
-
-        self.busy_bar.stop("")
-        self.status_label.setText(
-            f"Candidate ready (shape={result['denoised'].shape}). "
-            "Click 'Commit to Active Dataset' to keep it, or Apply again to discard and retry."
-        )
-        self.commit_controls.set_apply_enabled(True)
-        self.commit_controls.set_commit_enabled(True)
-
-    def _on_failed(self, message: str) -> None:
-        self.busy_bar.stop("Failed.")
-        self.status_label.setText(f"Failed: {message}")
-        QMessageBox.critical(self, "Denoising failed", message)
-        self.commit_controls.set_apply_enabled(True)
-
-    def _commit(self) -> None:
-        if self._pending_result is None:
-            return
-        self.state.commit(self._pending_result["denoised"], "Denoise")
-        self.status_label.setText("Committed as pipeline step 'Denoise'.")
-        self.commit_controls.set_commit_enabled(False)
-        self.data_changed.emit()
+        self._location_markers.setData([s["row"] + 0.5 for s in qc_traces], [s["col"] + 0.5 for s in qc_traces])
+        peak_samples, low_samples = split_by_kind(qc_traces)
+        self.trace_grid.fill(peak_samples, low_samples, _plot_trace)

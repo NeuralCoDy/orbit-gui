@@ -13,6 +13,8 @@ import pyqtgraph as pg
 from movieslider.gui.movie_slider_widget import MovieSliderWidget
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
+from .movie_popout import show_movie_popout
+
 
 class ImageSlideshow(QWidget):
     def __init__(self, parent=None) -> None:
@@ -74,10 +76,4 @@ class ImageSlideshow(QWidget):
     def _view_large(self) -> None:
         if self._images is None:
             return
-        if self._player is None:
-            self._player = MovieSliderWidget()
-        self._player.show_movie(self._images)
-        self._player.setWindowTitle("PC Stack Viewer")
-        self._player.show()
-        self._player.raise_()
-        self._player.activateWindow()
+        self._player = show_movie_popout(self._player, self._images, "PC Stack Viewer")

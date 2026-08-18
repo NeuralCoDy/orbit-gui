@@ -11,7 +11,6 @@ from .denoising import (
     denoise_median,
     denoise_wavelet_space,
     denoise_wavelet_time,
-    qc_trace_samples,
     residual_energy_fraction,
 )
 from .motion_correction import motion_correct, patch_motion_correct, rigid_motion_correct
@@ -21,7 +20,7 @@ from .motion_metrics import (
     mean_max_intensity_difference,
     spatiotemporal_svd,
 )
-from .normalization import normalize_movie, robust_std, summary_stats
+from .normalization import normalize_movie, pixel_value_histogram, robust_std, summary_stats
 from .patchwarp import patchwarp_motion_correct
 from .projections import (
     fano_factor_projection,
@@ -31,6 +30,7 @@ from .projections import (
     mode_projection,
     variance_projection,
 )
+from .qc_traces import qc_trace_samples
 
 __all__ = [
     "mean_projection",
@@ -54,6 +54,7 @@ __all__ = [
     "qc_trace_samples",
     "residual_energy_fraction",
     "normalize_movie",
+    "pixel_value_histogram",
     "robust_std",
     "summary_stats",
 ]
