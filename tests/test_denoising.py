@@ -1,0 +1,63 @@
+import numpy as np
+
+from orbit.denoising import denoise_wavelet_space, denoise_wavelet_time, residual_energy_fraction
+
+
+def _noisy_step_movie(height=16, width=16, n_frames=64, seed=0):
+    rng = np.random.default_rng(seed)
+    t = np.linspace(0, 1, n_frames)
+    clean_trace = (t > 0.5).astype(float)  # a simple step, same for every pixel
+    movie = np.broadcast_to(clean_trace, (height, width, n_frames)).copy()
+    movie += 0.3 * rng.standard_normal(movie.shape)
+    return movie, np.broadcast_to(clean_trace, (height, width, n_frames))
+
+
+def test_denoise_wavelet_time_reduces_noise_relative_to_clean_signal():
+    movie, clean = _noisy_step_movie()
+    denoised = denoise_wavelet_time(movie, wavelet="sym4", level=3, method="bayes")
+
+    assert denoised.shape == movie.shape
+    noisy_error = np.mean((movie - clean) ** 2)
+    denoised_error = np.mean((denoised - clean) ** 2)
+    assert denoised_error < noisy_error
+
+
+def test_denoise_wavelet_time_universal_method_runs():
+    movie, _clean = _noisy_step_movie(n_frames=32)
+    denoised = denoise_wavelet_time(movie, wavelet="db4", level=2, method="universal")
+    assert denoised.shape == movie.shape
+    assert np.all(np.isfinite(denoised))
+
+
+def test_denoise_wavelet_space_reduces_noise():
+    rng = np.random.default_rng(1)
+    height, width, n_frames = 32, 32, 5
+    yy, xx = np.meshgrid(np.arange(height), np.arange(width), indexing="ij")
+    clean_frame = ((yy > height / 2)).astype(float)
+    clean = np.broadcast_to(clean_frame[:, :, None], (height, width, n_frames))
+    movie = clean + 0.3 * rng.standard_normal((height, width, n_frames))
+
+    denoised = denoise_wavelet_space(movie, wavelet="sym4", level=2, method="bayes")
+
+    assert denoised.shape == movie.shape
+    noisy_error = np.mean((movie - clean) ** 2)
+    denoised_error = np.mean((denoised - clean) ** 2)
+    assert denoised_error < noisy_error
+
+
+def test_residual_energy_fraction_zero_for_identical_movies():
+    rng = np.random.default_rng(2)
+    movie = rng.random((5, 5, 10))
+    assert residual_energy_fraction(movie, movie) == 0.0
+
+
+def test_residual_energy_fraction_one_when_everything_is_removed():
+    rng = np.random.default_rng(3)
+    movie = rng.random((5, 5, 10)) + 1.0  # avoid a zero-energy "before"
+    assert residual_energy_fraction(movie, np.zeros_like(movie)) == 1.0
+
+
+def test_residual_energy_fraction_partial_removal():
+    movie = np.ones((2, 2, 5))
+    half = movie * 0.5
+    assert np.isclose(residual_energy_fraction(movie, half), 0.25)

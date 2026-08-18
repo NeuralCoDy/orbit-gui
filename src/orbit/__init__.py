@@ -6,6 +6,7 @@ every stage and every metric is a standalone, independently testable
 function, called by the GUI rather than implemented inside it.
 """
 
+from .denoising import denoise_wavelet_space, denoise_wavelet_time, residual_energy_fraction
 from .motion_correction import motion_correct, patch_motion_correct, rigid_motion_correct
 from .motion_metrics import (
     enhanced_correlation_coefficient,
@@ -13,6 +14,7 @@ from .motion_metrics import (
     mean_max_intensity_difference,
     spatiotemporal_svd,
 )
+from .normalization import normalize_movie, robust_std, summary_stats
 from .patchwarp import patchwarp_motion_correct
 from .projections import (
     fano_factor_projection,
@@ -38,4 +40,10 @@ __all__ = [
     "enhanced_correlation_coefficient",
     "mean_correlation_to_reference",
     "spatiotemporal_svd",
+    "denoise_wavelet_time",
+    "denoise_wavelet_space",
+    "residual_energy_fraction",
+    "normalize_movie",
+    "robust_std",
+    "summary_stats",
 ]
