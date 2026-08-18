@@ -30,23 +30,22 @@ from orbit.motion_metrics import (
 )
 
 from ..state import AppState
-from ..widgets import BusyBar, CommitControls, ParametersDialog, StagePanel, make_spinbox
+from ..widgets import BusyBar, CommitControls, ImageSlideshow, ParametersDialog, StagePanel, make_spinbox
 from ..workers import FunctionWorker, run_worker
 
-_N_PC_MAPS = 3
-_N_SVD_COMPONENTS = 10
+_DEFAULT_N_COMPONENTS = 20
 
 # Short, pipeline-breadcrumb-friendly names per method -- "Patch Warp"
 # matches how the user refers to it, not the combo box's longer label.
 _METHOD_LABELS = {"rigid": "Rigid", "patch": "Patch-based", "patchwarp": "Patch Warp"}
 
 
-def _run_and_assess(movie: np.ndarray, method: str, **kwargs) -> dict:
+def _run_and_assess(movie: np.ndarray, method: str, n_components: int, **kwargs) -> dict:
     """Runs off the GUI thread: registration plus every metric needed to
     populate the tab, packaged into one dict."""
     registered, shifts, template, initial_template = motion_correct(movie, method=method, **kwargs)
-    sv_before, _pc_before = spatiotemporal_svd(movie, n_components=_N_SVD_COMPONENTS)
-    sv_after, pc_after = spatiotemporal_svd(registered, n_components=_N_SVD_COMPONENTS)
+    sv_before, _pc_before = spatiotemporal_svd(movie, n_components=n_components)
+    sv_after, pc_after = spatiotemporal_svd(registered, n_components=n_components)
     return {
         "registered": registered,
         "shifts": shifts,
@@ -90,6 +89,7 @@ class MotionCorrectionTab(QWidget):
         self.overlap_frac_spin = make_spinbox(0.0, 0.5, 0.1, step=0.05, decimal=True)
         self.ecc_iterations_spin = make_spinbox(1, 500, 30)
         self.pyramid_levels_spin = make_spinbox(1, 4, 1)
+        self.pc_count_spin = make_spinbox(1, 100, _DEFAULT_N_COMPONENTS)
 
         self.params_dialog = ParametersDialog(title="Motion Correction Parameters", parent=self)
         self.params_dialog.add_row("max_shift (rigid stage, all methods)", self.max_shift_spin)
@@ -100,6 +100,7 @@ class MotionCorrectionTab(QWidget):
         self.params_dialog.add_row("overlap_frac (PatchWarp only)", self.overlap_frac_spin)
         self.params_dialog.add_row("ecc_iterations (PatchWarp only)", self.ecc_iterations_spin)
         self.params_dialog.add_row("pyramid_levels (PatchWarp only)", self.pyramid_levels_spin)
+        self.params_dialog.add_row("number of spatial PCs (spectrum + slideshow)", self.pc_count_spin)
 
         self.commit_controls = CommitControls(apply_label="Apply Motion Correction")
         self.commit_controls.set_apply_enabled(False)
@@ -130,23 +131,15 @@ class MotionCorrectionTab(QWidget):
 
         self.sv_plot = pg.PlotWidget(title="Singular value spectrum (tighter after = better)")
         self.sv_plot.addLegend()
-        self.sv_plot.setLabel("bottom", "component")
-        self.sv_plot.setLabel("left", "singular value")
+        self.sv_plot.setLabel("bottom", "singular value number")
+        self.sv_plot.setLabel("left", "normalized singular value")
         self.panel.add_metric_widget(self.sv_plot)
 
         pc_container = QWidget()
         pc_layout = QVBoxLayout(pc_container)
         pc_layout.addWidget(QLabel("Top spatial PCs (candidate) -- halos/crescents mean residual motion"))
-        pc_row = QHBoxLayout()
-        self.pc_views: list[pg.ImageView] = []
-        for _ in range(_N_PC_MAPS):
-            view = pg.ImageView()
-            view.ui.histogram.hide()
-            view.ui.roiBtn.hide()
-            view.ui.menuBtn.hide()
-            pc_row.addWidget(view)
-            self.pc_views.append(view)
-        pc_layout.addLayout(pc_row)
+        self.pc_slideshow = ImageSlideshow()
+        pc_layout.addWidget(self.pc_slideshow)
         self.panel.add_metric_widget(pc_container)
 
     def on_data_loaded(self) -> None:
@@ -157,6 +150,7 @@ class MotionCorrectionTab(QWidget):
         self._pending_step_label = None
         if movie is not None:
             self.panel.before_view.setImage(movie.mean(axis=2))
+            self.panel.set_before_movie(movie)
             self.status_label.setText(f"Ready. shape={movie.shape}")
 
     def _apply(self) -> None:
@@ -200,6 +194,7 @@ class MotionCorrectionTab(QWidget):
                 ecc_iterations=self.ecc_iterations_spin.value(),
                 pyramid_levels=self.pyramid_levels_spin.value(),
             )
+        kwargs["n_components"] = self.pc_count_spin.value()
 
         self.worker = run_worker(
             self.busy_bar, "Running motion correction and metrics (this can take a while)...",
@@ -211,19 +206,23 @@ class MotionCorrectionTab(QWidget):
 
         self.panel.before_view.setImage(self._input_movie.mean(axis=2))
         self.panel.after_view.setImage(result["registered"].mean(axis=2))
+        self.panel.set_after_movie(result["registered"])
 
         self.metrics_label.setText(
-            f"mMD: {result['mmd']:.2f}    "
-            f"self-mCM before -> after: {result['mcm_before']:.3f} -> {result['mcm_after']:.3f}    "
+            f"mMD: {result['mmd']:.2f}\n"
+            f"self-mCM before -> after: {result['mcm_before']:.3f} -> {result['mcm_after']:.3f}\n"
             f"ECC(initial -> final template): {result['ecc']:.3f}"
         )
 
+        # Both curves normalized to "before"'s own peak, so "after" tightening
+        # (or not) reads directly off the same 0-1 scale "before" is plotted on.
+        sv_before = result["sv_before"]
+        norm = sv_before.max() if sv_before.max() > 0 else 1.0
         self.sv_plot.clear()
-        self.sv_plot.plot(result["sv_before"], pen="r", name="Before")
-        self.sv_plot.plot(result["sv_after"], pen="g", name="After")
+        self.sv_plot.plot(sv_before / norm, pen="r", name="Before")
+        self.sv_plot.plot(result["sv_after"] / norm, pen="g", name="After")
 
-        for i, view in enumerate(self.pc_views):
-            view.setImage(result["pc_after"][:, :, i])
+        self.pc_slideshow.set_stack(result["pc_after"])
 
         self.busy_bar.stop("")
         self.status_label.setText(

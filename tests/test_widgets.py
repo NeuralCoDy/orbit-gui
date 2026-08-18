@@ -9,6 +9,7 @@ from orbitapp.widgets import (  # noqa: E402
     BusyBar,
     CommitControls,
     HeaderBar,
+    ImageSlideshow,
     ParametersDialog,
     StagePanel,
     make_spinbox,
@@ -50,6 +51,28 @@ def test_stage_panel_has_before_after_image_views():
     movie_frame = np.zeros((10, 10))
     panel.before_view.setImage(movie_frame)
     panel.after_view.setImage(movie_frame)
+
+
+def test_stage_panel_play_movie_is_a_noop_without_a_movie_set():
+    panel = StagePanel()
+    panel._play_movie("before")  # no movie set yet -- must not raise or create a player
+    assert panel._players["before"] is None
+
+
+def test_stage_panel_play_movie_opens_a_player_for_the_right_panel():
+    panel = StagePanel(before_title="Raw", after_title="Corrected")
+    before_movie = np.zeros((5, 5, 3))
+    after_movie = np.ones((5, 5, 3))
+    panel.set_before_movie(before_movie)
+    panel.set_after_movie(after_movie)
+
+    panel._play_movie("before")
+    assert panel._players["before"] is not None
+    assert panel._players["after"] is None
+    assert panel._players["before"].windowTitle() == "Movie Player - Raw"
+
+    panel._play_movie("after")
+    assert panel._players["after"].windowTitle() == "Movie Player - Corrected"
 
 
 def test_stage_panel_metrics_row_accepts_widgets():
@@ -158,3 +181,56 @@ def test_make_spinbox_decimal_with_step():
     box = make_spinbox(0.0, 0.5, 0.1, step=0.05, decimal=True)
     assert isinstance(box, QDoubleSpinBox)
     assert (box.minimum(), box.maximum(), box.value(), box.singleStep()) == (0.0, 0.5, 0.1, 0.05)
+
+
+def test_image_slideshow_empty_by_default():
+    show = ImageSlideshow()
+    assert show.index_label.text() == "0 / 0"
+
+
+def test_image_slideshow_set_stack_shows_first_frame():
+    show = ImageSlideshow()
+    stack = np.arange(2 * 3 * 5).reshape(2, 3, 5)
+    show.set_stack(stack)
+    assert show.index_label.text() == "1 / 5"
+
+
+def test_image_slideshow_next_prev_wrap_around():
+    show = ImageSlideshow()
+    show.set_stack(np.zeros((2, 2, 3)))
+
+    show._next()
+    show._next()
+    assert show.index_label.text() == "3 / 3"
+    show._next()
+    assert show.index_label.text() == "1 / 3"  # wrapped past the end
+
+    show._prev()
+    assert show.index_label.text() == "3 / 3"  # wrapped past the start
+
+
+def test_image_slideshow_view_large_is_a_noop_without_a_stack():
+    show = ImageSlideshow()
+    show._view_large()  # no stack set yet -- must not raise or create a player
+    assert show._player is None
+
+
+def test_image_slideshow_view_large_opens_the_full_stack_in_a_player():
+    show = ImageSlideshow()
+    stack = np.zeros((5, 5, 4))
+    show.set_stack(stack)
+
+    show._view_large()
+
+    assert show._player is not None
+    assert show._player.windowTitle() == "PC Stack Viewer"
+    assert show._player.state.total_frames == 4
+
+
+def test_image_slideshow_set_stack_clears():
+    show = ImageSlideshow()
+    show.set_stack(np.zeros((2, 2, 4)))
+    assert show.index_label.text() == "1 / 4"
+
+    show.set_stack(None)
+    assert show.index_label.text() == "0 / 0"
