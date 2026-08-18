@@ -15,6 +15,7 @@ import numpy as np
 from movieslider.gui.movie_slider_widget import MovieSliderWidget
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -96,9 +97,17 @@ class LoadTab(QWidget):
     def _on_loaded(self, movie: np.ndarray) -> None:
         path = self._pending_path
         self.state.load(path, movie)
-
         self.info_label.setText(format_movie_summary(path, movie))
+
+        # show_movie() computes a full pixel histogram for its contrast
+        # controls -- a genuine ~seconds-scale cost on a large movie, and
+        # it has to run synchronously here (Qt widgets aren't safe to
+        # touch off the GUI thread), so at least say what's happening
+        # rather than freezing silently after "Loading" disappears.
+        self.busy_bar.set_message(f"Rendering movie viewer for {path}...")
+        QApplication.processEvents()
         self.movie_view.show_movie(movie)
+
         self.busy_bar.stop(f"Loaded {path}.")
         for btn in self._browse_buttons:
             btn.setEnabled(True)

@@ -50,6 +50,12 @@ class BusyBar(QWidget):
         self._elapsed_ms = 0
         self._timer.start(_TICK_MS)
 
+    def set_message(self, message: str) -> None:
+        """Updates the status text only, leaving the progress bar's
+        visibility/animation running -- for a multi-phase operation that
+        should read as one continuous wait rather than restarting."""
+        self.label.setText(message)
+
     def _tick(self) -> None:
         self._elapsed_ms += _TICK_MS
         elapsed_s = self._elapsed_ms / 1000.0

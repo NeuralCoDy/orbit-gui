@@ -7,11 +7,9 @@ from __future__ import annotations
 import sys
 import time
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication, QMainWindow, QSplashScreen, QTabWidget, QVBoxLayout, QWidget
 
-from .assets import LOGO_PATH
+from .assets import LOGO_PATH, load_logo_on_black
 from .format import format_header_summary
 from .state import AppState
 from .tabs import DenoisingTab, LoadTab, MotionCorrectionTab, NormalizationTab, ProjectionsTab
@@ -98,8 +96,7 @@ def run() -> None:
 
     splash = None
     if LOGO_PATH.exists():
-        pixmap = QPixmap(str(LOGO_PATH)).scaledToHeight(_SPLASH_HEIGHT_PX, Qt.TransformationMode.SmoothTransformation)
-        splash = QSplashScreen(pixmap)
+        splash = QSplashScreen(load_logo_on_black(_SPLASH_HEIGHT_PX))
         splash.show()
         app.processEvents()
 

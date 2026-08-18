@@ -7,24 +7,33 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QRect, Qt
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QPainter, QPixmap
 
 # src/orbitapp/assets.py -> orbitapp/ -> src/ -> repo root
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 LOGO_PATH = _REPO_ROOT / "imgs" / "orbitlogoclean.png"
 
-# The full logo is a tall portrait image (axon + soma + ring, a small
-# protein-structure motif, and long dendrite branches below) -- too tall
-# to read as a small corner icon. This crop keeps just the recognizable
-# ring-around-a-soma "orbit" mark for header use; the splash screen uses
-# the full image instead, where the portrait aspect works fine.
-_HEADER_ICON_CROP = QRect(0, 550, 1320, 1050)
+
+def load_logo(height_px: int) -> QPixmap:
+    """The full logo image (background transparent, per the source PNG),
+    scaled to ``height_px`` tall -- shared by the splash screen and the
+    header's corner branding so both agree on how the image is loaded/
+    scaled. Fine as-is in the header, which already sits on the dark
+    theme's black background; see load_logo_on_black for the splash
+    screen, which needs its own opaque backdrop."""
+    return QPixmap(str(LOGO_PATH)).scaledToHeight(height_px, Qt.TransformationMode.SmoothTransformation)
 
 
-def load_header_icon(height_px: int) -> QPixmap:
-    """The logo, cropped to its ring+soma mark and scaled to
-    ``height_px`` tall -- for the header's corner branding."""
-    full = QPixmap(str(LOGO_PATH))
-    cropped = full.copy(_HEADER_ICON_CROP)
-    return cropped.scaledToHeight(height_px, Qt.TransformationMode.SmoothTransformation)
+def load_logo_on_black(height_px: int) -> QPixmap:
+    """The logo composited onto an opaque black background, sized to
+    exactly fit the (scaled) logo -- for the splash screen, whose own
+    widget background would otherwise show through the logo's
+    transparent areas instead of black."""
+    logo = load_logo(height_px)
+    canvas = QPixmap(logo.size())
+    canvas.fill(Qt.GlobalColor.black)
+    painter = QPainter(canvas)
+    painter.drawPixmap(0, 0, logo)
+    painter.end()
+    return canvas

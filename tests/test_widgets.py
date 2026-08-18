@@ -110,6 +110,20 @@ def test_busy_bar_starts_hidden_and_toggles_on_start_stop():
     assert bar.bar.isVisibleTo(bar) is False
 
 
+def test_busy_bar_set_message_updates_text_without_resetting_progress():
+    bar = BusyBar()
+    bar.start("Loading...")
+    bar._tick()
+    bar._tick()
+    value_before = bar.bar.value()
+
+    bar.set_message("Rendering...")
+
+    assert bar.label.text() == "Rendering..."
+    assert bar.bar.value() == value_before  # unchanged -- still the same continuous operation
+    assert bar.bar.isVisibleTo(bar) is True
+
+
 def test_busy_bar_fills_over_time_but_never_reaches_the_ceiling_while_running():
     bar = BusyBar()
     bar.start("Working...")
