@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orbit"
+version = "0.1.0"
+description = "Assessment-forward analysis pipeline and GUI for functional neural optical imaging"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Adam Charles" }]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "scikit-image>=0.21",
+    "opencv-python-headless>=4.8",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+native = ["pybind11>=2.11"]
+gui = [
+    "PySide6>=6.5",
+    "pyqtgraph>=0.13",
+    "tifffile>=2023.7",
+    "h5py>=3.9",
+    "roiapp>=0.1.0",
+]
+
+[project.scripts]
+orbitapp = "orbitapp.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
