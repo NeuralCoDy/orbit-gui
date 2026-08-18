@@ -1,9 +1,9 @@
-"""Denoising tab: wavelet-shrinkage denoising, temporal (per-pixel trace)
-or spatial (per-frame), via orbit.denoising. Residual energy fraction
-(how much signal was treated as noise and removed) and the change in
-mean local-pixel-correlation (denoising should raise it, since it
-suppresses spatially-independent noise while preserving spatially-
-coherent signal) are shown alongside the images.
+"""Denoising tab: wavelet shrinkage (temporal or spatial), Gaussian
+filtering (temporal or spatial), or median filtering, via orbit.denoising.
+Residual energy fraction (how much signal was treated as noise and
+removed) and the change in mean local-pixel-correlation (denoising
+should raise it, since it suppresses spatially-independent noise while
+preserving spatially-coherent signal) are shown alongside the images.
 
 Same Apply-produces-a-candidate / Commit-makes-it-active pattern as
 Motion Correction -- see that tab's module docstring.
@@ -15,7 +15,14 @@ import numpy as np
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget
 
-from orbit.denoising import denoise_wavelet_space, denoise_wavelet_time, residual_energy_fraction
+from orbit.denoising import (
+    denoise_gaussian_space,
+    denoise_gaussian_time,
+    denoise_median,
+    denoise_wavelet_space,
+    denoise_wavelet_time,
+    residual_energy_fraction,
+)
 from orbit.projections import local_correlation_projection
 
 from ..state import AppState
@@ -25,14 +32,30 @@ from ..workers import FunctionWorker, run_worker
 _WAVELETS = ("sym4", "db4", "haar", "coif2")
 _THRESHOLD_METHODS = ("bayes", "universal")
 
+# (combo box label, dispatch key) -- key is deliberately not called
+# "method", since the wavelet threshold method ("bayes"/"universal") is
+# itself passed as a same-named kwarg; a name collision there previously
+# raised a TypeError on every denoise run.
+_ALGORITHMS = (
+    ("Wavelet - Temporal (per pixel)", "wavelet_time"),
+    ("Wavelet - Spatial (per frame)", "wavelet_space"),
+    ("Gaussian - Temporal", "gaussian_time"),
+    ("Gaussian - Spatial", "gaussian_space"),
+    ("Median Filter", "median"),
+)
+_ALGORITHM_KEYS = dict(_ALGORITHMS)
+_DENOISE_FUNCS = {
+    "wavelet_time": denoise_wavelet_time,
+    "wavelet_space": denoise_wavelet_space,
+    "gaussian_time": denoise_gaussian_time,
+    "gaussian_space": denoise_gaussian_space,
+    "median": denoise_median,
+}
 
-def _run_and_assess(movie: np.ndarray, domain: str, **kwargs) -> dict:
-    """Runs off the GUI thread. ``domain`` ("time"/"space") picks which
-    denoiser; kept out of ``kwargs`` since the wavelet threshold method
-    ("bayes"/"universal") is itself passed as a ``method`` kwarg -- same
-    name, different axis, would otherwise collide."""
-    denoise_fn = denoise_wavelet_time if domain == "time" else denoise_wavelet_space
-    denoised = denoise_fn(movie, **kwargs)
+
+def _run_and_assess(movie: np.ndarray, algorithm: str, **kwargs) -> dict:
+    """Runs off the GUI thread."""
+    denoised = _DENOISE_FUNCS[algorithm](movie, **kwargs)
     return {
         "denoised": denoised,
         "residual_energy_fraction": residual_energy_fraction(movie, denoised),
@@ -54,18 +77,24 @@ class DenoisingTab(QWidget):
         layout = QVBoxLayout(self)
 
         self.method_combo = QComboBox()
-        self.method_combo.addItems(["Wavelet - Temporal (per pixel)", "Wavelet - Spatial (per frame)"])
+        self.method_combo.addItems([label for label, _key in _ALGORITHMS])
 
         self.wavelet_combo = QComboBox()
         self.wavelet_combo.addItems(_WAVELETS)
         self.level_spin = make_spinbox(1, 10, 4)
         self.threshold_combo = QComboBox()
         self.threshold_combo.addItems(_THRESHOLD_METHODS)
+        self.gaussian_sigma_spin = make_spinbox(0.1, 50.0, 2.0, step=0.5, decimal=True)
+        self.median_space_spin = make_spinbox(1, 51, 3)
+        self.median_time_spin = make_spinbox(1, 51, 1)
 
         self.params_dialog = ParametersDialog(title="Denoising Parameters", parent=self)
-        self.params_dialog.add_row("wavelet", self.wavelet_combo)
-        self.params_dialog.add_row("level", self.level_spin)
-        self.params_dialog.add_row("threshold method", self.threshold_combo)
+        self.params_dialog.add_row("wavelet (Wavelet methods only)", self.wavelet_combo)
+        self.params_dialog.add_row("level (Wavelet methods only)", self.level_spin)
+        self.params_dialog.add_row("threshold method (Wavelet methods only)", self.threshold_combo)
+        self.params_dialog.add_row("sigma, width in pixels/frames (Gaussian methods only)", self.gaussian_sigma_spin)
+        self.params_dialog.add_row("space_window (Median only)", self.median_space_spin)
+        self.params_dialog.add_row("time_window (Median only)", self.median_time_spin)
 
         self.commit_controls = CommitControls(apply_label="Apply Denoising")
         self.commit_controls.set_apply_enabled(False)
@@ -114,16 +143,21 @@ class DenoisingTab(QWidget):
         self.commit_controls.set_apply_enabled(False)
         self.commit_controls.set_commit_enabled(False)
 
-        domain = "time" if self.method_combo.currentIndex() == 0 else "space"
-        kwargs = dict(
-            wavelet=self.wavelet_combo.currentText(),
-            level=self.level_spin.value(),
-            method=self.threshold_combo.currentText(),
-        )
+        algorithm = _ALGORITHM_KEYS[self.method_combo.currentText()]
+        if algorithm in ("wavelet_time", "wavelet_space"):
+            kwargs = dict(
+                wavelet=self.wavelet_combo.currentText(),
+                level=self.level_spin.value(),
+                method=self.threshold_combo.currentText(),
+            )
+        elif algorithm in ("gaussian_time", "gaussian_space"):
+            kwargs = dict(sigma=self.gaussian_sigma_spin.value())
+        else:
+            kwargs = dict(space_window=self.median_space_spin.value(), time_window=self.median_time_spin.value())
 
         self.worker = run_worker(
             self.busy_bar, "Running denoising and metrics (this can take a while)...",
-            _run_and_assess, movie, domain, on_success=self._on_finished, on_failure=self._on_failed, **kwargs,
+            _run_and_assess, movie, algorithm, on_success=self._on_finished, on_failure=self._on_failed, **kwargs,
         )
 
     def _on_finished(self, result: dict) -> None:

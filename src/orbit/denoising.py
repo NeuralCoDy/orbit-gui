@@ -1,9 +1,10 @@
-"""Wavelet-shrinkage denoising for a (H, W, T) movie, ported from
+"""Denoising for a (H, W, T) movie: wavelet shrinkage (ported from
 pyGraFT's graft/preprocessing.py denoise_wavelet_time/denoise_wavelet_space
-(functionally equivalent VisuShrink/BayesShrink wavelet-shrinkage
-denoisers via PyWavelets). Both batch every pixel-trace (time) or every
-frame (space) into one pywt call via its native axis/axes batching,
-rather than looping per-pixel/per-frame in Python.
+-- functionally equivalent VisuShrink/BayesShrink denoisers via
+PyWavelets, batched over every pixel-trace or every frame in one pywt
+call rather than looping in Python), plus Gaussian and median filtering
+via scipy.ndimage (each a single vectorized call, no Python-level loop
+over pixels/frames either).
 
 residual_energy_fraction is the "residual energy" assessment metric --
 baked in here rather than left to a separate QC pass, per this project's
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import numpy as np
 import pywt
+from scipy.ndimage import gaussian_filter, median_filter
 
 from .normalization import robust_std
 
@@ -90,6 +92,26 @@ def denoise_wavelet_space(mov: np.ndarray, wavelet: str = "sym4", level: int = 4
     cube = np.moveaxis(np.asarray(mov, dtype=float), -1, 0)  # (H, W, T) -> (T, H, W)
     denoised = _denoise_wavelet_2d_batch(cube, wavelet, level, method)
     return np.moveaxis(denoised, 0, -1)
+
+
+def denoise_gaussian_time(mov: np.ndarray, sigma: float) -> np.ndarray:
+    """Gaussian-smooth each pixel's time-trace independently (no
+    spatial blur). ``sigma`` is the Gaussian's width, in frames."""
+    return gaussian_filter(mov, sigma=(0, 0, sigma))
+
+
+def denoise_gaussian_space(mov: np.ndarray, sigma: float) -> np.ndarray:
+    """Gaussian-blur each frame independently (no temporal blur).
+    ``sigma`` is the Gaussian's width, in pixels."""
+    return gaussian_filter(mov, sigma=(sigma, sigma, 0))
+
+
+def denoise_median(mov: np.ndarray, space_window: int = 3, time_window: int = 1) -> np.ndarray:
+    """Median filter over a window that's square in space
+    (``space_window`` x ``space_window``) and ``time_window`` frames
+    deep. ``mode="nearest"`` (edge-replicated) avoids the boundary
+    darkening a zero-padded median filter would introduce."""
+    return median_filter(mov, size=(space_window, space_window, time_window), mode="nearest")
 
 
 def residual_energy_fraction(before: np.ndarray, after: np.ndarray) -> float:
