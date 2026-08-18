@@ -185,6 +185,51 @@ def test_parameters_dialog_hosts_added_widgets():
     assert spin.value() == 42
 
 
+def test_parameters_dialog_group_visibility():
+    dialog = ParametersDialog()
+    wavelet_field = QDoubleSpinBox()
+    gaussian_field = QDoubleSpinBox()
+    dialog.add_row("wavelet param", wavelet_field, group="wavelet")
+    dialog.add_row("gaussian param", gaussian_field, group="gaussian")
+
+    dialog.set_group_visible("gaussian", False)
+    assert dialog.form.isRowVisible(wavelet_field)
+    assert not dialog.form.isRowVisible(gaussian_field)
+
+
+def test_parameters_dialog_show_only_group():
+    dialog = ParametersDialog()
+    wavelet_field = QDoubleSpinBox()
+    gaussian_field = QDoubleSpinBox()
+    median_field = QDoubleSpinBox()
+    dialog.add_row("wavelet param", wavelet_field, group="wavelet")
+    dialog.add_row("gaussian param", gaussian_field, group="gaussian")
+    dialog.add_row("median param", median_field, group="median")
+
+    dialog.show_only_group("median")
+
+    assert not dialog.form.isRowVisible(wavelet_field)
+    assert not dialog.form.isRowVisible(gaussian_field)
+    assert dialog.form.isRowVisible(median_field)
+
+    dialog.show_only_group("wavelet")
+    assert dialog.form.isRowVisible(wavelet_field)
+    assert not dialog.form.isRowVisible(gaussian_field)
+    assert not dialog.form.isRowVisible(median_field)
+
+
+def test_parameters_dialog_ungrouped_rows_are_unaffected():
+    dialog = ParametersDialog()
+    ungrouped_field = QDoubleSpinBox()
+    grouped_field = QDoubleSpinBox()
+    dialog.add_row("always visible", ungrouped_field)
+    dialog.add_row("grouped", grouped_field, group="wavelet")
+
+    dialog.show_only_group("median")
+
+    assert dialog.form.isRowVisible(ungrouped_field)
+
+
 def test_make_spinbox_integer():
     box = make_spinbox(1, 200, 20)
     assert isinstance(box, QSpinBox)

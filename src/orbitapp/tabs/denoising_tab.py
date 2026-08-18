@@ -12,15 +12,16 @@ Motion Correction -- see that tab's module docstring.
 from __future__ import annotations
 
 import numpy as np
+import pyqtgraph as pg
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QComboBox, QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget
 
 from orbit.denoising import (
-    denoise_gaussian_space,
-    denoise_gaussian_time,
+    denoise_gaussian,
     denoise_median,
     denoise_wavelet_space,
     denoise_wavelet_time,
+    qc_trace_samples,
     residual_energy_fraction,
 )
 from orbit.projections import local_correlation_projection
@@ -31,6 +32,7 @@ from ..workers import FunctionWorker, run_worker
 
 _WAVELETS = ("sym4", "db4", "haar", "coif2")
 _THRESHOLD_METHODS = ("bayes", "universal")
+_N_TRACE_PLOTS = 4  # 2 correlation-peak locations + 2 low-correlation locations
 
 # (combo box label, dispatch key) -- key is deliberately not called
 # "method", since the wavelet threshold method ("bayes"/"universal") is
@@ -39,17 +41,24 @@ _THRESHOLD_METHODS = ("bayes", "universal")
 _ALGORITHMS = (
     ("Wavelet - Temporal (per pixel)", "wavelet_time"),
     ("Wavelet - Spatial (per frame)", "wavelet_space"),
-    ("Gaussian - Temporal", "gaussian_time"),
-    ("Gaussian - Spatial", "gaussian_space"),
+    ("Gaussian Filter", "gaussian"),
     ("Median Filter", "median"),
 )
 _ALGORITHM_KEYS = dict(_ALGORITHMS)
 _DENOISE_FUNCS = {
     "wavelet_time": denoise_wavelet_time,
     "wavelet_space": denoise_wavelet_space,
-    "gaussian_time": denoise_gaussian_time,
-    "gaussian_space": denoise_gaussian_space,
+    "gaussian": denoise_gaussian,
     "median": denoise_median,
+}
+# Which ParametersDialog group each algorithm's fields belong to --
+# several algorithms can share a group (both wavelet domains use the
+# same wavelet/level/threshold fields).
+_GROUP_BY_ALGORITHM = {
+    "wavelet_time": "wavelet",
+    "wavelet_space": "wavelet",
+    "gaussian": "gaussian",
+    "median": "median",
 }
 
 
@@ -61,6 +70,7 @@ def _run_and_assess(movie: np.ndarray, algorithm: str, **kwargs) -> dict:
         "residual_energy_fraction": residual_energy_fraction(movie, denoised),
         "corr_before": float(local_correlation_projection(movie).mean()),
         "corr_after": float(local_correlation_projection(denoised).mean()),
+        "qc_traces": qc_trace_samples(movie, denoised),
     }
 
 
@@ -78,23 +88,27 @@ class DenoisingTab(QWidget):
 
         self.method_combo = QComboBox()
         self.method_combo.addItems([label for label, _key in _ALGORITHMS])
+        self.method_combo.currentTextChanged.connect(self._update_visible_params)
 
         self.wavelet_combo = QComboBox()
         self.wavelet_combo.addItems(_WAVELETS)
         self.level_spin = make_spinbox(1, 10, 4)
         self.threshold_combo = QComboBox()
         self.threshold_combo.addItems(_THRESHOLD_METHODS)
-        self.gaussian_sigma_spin = make_spinbox(0.1, 50.0, 2.0, step=0.5, decimal=True)
+        self.gaussian_spatial_spin = make_spinbox(0.0, 50.0, 2.0, step=0.5, decimal=True)
+        self.gaussian_temporal_spin = make_spinbox(0.0, 50.0, 0.0, step=0.5, decimal=True)
         self.median_space_spin = make_spinbox(1, 51, 3)
         self.median_time_spin = make_spinbox(1, 51, 1)
 
         self.params_dialog = ParametersDialog(title="Denoising Parameters", parent=self)
-        self.params_dialog.add_row("wavelet (Wavelet methods only)", self.wavelet_combo)
-        self.params_dialog.add_row("level (Wavelet methods only)", self.level_spin)
-        self.params_dialog.add_row("threshold method (Wavelet methods only)", self.threshold_combo)
-        self.params_dialog.add_row("sigma, width in pixels/frames (Gaussian methods only)", self.gaussian_sigma_spin)
-        self.params_dialog.add_row("space_window (Median only)", self.median_space_spin)
-        self.params_dialog.add_row("time_window (Median only)", self.median_time_spin)
+        self.params_dialog.add_row("wavelet", self.wavelet_combo, group="wavelet")
+        self.params_dialog.add_row("level", self.level_spin, group="wavelet")
+        self.params_dialog.add_row("threshold method", self.threshold_combo, group="wavelet")
+        self.params_dialog.add_row("spatial width (pixels, 0 = temporal only)", self.gaussian_spatial_spin, group="gaussian")
+        self.params_dialog.add_row("temporal width (frames, 0 = spatial only)", self.gaussian_temporal_spin, group="gaussian")
+        self.params_dialog.add_row("space_window", self.median_space_spin, group="median")
+        self.params_dialog.add_row("time_window", self.median_time_spin, group="median")
+        self._update_visible_params(self.method_combo.currentText())
 
         self.commit_controls = CommitControls(apply_label="Apply Denoising")
         self.commit_controls.set_apply_enabled(False)
@@ -123,6 +137,29 @@ class DenoisingTab(QWidget):
         self.metrics_label = QLabel("Run denoising to see quality metrics.")
         self.panel.add_metric_widget(self.metrics_label)
 
+        traces_container = QWidget()
+        traces_layout = QGridLayout(traces_container)
+        traces_layout.addWidget(
+            QLabel("Representative pixel traces -- 2 local-correlation peaks, 2 low-correlation (before vs. after)"),
+            0, 0, 1, 2,
+        )
+        self.trace_plots = []
+        for i in range(_N_TRACE_PLOTS):
+            plot = pg.PlotWidget()
+            plot.addLegend()
+            plot.setLabel("bottom", "frame")
+            plot.setLabel("left", "intensity")
+            traces_layout.addWidget(plot, 1 + i // 2, i % 2)
+            self.trace_plots.append(plot)
+        self.panel.add_metric_widget(traces_container)
+
+    def _update_visible_params(self, label: str) -> None:
+        """Only the fields relevant to the selected algorithm are shown
+        in the Parameters popup -- e.g. wavelet/level/threshold method
+        stay hidden while a Gaussian or Median method is selected."""
+        group = _GROUP_BY_ALGORITHM[_ALGORITHM_KEYS[label]]
+        self.params_dialog.show_only_group(group)
+
     def on_data_loaded(self) -> None:
         movie = self.state.active_data()
         self.commit_controls.set_apply_enabled(movie is not None)
@@ -150,8 +187,10 @@ class DenoisingTab(QWidget):
                 level=self.level_spin.value(),
                 method=self.threshold_combo.currentText(),
             )
-        elif algorithm in ("gaussian_time", "gaussian_space"):
-            kwargs = dict(sigma=self.gaussian_sigma_spin.value())
+        elif algorithm == "gaussian":
+            kwargs = dict(
+                spatial_sigma=self.gaussian_spatial_spin.value(), temporal_sigma=self.gaussian_temporal_spin.value()
+            )
         else:
             kwargs = dict(space_window=self.median_space_spin.value(), time_window=self.median_time_spin.value())
 
@@ -172,6 +211,14 @@ class DenoisingTab(QWidget):
             f"Mean local correlation before -> after: "
             f"{result['corr_before']:.3f} -> {result['corr_after']:.3f}"
         )
+
+        for plot in self.trace_plots:
+            plot.clear()
+            plot.setTitle("")
+        for plot, sample in zip(self.trace_plots, result["qc_traces"]):
+            plot.plot(sample["before"], pen="r", name="Before")
+            plot.plot(sample["after"], pen="g", name="After")
+            plot.setTitle(f"{sample['kind']} @ ({sample['row']}, {sample['col']}), corr={sample['corr']:.2f}")
 
         self.busy_bar.stop("")
         self.status_label.setText(
