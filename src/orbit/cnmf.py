@@ -13,10 +13,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.ndimage import label
 from scipy.optimize import nnls
 
-from ._masks import EIGHT_CONNECTED, masked_mean_trace
+from ._masks import masked_mean_trace, threshold_footprint
 from .cnmf_deconvolution import constrained_oasis_ar1, estimate_ar1_coefficient, estimate_noise_std
 from .cnmf_init import estimate_background, greedy_roi_init
 
@@ -36,26 +35,6 @@ def _centroid(footprint: np.ndarray) -> np.ndarray:
     rows, cols = np.nonzero(footprint)
     weights = footprint[rows, cols]
     return np.array([np.average(rows, weights=weights), np.average(cols, weights=weights)])
-
-
-def threshold_footprint(footprint: np.ndarray, quantile: float = 0.5) -> np.ndarray:
-    """Drops the bottom ``quantile`` of a footprint's own nonzero weights
-    (nnls/least-squares noise scattered thinly across the search radius),
-    then keeps only the connected component still covering the peak
-    pixel -- CaImAn's own spatial post-processing cleanup."""
-    if not footprint.any():
-        return footprint
-    nz = footprint[footprint > 0]
-    thresh = np.quantile(nz, quantile)
-    cleaned = np.where(footprint >= thresh, footprint, 0.0)
-    if not cleaned.any():
-        return cleaned
-    peak = np.unravel_index(np.argmax(footprint), footprint.shape)
-    labeled, _n = label(cleaned > 0, structure=EIGHT_CONNECTED)
-    keep_label = labeled[peak]
-    if keep_label == 0:
-        return cleaned
-    return np.where(labeled == keep_label, cleaned, 0.0)
 
 
 def update_spatial_components(

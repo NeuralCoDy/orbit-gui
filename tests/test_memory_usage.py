@@ -119,3 +119,15 @@ def test_patch_cnmf_source_extraction_peak_memory_is_bounded():
     # intermediate) is exactly what this guards against.
     peak_mb = _peak_rss_mb("patch_cnmf", 250, 250, 150, "float32")
     assert peak_mb < 600, f"patch-based CNMF peak RSS {peak_mb:.0f}MB exceeds bound"
+
+
+def test_patch_graft_source_extraction_peak_memory_is_bounded():
+    # Same reasoning as patch-based CNMF above. GraFT's own compiled
+    # solver has a higher fixed overhead per patch-worker than CNMF's
+    # pure-Python/numpy path (confirmed empirically: ~1.0-1.1GB here vs
+    # patch CNMF's much smaller footprint at a comparable size), hence
+    # the wider bound -- still catches a real regression (e.g. a patch
+    # accidentally spanning the whole FOV) without being sensitive to
+    # that fixed cost.
+    peak_mb = _peak_rss_mb("patch_graft", 250, 250, 150, "float32", timeout=60.0)
+    assert peak_mb < 2000, f"patch-based GraFT peak RSS {peak_mb:.0f}MB exceeds bound"

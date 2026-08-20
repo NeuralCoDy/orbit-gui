@@ -1,12 +1,12 @@
 import numpy as np
 
+from orbit._masks import threshold_footprint
 from orbit.cnmf import (
     _make_patches,
     _patch_bounds,
     cnmf_source_extraction,
     merge_overlapping_components,
     patch_cnmf_source_extraction,
-    threshold_footprint,
     update_spatial_components,
     update_temporal_components,
 )

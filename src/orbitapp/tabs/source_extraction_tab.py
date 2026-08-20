@@ -1,6 +1,7 @@
 """Source Extraction tab: find candidate ROI masks + traces via
 Correlation-based click-to-add seeding (ported from roiapp, always
-available regardless of the selected batch Method), PCA-ICA, or CNMF.
+available regardless of the selected batch Method), PCA-ICA, CNMF, or
+GraFT.
 
 Unlike every earlier stage, this one doesn't transform the movie into a
 new movie -- it produces a variable-size collection of ROIs, so it
@@ -50,6 +51,7 @@ from orbit.cnmf import CNMFResult, cnmf_source_extraction, patch_cnmf_source_ext
 from orbit.neuropil import compute_neuropil_traces
 from orbit.projections import local_correlation_projection
 from orbit.roi_extraction_corr import find_seed_candidates, roi_from_seed
+from orbit.roi_extraction_graft import GraFTResult, graft_source_extraction, patch_graft_source_extraction
 from orbit.roi_extraction_pca_ica import PCAICAResult, pca_ica_source_extraction
 
 from ..io import is_memmap, preview_slice
@@ -60,10 +62,11 @@ from ..workers import FunctionWorker, run_worker
 _METHODS = (
     ("PCA-ICA", "pca_ica"),
     ("CNMF", "cnmf"),
+    ("GraFT", "graft"),
 )
 _METHOD_KEYS = dict(_METHODS)
 _METHOD_ORDER = [key for _label, key in _METHODS]
-_PIPELINE_LABELS = {"correlation": "Correlation ROIs", "pca_ica": "PCA-ICA", "cnmf": "CNMF"}
+_PIPELINE_LABELS = {"correlation": "Correlation ROIs", "pca_ica": "PCA-ICA", "cnmf": "CNMF", "graft": "GraFT"}
 
 
 def _grow_seeds(movie: np.ndarray, seeds: list[tuple[int, int]], kwargs: dict) -> list[dict]:
@@ -151,6 +154,17 @@ class SourceExtractionTab(QWidget):
         self.cnmf_patch_overlap_spin = make_spinbox(0, 500, 20)
         self.cnmf_components_per_patch_spin = make_spinbox(1, 200, 10)
 
+        # GraFT (Graph-Filtered Temporal dictionary learning, via the
+        # pygraft-gui dependency) -- same whole-FOV/patch-based split as
+        # CNMF above, same reason (patch-based is required, not just
+        # offered, for a memmap movie -- see _on_run_graft_clicked).
+        self.graft_n_dict_spin = make_spinbox(1, 500, 20)
+        self.graft_patch_check = QCheckBox("Use patch-based extraction (for large fields of view)")
+        self.graft_patch_check.toggled.connect(self._update_graft_patch_rows_visibility)
+        self.graft_patch_size_spin = make_spinbox(10, 2000, 50)
+        self.graft_patch_overlap_spin = make_spinbox(0, 500, 10)
+        self.graft_n_dict_per_patch_spin = make_spinbox(1, 200, 10)
+
         # Correlation click-to-add's own parameters live on the main screen
         # (see _build_correlation_rows), not in this dialog -- it's always
         # active, not tied to the Method combo below, so this dialog only
@@ -167,6 +181,11 @@ class SourceExtractionTab(QWidget):
         self.params_dialog.add_row("patch size (px)", self.cnmf_patch_size_spin, group="cnmf_patch")
         self.params_dialog.add_row("patch overlap (px)", self.cnmf_patch_overlap_spin, group="cnmf_patch")
         self.params_dialog.add_row("components per patch", self.cnmf_components_per_patch_spin, group="cnmf_patch")
+        self.params_dialog.add_row("number of dictionary components", self.graft_n_dict_spin, group="graft")
+        self.params_dialog.add_row("", self.graft_patch_check, group="graft")
+        self.params_dialog.add_row("patch size (px)", self.graft_patch_size_spin, group="graft_patch")
+        self.params_dialog.add_row("patch overlap (px)", self.graft_patch_overlap_spin, group="graft_patch")
+        self.params_dialog.add_row("dictionary components per patch", self.graft_n_dict_per_patch_spin, group="graft_patch")
 
         controls_row = QHBoxLayout()
         controls_row.addWidget(QLabel("Method:"))
@@ -178,6 +197,7 @@ class SourceExtractionTab(QWidget):
         self.action_stack = QStackedWidget()
         self.run_pca_ica_btn = self._add_run_action("Run PCA-ICA", self._on_run_pca_ica_clicked)
         self.run_cnmf_btn = self._add_run_action("Run CNMF", self._on_run_cnmf_clicked)
+        self.run_graft_btn = self._add_run_action("Run GraFT", self._on_run_graft_clicked)
         controls_row.addWidget(self.action_stack)
 
         self.commit_btn = QPushButton("Commit Accepted ROIs")
@@ -260,13 +280,20 @@ class SourceExtractionTab(QWidget):
     def _on_method_changed(self, label: str) -> None:
         method = _METHOD_KEYS[label]
         self.params_dialog.show_only_group(method)
-        self._update_cnmf_patch_rows_visibility()  # show_only_group above always hides "cnmf_patch" -- reapply on top
+        # show_only_group above always hides "cnmf_patch"/"graft_patch" -- reapply on top
+        self._update_cnmf_patch_rows_visibility()
+        self._update_graft_patch_rows_visibility()
         self.action_stack.setCurrentIndex(_METHOD_ORDER.index(method))
 
     def _update_cnmf_patch_rows_visibility(self) -> None:
         method = _METHOD_KEYS[self.method_combo.currentText()]
         visible = method == "cnmf" and self.cnmf_patch_check.isChecked()
         self.params_dialog.set_group_visible("cnmf_patch", visible)
+
+    def _update_graft_patch_rows_visibility(self) -> None:
+        method = _METHOD_KEYS[self.method_combo.currentText()]
+        visible = method == "graft" and self.graft_patch_check.isChecked()
+        self.params_dialog.set_group_visible("graft_patch", visible)
 
     def on_data_loaded(self) -> None:
         movie = self.state.active_data()
@@ -487,6 +514,47 @@ class SourceExtractionTab(QWidget):
         rois = self._make_rois(
             result.masks, result.traces, "cnmf", spike_traces=result.spike_traces, params=self._pending_batch_params
         )
+        self._add_candidates(rois)
+
+    def _on_run_graft_clicked(self) -> None:
+        movie = self.state.active_data()
+        memmap_input = movie is not None and is_memmap(movie)
+        if memmap_input and not self.graft_patch_check.isChecked():
+            QMessageBox.warning(
+                self, "Patch-based extraction required",
+                "This movie is memory-mapped -- whole-FOV GraFT would need to read the entire "
+                "movie into RAM. Check 'Use patch-based extraction' to run GraFT on it, or turn "
+                "off memory mapping on the Load tab.",
+            )
+            return
+        # Same reasoning as _on_run_cnmf_clicked: capped to the 5000-frame
+        # preview for a memmap movie either way (patch-based GraFT is
+        # already memmap-safe regardless, but fitting against the whole
+        # recording is unnecessarily slow at the sizes memmap users deal
+        # with) -- _commit() re-extracts traces from the full movie after.
+        worker_movie = preview_slice(movie) if memmap_input else None
+
+        if self.graft_patch_check.isChecked():
+            patch = self.graft_patch_size_spin.value()
+            overlap = self.graft_patch_overlap_spin.value()
+            self._pending_batch_params = dict(
+                patch_size=(patch, patch), overlap=(overlap, overlap),
+                n_dict_per_patch=self.graft_n_dict_per_patch_spin.value(),
+            )
+            self._run_batch_method(
+                "Running patch-based GraFT (this can take a while)...", patch_graft_source_extraction,
+                self._on_graft_finished, worker_movie=worker_movie, **self._pending_batch_params,
+            )
+            return
+
+        self._pending_batch_params = dict(n_dict=self.graft_n_dict_spin.value())
+        self._run_batch_method(
+            "Running GraFT (this can take a while)...", graft_source_extraction, self._on_graft_finished,
+            worker_movie=worker_movie, **self._pending_batch_params,
+        )
+
+    def _on_graft_finished(self, result: GraFTResult) -> None:
+        rois = self._make_rois(result.masks, result.traces, "graft", params=self._pending_batch_params)
         self._add_candidates(rois)
 
     def _make_rois(

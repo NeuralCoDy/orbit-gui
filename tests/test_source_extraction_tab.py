@@ -48,7 +48,7 @@ def test_method_combo_only_offers_batch_algorithms():
     tab = SourceExtractionTab(state)
 
     labels = [tab.method_combo.itemText(i) for i in range(tab.method_combo.count())]
-    assert labels == ["PCA-ICA", "CNMF"]  # correlation click-to-add is not a Method option
+    assert labels == ["PCA-ICA", "CNMF", "GraFT"]  # correlation click-to-add is not a Method option
 
 
 def test_method_combo_switches_parameter_group_and_action_widget():
@@ -675,3 +675,83 @@ def test_cnmf_rois_record_the_batch_parameters_used():
     assert len(tab._candidates) == 3
     for roi in tab._candidates:
         assert roi.params == {"n_components": 3, "search_radius": 8.0, "merge_thresh": tab.cnmf_merge_thresh_spin.value()}
+
+
+def test_run_graft_adds_candidates_from_both_synthetic_blobs():
+    state = AppState()
+    movie = _synthetic_movie(n_frames=150)  # GraFT needs more frames than CNMF/PCA-ICA to converge reliably
+    state.load("movie.tif", movie)
+    tab = SourceExtractionTab(state)
+    tab.on_data_loaded()
+    _wait_for_worker(tab)
+
+    tab.method_combo.setCurrentIndex(tab.method_combo.findText("GraFT"))
+    # graft_n_dict_spin's own default (20) -- confirmed empirically to
+    # converge reliably against this shared, comparatively low-contrast
+    # _synthetic_movie fixture; fewer dictionary components sometimes
+    # miss one of the two blobs on this particular movie.
+    tab._on_run_graft_clicked()
+    _wait_for_worker(tab, timeout_ms=30000)
+
+    assert len(tab._candidates) > 0
+    assert all(roi.source_method == "graft" for roi in tab._candidates)
+    assert all(roi.status == "pending" for roi in tab._candidates)
+    assert all(roi.neuropil_trace is not None for roi in tab._candidates)
+    assert all(roi.spike_trace is None for roi in tab._candidates)  # GraFT doesn't produce one, unlike CNMF
+
+    centers = [np.argwhere(roi.mask).mean(axis=0) for roi in tab._candidates if roi.mask.any()]
+    near_a = any(np.hypot(*(c - (7.5, 7.5))) < 4 for c in centers)
+    near_b = any(np.hypot(*(c - (22.5, 22.5))) < 4 for c in centers)
+    assert near_a and near_b
+
+
+def test_run_patch_graft_adds_candidates_from_both_synthetic_blobs():
+    state = AppState()
+    movie = _synthetic_movie(n_frames=150)
+    state.load("movie.tif", movie)
+    tab = SourceExtractionTab(state)
+    tab.on_data_loaded()
+    _wait_for_worker(tab)
+
+    tab.method_combo.setCurrentIndex(tab.method_combo.findText("GraFT"))
+    tab.graft_patch_check.setChecked(True)
+    tab.graft_patch_size_spin.setValue(18)
+    tab.graft_patch_overlap_spin.setValue(6)
+    tab.graft_n_dict_per_patch_spin.setValue(5)
+    tab._on_run_graft_clicked()
+    _wait_for_worker(tab, timeout_ms=30000)
+
+    assert len(tab._candidates) > 0
+    assert all(roi.source_method == "graft" for roi in tab._candidates)
+    centers = [np.argwhere(roi.mask).mean(axis=0) for roi in tab._candidates if roi.mask.any()]
+    near_a = any(np.hypot(*(c - (7.5, 7.5))) < 4 for c in centers)
+    near_b = any(np.hypot(*(c - (22.5, 22.5))) < 4 for c in centers)
+    assert near_a and near_b
+
+
+def test_run_graft_without_data_warns(monkeypatch):
+    monkeypatch.setattr("orbitapp.tabs.source_extraction_tab.QMessageBox.warning", lambda *a, **k: None)
+    state = AppState()
+    tab = SourceExtractionTab(state)
+
+    tab._on_run_graft_clicked()
+
+    assert tab._candidates == []
+
+
+def test_graft_rois_record_the_batch_parameters_used():
+    state = AppState()
+    movie = _synthetic_movie(n_frames=150)
+    state.load("movie.tif", movie)
+    tab = SourceExtractionTab(state)
+    tab.on_data_loaded()
+    _wait_for_worker(tab)
+
+    tab.method_combo.setCurrentIndex(tab.method_combo.findText("GraFT"))
+    tab.graft_n_dict_spin.setValue(10)
+    tab._on_run_graft_clicked()
+    _wait_for_worker(tab, timeout_ms=30000)
+
+    assert len(tab._candidates) > 0
+    for roi in tab._candidates:
+        assert roi.params == {"n_dict": 10}

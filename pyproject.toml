@@ -30,6 +30,7 @@ gui = [
     "roiapp>=0.1.0",
     "matplotlib>=3.7",
     "astropy>=5.3",
+    "pygraft-gui>=0.2.0",
 ]
 
 [project.scripts]
