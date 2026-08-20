@@ -4,12 +4,18 @@ pipeline: greedy init (cnmf_init.py) followed by alternating spatial/
 temporal updates -- both regularized least-squares solves -- with AR(1)
 OASIS deconvolution (cnmf_deconvolution.py) folded into the temporal step,
 finishing with a correlation-based merge of duplicate/split components.
-Deliberately skips CaImAn's patch-parallelism/memmap machinery, which this
-app's scale doesn't need.
+Deliberately skips CaImAn's own patch/memmap machinery, which this app's
+scale doesn't need -- patch_cnmf_source_extraction below is this app's own,
+much simpler patch wrapper (runs cnmf_source_extraction per patch, in
+parallel worker processes, then merges).
 """
 
 from __future__ import annotations
 
+import multiprocessing
+import os
+from concurrent.futures import ProcessPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import numpy as np
@@ -18,6 +24,26 @@ from scipy.optimize import nnls
 from ._masks import masked_mean_trace, threshold_footprint
 from .cnmf_deconvolution import constrained_oasis_ar1, estimate_ar1_coefficient, estimate_noise_std
 from .cnmf_init import estimate_background, greedy_roi_init
+
+# Patches run in separate processes (not threads): a patch's own OASIS
+# deconvolution step is pure-Python and GIL-bound, so threads wouldn't
+# actually overlap that part of the work. Capped at a small constant
+# rather than os.cpu_count() for the same oversubscription reason
+# GraFT's own patch runner is (roi_extraction_graft.py's
+# _MAX_PATCH_WORKERS): each patch's NNLS/NMF solves are themselves
+# BLAS-threaded, so cpu_count() worker processes x BLAS's own internal
+# threads would oversubscribe the machine.
+_DEFAULT_MAX_WORKERS = 4
+
+# This runs inside a PySide6 GUI, which keeps its own background threads
+# alive (QThread workers, Qt's internal threads) -- forking (the default
+# start method on Linux/Mac) a multi-threaded process risks the child
+# deadlocking on a lock some other thread held at fork time (confirmed:
+# ProcessPoolExecutor's default emits exactly this DeprecationWarning
+# when created from this app's test suite, itself multi-threaded via
+# pytest-qt). spawn starts each worker as a fresh interpreter instead,
+# sidestepping that hazard at the cost of slower worker startup.
+_MP_CONTEXT = multiprocessing.get_context("spawn")
 
 
 @dataclass
@@ -274,6 +300,54 @@ def _make_patches(height: int, width: int, patch_size: tuple[int, int], overlap:
     return [(r0, r0 + patch_h, c0, c0 + patch_w) for r0 in row_starts for c0 in col_starts]
 
 
+_BLAS_THREAD_ENV_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS")
+
+
+@contextmanager
+def _single_threaded_blas_for_children():
+    """Temporarily pins BLAS thread-count env vars to 1 in THIS
+    process, for spawned worker child processes to inherit (spawn
+    copies the parent's os.environ at spawn time) -- restored on exit
+    so this process's own (non-patch) BLAS calls, e.g. a later
+    whole-FOV cnmf_source_extraction call, aren't affected.
+
+    Without this, each of the (already process-parallel) patch workers
+    would ALSO fan its own NNLS/NMF solves out across every core via
+    OpenBLAS's own threading, oversubscribing the machine the same way
+    GraFT's own patch runner could (see roi_extraction_graft.py's
+    _MAX_PATCH_WORKERS comment) -- confirmed by direct measurement: with
+    this unset, 4 worker processes ran patches ~5x SLOWER than 1, not
+    just failed to speed up, because OpenBLAS defaults to using every
+    core (MAX_THREADS=64) in each process independently.
+
+    A worker-side ProcessPoolExecutor `initializer` was tried first and
+    does NOT work: resolving a pickled reference to it requires
+    importing this module (and therefore numpy) in the child BEFORE the
+    initializer body runs, by which point OpenBLAS's thread pool is
+    already sized from the inherited (unset) env var -- setting it
+    inside the initializer is too late. Setting it here, in the parent,
+    before any worker is spawned, is the only point early enough."""
+    previous = {var: os.environ.get(var) for var in _BLAS_THREAD_ENV_VARS}
+    for var in _BLAS_THREAD_ENV_VARS:
+        os.environ[var] = "1"
+    try:
+        yield
+    finally:
+        for var, value in previous.items():
+            if value is None:
+                os.environ.pop(var, None)
+            else:
+                os.environ[var] = value
+
+
+def _run_patch(movie_patch: np.ndarray, n_components_per_patch: int, merge_thresh: float, cnmf_kwargs: dict) -> CNMFResult:
+    """Module-level (rather than a closure) so ProcessPoolExecutor can
+    pickle a reference to it for each worker process."""
+    return cnmf_source_extraction(
+        movie_patch, n_components=n_components_per_patch, merge_thresh=merge_thresh, **cnmf_kwargs
+    )
+
+
 def patch_cnmf_source_extraction(
     movie: np.ndarray,
     patch_size: tuple[int, int] = (80, 80),
@@ -281,6 +355,7 @@ def patch_cnmf_source_extraction(
     n_components_per_patch: int = 10,
     merge_thresh: float = 0.8,
     progress_callback=None,
+    max_workers: int | None = _DEFAULT_MAX_WORKERS,
     **cnmf_kwargs,
 ) -> CNMFResult:
     """Runs cnmf_source_extraction independently on overlapping spatial
@@ -297,26 +372,36 @@ def patch_cnmf_source_extraction(
     cnmf_kwargs are forwarded to every patch's cnmf_source_extraction
     call (gauss_sigma, init_radius, search_radius, n_iterations, ...).
     progress_callback, if given, is called as progress_callback(
-    patches_done, total_patches)."""
+    patches_done, total_patches) once per patch, in patch order, as each
+    patch's result becomes available (patches themselves may finish out
+    of order across worker processes). max_workers caps how many patches
+    run concurrently -- None falls back to
+    min(_DEFAULT_MAX_WORKERS, os.cpu_count(), len(patches)); see
+    _DEFAULT_MAX_WORKERS' comment for why that stays a small constant
+    rather than just os.cpu_count()."""
     height, width, _n_frames = movie.shape
     patches = _make_patches(height, width, patch_size, overlap)
+    workers = max_workers if max_workers is not None else min(_DEFAULT_MAX_WORKERS, os.cpu_count() or 1, len(patches))
 
     all_footprints, all_traces, all_spikes, all_g = [], [], [], []
-    for i, (r0, r1, c0, c1) in enumerate(patches):
-        result = cnmf_source_extraction(
-            movie[r0:r1, c0:c1, :], n_components=n_components_per_patch, merge_thresh=merge_thresh, **cnmf_kwargs
-        )
-        for mask, trace, spike in zip(result.masks, result.traces, result.spike_traces):
-            if not mask.any():
-                continue
-            full_footprint = np.zeros((height, width))
-            full_footprint[r0:r1, c0:c1] = mask
-            all_footprints.append(full_footprint)
-            all_traces.append(trace)
-            all_spikes.append(spike)
-            all_g.append(estimate_ar1_coefficient(trace))
-        if progress_callback is not None:
-            progress_callback(i + 1, len(patches))
+    with _single_threaded_blas_for_children(), ProcessPoolExecutor(max_workers=workers, mp_context=_MP_CONTEXT) as pool:
+        futures = [
+            pool.submit(_run_patch, movie[r0:r1, c0:c1, :], n_components_per_patch, merge_thresh, cnmf_kwargs)
+            for r0, r1, c0, c1 in patches
+        ]
+        for i, (future, (r0, r1, c0, c1)) in enumerate(zip(futures, patches)):
+            result = future.result()
+            for mask, trace, spike in zip(result.masks, result.traces, result.spike_traces):
+                if not mask.any():
+                    continue
+                full_footprint = np.zeros((height, width))
+                full_footprint[r0:r1, c0:c1] = mask
+                all_footprints.append(full_footprint)
+                all_traces.append(trace)
+                all_spikes.append(spike)
+                all_g.append(estimate_ar1_coefficient(trace))
+            if progress_callback is not None:
+                progress_callback(i + 1, len(patches))
 
     if not all_footprints:
         return CNMFResult(masks=[], traces=[], spike_traces=[])

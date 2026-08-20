@@ -20,6 +20,12 @@ final result, for a workload that should only need ~100MB by itself.
 does not have this problem (confirmed against the same repro: correctly
 tiny for a trivial child regardless of how large the spawning parent was).
 
+Peak RSS is summed across the worker process AND every live descendant
+at each poll (see _live_descendant_pids) rather than just the worker
+process's own VmHWM, since patch-based CNMF now runs its patches in a
+ProcessPoolExecutor -- a single process's VmHWM wouldn't reflect
+concurrently-running sibling worker processes at all.
+
 Bounds are deliberately loose -- around 1.5-2x what was actually
 measured when these were written -- since the point isn't to pin memory
 usage exactly (that varies by machine/BLAS backend/allocator), it's to
@@ -43,11 +49,60 @@ if not Path("/proc").is_dir():
 _WORKER = Path(__file__).resolve().parent / "_memory_worker.py"
 
 
+def _live_descendant_pids(pid: int) -> list[int]:
+    """Every currently-live process whose ancestry traces back to
+    ``pid`` (children, grandchildren, ...) -- patch-based CNMF now
+    spawns its own worker subprocesses (ProcessPoolExecutor), whose
+    memory use wouldn't show up in ``pid``'s own VmHWM at all."""
+    children_by_ppid: dict[int, list[int]] = {}
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        # PPid is the field right after the ")" closing the (comm) field,
+        # which may itself contain spaces/parens.
+        after_comm = stat.rsplit(")", 1)[1].split()
+        ppid = int(after_comm[1])
+        children_by_ppid.setdefault(ppid, []).append(int(entry.name))
+
+    descendants: list[int] = []
+    frontier = [pid]
+    while frontier:
+        next_frontier = []
+        for parent in frontier:
+            next_frontier.extend(children_by_ppid.get(parent, []))
+        descendants.extend(next_frontier)
+        frontier = next_frontier
+    return descendants
+
+
+def _vm_hwm_kb(pid: int) -> int:
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1])
+    except FileNotFoundError:
+        pass  # process exited between discovery and this read
+    return 0
+
+
 def _peak_rss_mb(stage: str, height: int, width: int, n_frames: int, dtype: str, timeout: float = 90.0) -> float:
     proc = subprocess.Popen(
         [sys.executable, str(_WORKER), stage, str(height), str(width), str(n_frames), dtype],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
+    # Tracks the peak *sum* of VmHWM across the worker process and every
+    # live descendant at each poll -- a single process's own VmHWM
+    # doesn't capture concurrently-running sibling worker processes
+    # (e.g. patch-based CNMF's ProcessPoolExecutor workers), and summing
+    # only what's alive at each snapshot (rather than summing every
+    # descendant's VmHWM ever seen, even after some have already exited
+    # and been replaced) approximates concurrent peak rather than
+    # overcounting a long sequence of small, non-overlapping workers.
     peak_kb = 0
     deadline = time.monotonic() + timeout
     try:
@@ -55,14 +110,9 @@ def _peak_rss_mb(stage: str, height: int, width: int, n_frames: int, dtype: str,
             if time.monotonic() > deadline:
                 proc.kill()
                 raise subprocess.TimeoutExpired(str(_WORKER), timeout)
-            try:
-                with open(f"/proc/{proc.pid}/status") as f:
-                    for line in f:
-                        if line.startswith("VmHWM:"):
-                            peak_kb = max(peak_kb, int(line.split()[1]))
-                            break
-            except FileNotFoundError:
-                pass  # process exited between poll() and the /proc read
+            pids = [proc.pid, *_live_descendant_pids(proc.pid)]
+            total_kb = sum(_vm_hwm_kb(p) for p in pids)
+            peak_kb = max(peak_kb, total_kb)
             time.sleep(0.02)
     finally:
         returncode = proc.wait()
@@ -116,9 +166,14 @@ def test_patch_cnmf_source_extraction_peak_memory_is_bounded():
     # The patch-based path exists specifically so peak memory stays
     # bounded by patch size rather than the whole field of view --
     # regressing that (e.g. accidentally materializing a full-FOV
-    # intermediate) is exactly what this guards against.
+    # intermediate) is exactly what this guards against. Patches now run
+    # concurrently across worker processes (see cnmf.py's
+    # ProcessPoolExecutor-based parallelism), so the bound accounts for
+    # several workers' fixed per-process overhead (numpy/scipy/sklearn
+    # imports, ~4 concurrent by default) on top of each one's own patch
+    # data -- measured ~1070MB at the time this bound was set.
     peak_mb = _peak_rss_mb("patch_cnmf", 250, 250, 150, "float32")
-    assert peak_mb < 600, f"patch-based CNMF peak RSS {peak_mb:.0f}MB exceeds bound"
+    assert peak_mb < 1700, f"patch-based CNMF peak RSS {peak_mb:.0f}MB exceeds bound"
 
 
 def test_patch_graft_source_extraction_peak_memory_is_bounded():
