@@ -91,21 +91,52 @@ def _load_tiff_folder(path: Path) -> np.ndarray:
     return np.stack([tifffile.imread(f) for f in files], axis=-1)  # (H, W, n_files)
 
 
+def _pick_largest_array(candidates: dict) -> np.ndarray:
+    """Picks the largest array among several candidate variables in a
+    loaded .h5/.mat file. In practice the movie is overwhelmingly bigger
+    than any metadata stored alongside it (framerate, notes, ROI info,
+    ...) -- a far more reliable signal than "whichever key happens to
+    sort first", which an unrelated small variable could easily win."""
+    arrays = {key: np.asarray(value) for key, value in candidates.items()}
+    return arrays[max(arrays, key=lambda key: arrays[key].size)]
+
+
 def _load_h5(path: Path) -> np.ndarray:
     import h5py
 
     with h5py.File(path, "r") as f:
-        keys = list(f.keys())
-        if not keys:
+        candidates = {k: f[k][()] for k in f.keys() if isinstance(f[k], h5py.Dataset)}
+        if not candidates:
             raise ValueError(f"No datasets found in {path}")
-        return np.asarray(f[keys[0]][()])
+        return _pick_largest_array(candidates)
 
 
 def _load_mat(path: Path) -> np.ndarray:
     from scipy.io import loadmat
 
-    data = loadmat(path)
-    keys = [k for k in data if not k.startswith("__")]
-    if not keys:
+    try:
+        data = loadmat(path)
+    except NotImplementedError:
+        # MATLAB v7.3+ .mat files are HDF5 under the hood -- scipy's
+        # legacy reader can't open them (raises exactly this, saying so).
+        # h5py can open the file, but two MATLAB-specific quirks need
+        # handling that a plain .h5 file wouldn't have (confirmed against
+        # real MATLAB-compatible v7.3 output): every array comes back
+        # axis-reversed relative to its MATLAB size() (HDF5 is row-major,
+        # MATLAB column-major -- .T undoes it), and cell arrays/strings
+        # spill into a "#refs#" bookkeeping group that must be skipped,
+        # not mistaken for the movie.
+        import h5py
+
+        with h5py.File(path, "r") as f:
+            candidates = {
+                k: f[k][()] for k in f.keys() if not k.startswith("#") and isinstance(f[k], h5py.Dataset)
+            }
+            if not candidates:
+                raise ValueError(f"No variables found in {path}")
+            return _pick_largest_array(candidates).T
+
+    candidates = {k: v for k, v in data.items() if not k.startswith("__")}
+    if not candidates:
         raise ValueError(f"No variables found in {path}")
-    return np.asarray(data[keys[0]])
+    return _pick_largest_array(candidates)
