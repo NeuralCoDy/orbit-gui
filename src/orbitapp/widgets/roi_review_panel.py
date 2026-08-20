@@ -94,12 +94,17 @@ class ROIReviewPanel(QWidget):
         table_col.addWidget(self.table)
 
         bulk_row = QHBoxLayout()
-        accept_all_btn = QPushButton("Accept All")
-        accept_all_btn.clicked.connect(lambda: self._set_all_status("accepted"))
-        reject_all_btn = QPushButton("Reject All")
-        reject_all_btn.clicked.connect(lambda: self._set_all_status("rejected"))
-        bulk_row.addWidget(accept_all_btn)
-        bulk_row.addWidget(reject_all_btn)
+        accept_remainder_btn = QPushButton("Accept Remainder")
+        accept_remainder_btn.setToolTip("Accepts every still-pending candidate -- already accepted/rejected ones are left as they are.")
+        accept_remainder_btn.clicked.connect(lambda: self._set_pending_status("accepted"))
+        reject_remainder_btn = QPushButton("Reject Remainder")
+        reject_remainder_btn.setToolTip("Rejects every still-pending candidate -- already accepted/rejected ones are left as they are.")
+        reject_remainder_btn.clicked.connect(lambda: self._set_pending_status("rejected"))
+        delete_rejected_btn = QPushButton("Delete All Rejected")
+        delete_rejected_btn.clicked.connect(self._delete_all_rejected)
+        bulk_row.addWidget(accept_remainder_btn)
+        bulk_row.addWidget(reject_remainder_btn)
+        bulk_row.addWidget(delete_rejected_btn)
         table_col.addLayout(bulk_row)
 
         per_row = QHBoxLayout()
@@ -240,10 +245,10 @@ class ROIReviewPanel(QWidget):
     def _set_status(self, roi_id: int, status: str) -> None:
         """Mutates one ROI's status and emits the change signal, but does
         NOT refresh the table/overlay -- callers that set several statuses
-        at once (Accept All, Reject All) do that ONCE afterward instead of
-        once per ROI, since _refresh_overlay recomposites every ROI's mask
-        and doing that inside this per-ROI loop is quadratic in the
-        collection size."""
+        at once (Accept Remainder, Reject Remainder) do that ONCE
+        afterward instead of once per ROI, since _refresh_overlay
+        recomposites every ROI's mask and doing that inside this per-ROI
+        loop is quadratic in the collection size."""
         roi = self._find(roi_id)
         if roi is None:
             return
@@ -259,16 +264,19 @@ class ROIReviewPanel(QWidget):
     def _set_selected_status(self, status: str) -> None:
         self._apply_status(self._selected_ids(), status)
 
-    def _set_all_status(self, status: str) -> None:
-        self._apply_status([roi.id for roi in self._rois], status)
+    def _set_pending_status(self, status: str) -> None:
+        """Accept/Reject Remainder: only ever touches still-"pending"
+        candidates -- already accepted or rejected ones keep whatever
+        status was explicitly given them, so this is safe to click again
+        after reviewing some ROIs by hand without undoing that work."""
+        self._apply_status([roi.id for roi in self._rois if roi.status == "pending"], status)
 
-    def _delete_selected(self) -> None:
-        """Removes the selected ROI(s) from the collection entirely --
-        distinct from Reject, which only marks status and keeps them
-        around for reconsideration. Mutates self._rois in place, which is
-        the same list object SourceExtractionTab's _candidates holds, so
-        both stay in sync without a round-trip through set_candidates."""
-        ids = self._selected_ids()
+    def _delete_ids(self, ids: list[int]) -> None:
+        """Removes the given ROI ids from the collection entirely --
+        shared by Delete Selected and Delete All Rejected. Mutates
+        self._rois in place, which is the same list object
+        SourceExtractionTab's _candidates holds, so both stay in sync
+        without a round-trip through set_candidates."""
         if not ids:
             return
         self._rois[:] = [roi for roi in self._rois if roi.id not in ids]
@@ -279,6 +287,15 @@ class ROIReviewPanel(QWidget):
         self.trace_plot.clear()
         self.diff_plot.clear()
         self._refresh_selected_view(self._resolve_selected())
+
+    def _delete_selected(self) -> None:
+        """Removes the selected ROI(s) from the collection entirely --
+        distinct from Reject, which only marks status and keeps them
+        around for reconsideration."""
+        self._delete_ids(self._selected_ids())
+
+    def _delete_all_rejected(self) -> None:
+        self._delete_ids([roi.id for roi in self._rois if roi.status == "rejected"])
 
     def _on_selection_changed(self) -> None:
         """Uses raw row index (not _selected_ids, which excludes the

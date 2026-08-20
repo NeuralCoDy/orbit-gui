@@ -262,6 +262,18 @@ def test_make_spinbox_decimal_with_step():
     assert (box.minimum(), box.maximum(), box.value(), box.singleStep()) == (0.0, 0.5, 0.1, 0.05)
 
 
+def test_make_spinbox_decimal_with_explicit_decimals():
+    box = make_spinbox(0.0, 10.0, 0.01, decimal=True, decimals=6)
+    assert isinstance(box, QDoubleSpinBox)
+    assert box.decimals() == 6
+    assert box.value() == 0.01
+
+
+def test_make_spinbox_default_decimals_is_qts_own_default():
+    box = make_spinbox(0.0, 1.0, 0.5, decimal=True)
+    assert box.decimals() == 2
+
+
 def test_image_slideshow_empty_by_default():
     show = ImageSlideshow()
     assert show.index_label.text() == "0 / 0"
@@ -357,18 +369,74 @@ def test_roi_review_panel_set_candidates_populates_table():
     assert panel.table.item(1, 2).text() == "pending"
 
 
-def test_roi_review_panel_accept_all_updates_status_and_emits():
+def test_roi_review_panel_accept_remainder_updates_status_and_emits():
     panel = ROIReviewPanel()
     rois = [_make_roi(0), _make_roi(1)]
     panel.set_candidates(rois)
 
     changes = []
     panel.roi_status_changed.connect(lambda roi_id, status: changes.append((roi_id, status)))
-    panel._set_all_status("accepted")
+    panel._set_pending_status("accepted")
 
     assert all(roi.status == "accepted" for roi in rois)
     assert changes == [(0, "accepted"), (1, "accepted")]
     assert panel.table.item(0, 2).text() == "accepted"
+
+
+def test_roi_review_panel_accept_remainder_only_touches_still_pending_rois():
+    panel = ROIReviewPanel()
+    rois = [_make_roi(0, status="rejected"), _make_roi(1, status="pending"), _make_roi(2, status="accepted")]
+    panel.set_candidates(rois)
+
+    changes = []
+    panel.roi_status_changed.connect(lambda roi_id, status: changes.append((roi_id, status)))
+    panel._set_pending_status("accepted")
+
+    assert rois[0].status == "rejected"  # untouched
+    assert rois[1].status == "accepted"  # was pending -> now accepted
+    assert rois[2].status == "accepted"  # already accepted, untouched (but still "accepted")
+    assert changes == [(1, "accepted")]  # only the pending one actually changed
+
+
+def test_roi_review_panel_reject_remainder_only_touches_still_pending_rois():
+    panel = ROIReviewPanel()
+    rois = [_make_roi(0, status="accepted"), _make_roi(1, status="pending")]
+    panel.set_candidates(rois)
+
+    changes = []
+    panel.roi_status_changed.connect(lambda roi_id, status: changes.append((roi_id, status)))
+    panel._set_pending_status("rejected")
+
+    assert rois[0].status == "accepted"  # untouched
+    assert rois[1].status == "rejected"
+    assert changes == [(1, "rejected")]
+
+
+def test_roi_review_panel_delete_all_rejected_removes_only_rejected_rois():
+    panel = ROIReviewPanel()
+    rois = [_make_roi(0, status="rejected"), _make_roi(1, status="pending"), _make_roi(2, status="rejected")]
+    panel.set_candidates(rois)
+
+    deleted = []
+    panel.roi_deleted.connect(deleted.append)
+    panel._delete_all_rejected()
+
+    assert sorted(deleted) == [0, 2]
+    assert len(rois) == 1  # panel._rois is the same list object -- mutated in place
+    assert rois[0].id == 1
+
+
+def test_roi_review_panel_delete_all_rejected_is_a_noop_with_nothing_rejected():
+    panel = ROIReviewPanel()
+    rois = [_make_roi(0, status="pending"), _make_roi(1, status="accepted")]
+    panel.set_candidates(rois)
+
+    deleted = []
+    panel.roi_deleted.connect(deleted.append)
+    panel._delete_all_rejected()
+
+    assert deleted == []
+    assert len(rois) == 2
 
 
 def test_roi_review_panel_selection_plots_trace_and_emits_selected():

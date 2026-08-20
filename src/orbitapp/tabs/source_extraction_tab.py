@@ -117,7 +117,7 @@ class SourceExtractionTab(QWidget):
         self._preview_roi: ROI | None = None  # grown but not yet added -- listed as "ROI -1"
         self._last_batch_run: tuple | None = None  # (id(movie), fn, sorted kwargs) of the last successful batch run
         self._pending_corr_params: dict = {}  # shared corr_kwargs for the in-flight seed-growing worker
-        self._pending_batch_params: dict = {}  # kwargs for the in-flight PCA-ICA/CNMF worker
+        self._pending_batch_params: dict = {}  # kwargs for the in-flight PCA-ICA/CNMF/GraFT worker
 
         layout = QVBoxLayout(self)
 
@@ -149,7 +149,9 @@ class SourceExtractionTab(QWidget):
         # nested inside "cnmf", so they only show when both the CNMF
         # method AND this checkbox are active (_update_cnmf_patch_rows_visibility).
         self.cnmf_patch_check = QCheckBox("Use patch-based extraction (for large fields of view)")
-        self.cnmf_patch_check.toggled.connect(self._update_cnmf_patch_rows_visibility)
+        self.cnmf_patch_check.toggled.connect(
+            lambda: self._update_patch_rows_visibility("cnmf", "cnmf_patch", self.cnmf_patch_check)
+        )
         self.cnmf_patch_size_spin = make_spinbox(10, 2000, 80)
         self.cnmf_patch_overlap_spin = make_spinbox(0, 500, 20)
         self.cnmf_components_per_patch_spin = make_spinbox(1, 200, 10)
@@ -159,8 +161,24 @@ class SourceExtractionTab(QWidget):
         # CNMF above, same reason (patch-based is required, not just
         # offered, for a memmap movie -- see _on_run_graft_clicked).
         self.graft_n_dict_spin = make_spinbox(1, 500, 20)
+        # lambda/lamForb/lamCorr/lamCont/learn_eps: same params dict keys
+        # pyGraFT's own GUI (graftapp/tabs.py's ParametersTab) exposes --
+        # shared between whole-FOV and patch-based GraFT below (both take
+        # the same keys), not duplicated per mode the way n_dict is, since
+        # these regularization/convergence knobs mean the same thing
+        # regardless of which mode is selected. Defaults for lamForb/
+        # lamCorr/lamCont are set higher than pyGraFT's own GUI defaults
+        # (which are all 0.0) per explicit instruction, not carried over
+        # from there.
+        self.graft_lambda_spin = make_spinbox(0.0, 100.0, 0.6, step=0.05, decimal=True, decimals=4)
+        self.graft_lam_forb_spin = make_spinbox(0.0, 100.0, 0.9, step=0.05, decimal=True, decimals=4)
+        self.graft_lam_corr_spin = make_spinbox(0.0, 100.0, 0.5, step=0.05, decimal=True, decimals=4)
+        self.graft_lam_cont_spin = make_spinbox(0.0, 100.0, 0.1, step=0.05, decimal=True, decimals=4)
+        self.graft_learn_eps_spin = make_spinbox(0.0, 10.0, 0.01, decimal=True, decimals=6)
         self.graft_patch_check = QCheckBox("Use patch-based extraction (for large fields of view)")
-        self.graft_patch_check.toggled.connect(self._update_graft_patch_rows_visibility)
+        self.graft_patch_check.toggled.connect(
+            lambda: self._update_patch_rows_visibility("graft", "graft_patch", self.graft_patch_check)
+        )
         self.graft_patch_size_spin = make_spinbox(10, 2000, 50)
         self.graft_patch_overlap_spin = make_spinbox(0, 500, 10)
         self.graft_n_dict_per_patch_spin = make_spinbox(1, 200, 10)
@@ -182,6 +200,11 @@ class SourceExtractionTab(QWidget):
         self.params_dialog.add_row("patch overlap (px)", self.cnmf_patch_overlap_spin, group="cnmf_patch")
         self.params_dialog.add_row("components per patch", self.cnmf_components_per_patch_spin, group="cnmf_patch")
         self.params_dialog.add_row("number of dictionary components", self.graft_n_dict_spin, group="graft")
+        self.params_dialog.add_row("sparsity (lambda)", self.graft_lambda_spin, group="graft")
+        self.params_dialog.add_row("Frobenius regularization (lamForb)", self.graft_lam_forb_spin, group="graft")
+        self.params_dialog.add_row("correlation regularization (lamCorr)", self.graft_lam_corr_spin, group="graft")
+        self.params_dialog.add_row("continuation regularization (lamCont)", self.graft_lam_cont_spin, group="graft")
+        self.params_dialog.add_row("convergence threshold (learn_eps)", self.graft_learn_eps_spin, group="graft")
         self.params_dialog.add_row("", self.graft_patch_check, group="graft")
         self.params_dialog.add_row("patch size (px)", self.graft_patch_size_spin, group="graft_patch")
         self.params_dialog.add_row("patch overlap (px)", self.graft_patch_overlap_spin, group="graft_patch")
@@ -281,19 +304,17 @@ class SourceExtractionTab(QWidget):
         method = _METHOD_KEYS[label]
         self.params_dialog.show_only_group(method)
         # show_only_group above always hides "cnmf_patch"/"graft_patch" -- reapply on top
-        self._update_cnmf_patch_rows_visibility()
-        self._update_graft_patch_rows_visibility()
+        self._update_patch_rows_visibility("cnmf", "cnmf_patch", self.cnmf_patch_check)
+        self._update_patch_rows_visibility("graft", "graft_patch", self.graft_patch_check)
         self.action_stack.setCurrentIndex(_METHOD_ORDER.index(method))
 
-    def _update_cnmf_patch_rows_visibility(self) -> None:
-        method = _METHOD_KEYS[self.method_combo.currentText()]
-        visible = method == "cnmf" and self.cnmf_patch_check.isChecked()
-        self.params_dialog.set_group_visible("cnmf_patch", visible)
-
-    def _update_graft_patch_rows_visibility(self) -> None:
-        method = _METHOD_KEYS[self.method_combo.currentText()]
-        visible = method == "graft" and self.graft_patch_check.isChecked()
-        self.params_dialog.set_group_visible("graft_patch", visible)
+    def _update_patch_rows_visibility(self, method: str, group: str, patch_check: QCheckBox) -> None:
+        """Shows ``group``'s patch-only param rows only when both
+        ``method`` is the currently-selected Method AND its own patch
+        checkbox is checked -- shared by every batch method with a
+        patch-based mode (CNMF, GraFT)."""
+        visible = _METHOD_KEYS[self.method_combo.currentText()] == method and patch_check.isChecked()
+        self.params_dialog.set_group_visible(group, visible)
 
     def on_data_loaded(self) -> None:
         movie = self.state.active_data()
@@ -466,16 +487,26 @@ class SourceExtractionTab(QWidget):
         rois = self._make_rois(result.masks, result.traces, "pca_ica", params=self._pending_batch_params)
         self._add_candidates(rois)
 
+    def _refuse_if_memmap_without_patch(self, memmap_input: bool, patch_check: QCheckBox, method_name: str) -> bool:
+        """True (after showing the standard warning) if ``memmap_input``
+        but ``patch_check`` isn't checked -- shared by every batch method
+        with both a whole-FOV and patch-based mode (CNMF, GraFT), since
+        whole-FOV mode would otherwise need to read a memmap movie fully
+        into RAM."""
+        if not (memmap_input and not patch_check.isChecked()):
+            return False
+        QMessageBox.warning(
+            self, "Patch-based extraction required",
+            f"This movie is memory-mapped -- whole-FOV {method_name} would need to read the entire "
+            f"movie into RAM. Check 'Use patch-based extraction' to run {method_name} on it, or turn "
+            "off memory mapping on the Load tab.",
+        )
+        return True
+
     def _on_run_cnmf_clicked(self) -> None:
         movie = self.state.active_data()
         memmap_input = movie is not None and is_memmap(movie)
-        if memmap_input and not self.cnmf_patch_check.isChecked():
-            QMessageBox.warning(
-                self, "Patch-based extraction required",
-                "This movie is memory-mapped -- whole-FOV CNMF would need to read the entire "
-                "movie into RAM. Check 'Use patch-based extraction' to run CNMF on it, or turn "
-                "off memory mapping on the Load tab.",
-            )
+        if self._refuse_if_memmap_without_patch(memmap_input, self.cnmf_patch_check, "CNMF"):
             return
         # Both CNMF modes are capped to the same 5000-frame preview for a
         # memmap movie: patch-based CNMF is already bounded by patch
@@ -516,16 +547,25 @@ class SourceExtractionTab(QWidget):
         )
         self._add_candidates(rois)
 
+    def _graft_shared_params(self) -> dict:
+        """lambda/lamForb/lamCorr/lamCont/learn_eps -- same params dict
+        keys graft_source_extraction/patch_graft_source_extraction both
+        accept (forwarded straight into graft.graft's/graft.patch_graft's
+        own ``params``), so one dict works for either mode. "lambda" is a
+        dict *key* here (a plain string), not the Python keyword, so
+        this has to be a literal rather than dict(lambda=...)."""
+        return {
+            "lambda": self.graft_lambda_spin.value(),
+            "lamForb": self.graft_lam_forb_spin.value(),
+            "lamCorr": self.graft_lam_corr_spin.value(),
+            "lamCont": self.graft_lam_cont_spin.value(),
+            "learn_eps": self.graft_learn_eps_spin.value(),
+        }
+
     def _on_run_graft_clicked(self) -> None:
         movie = self.state.active_data()
         memmap_input = movie is not None and is_memmap(movie)
-        if memmap_input and not self.graft_patch_check.isChecked():
-            QMessageBox.warning(
-                self, "Patch-based extraction required",
-                "This movie is memory-mapped -- whole-FOV GraFT would need to read the entire "
-                "movie into RAM. Check 'Use patch-based extraction' to run GraFT on it, or turn "
-                "off memory mapping on the Load tab.",
-            )
+        if self._refuse_if_memmap_without_patch(memmap_input, self.graft_patch_check, "GraFT"):
             return
         # Same reasoning as _on_run_cnmf_clicked: capped to the 5000-frame
         # preview for a memmap movie either way (patch-based GraFT is
@@ -539,7 +579,7 @@ class SourceExtractionTab(QWidget):
             overlap = self.graft_patch_overlap_spin.value()
             self._pending_batch_params = dict(
                 patch_size=(patch, patch), overlap=(overlap, overlap),
-                n_dict_per_patch=self.graft_n_dict_per_patch_spin.value(),
+                n_dict_per_patch=self.graft_n_dict_per_patch_spin.value(), **self._graft_shared_params(),
             )
             self._run_batch_method(
                 "Running patch-based GraFT (this can take a while)...", patch_graft_source_extraction,
@@ -547,7 +587,7 @@ class SourceExtractionTab(QWidget):
             )
             return
 
-        self._pending_batch_params = dict(n_dict=self.graft_n_dict_spin.value())
+        self._pending_batch_params = dict(n_dict=self.graft_n_dict_spin.value(), **self._graft_shared_params())
         self._run_batch_method(
             "Running GraFT (this can take a while)...", graft_source_extraction, self._on_graft_finished,
             worker_movie=worker_movie, **self._pending_batch_params,

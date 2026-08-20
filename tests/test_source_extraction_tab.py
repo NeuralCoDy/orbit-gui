@@ -677,19 +677,35 @@ def test_cnmf_rois_record_the_batch_parameters_used():
         assert roi.params == {"n_components": 3, "search_radius": 8.0, "merge_thresh": tab.cnmf_merge_thresh_spin.value()}
 
 
+def _graft_friendly_movie(height=30, width=30, n_frames=150, seed=0):
+    """A higher-contrast synthetic movie than the shared _synthetic_movie
+    above -- GraFT's random dictionary initialization makes it more
+    sensitive to blob contrast than CNMF/PCA-ICA are (confirmed
+    empirically: the shared, lower-contrast fixture only converges to
+    both blobs in ~75% of unseeded runs at the UI's default parameters,
+    even with regularization all the way down at 0 -- this one is
+    reliable in 8/8 trials at the UI's actual (heavier) default
+    regularization values, matching what orbit.roi_extraction_graft's
+    own tests already use)."""
+    rng = np.random.default_rng(seed)
+    movie = rng.standard_normal((height, width, n_frames)).astype(np.float64) * 0.1 + 1.0
+    movie[5:10, 5:10, :] += 3 * np.clip(rng.standard_normal(n_frames), 0, None)
+    movie[20:25, 20:25, :] += 3 * np.clip(rng.standard_normal(n_frames), 0, None)
+    return np.clip(movie, 0, None)
+
+
 def test_run_graft_adds_candidates_from_both_synthetic_blobs():
     state = AppState()
-    movie = _synthetic_movie(n_frames=150)  # GraFT needs more frames than CNMF/PCA-ICA to converge reliably
+    movie = _graft_friendly_movie()
     state.load("movie.tif", movie)
     tab = SourceExtractionTab(state)
     tab.on_data_loaded()
     _wait_for_worker(tab)
 
     tab.method_combo.setCurrentIndex(tab.method_combo.findText("GraFT"))
-    # graft_n_dict_spin's own default (20) -- confirmed empirically to
-    # converge reliably against this shared, comparatively low-contrast
-    # _synthetic_movie fixture; fewer dictionary components sometimes
-    # miss one of the two blobs on this particular movie.
+    # graft_n_dict_spin's own default (20), and every other GraFT param
+    # left at the UI's own defaults -- this movie profile converges
+    # reliably at those actual defaults (see _graft_friendly_movie).
     tab._on_run_graft_clicked()
     _wait_for_worker(tab, timeout_ms=30000)
 
@@ -749,9 +765,16 @@ def test_graft_rois_record_the_batch_parameters_used():
 
     tab.method_combo.setCurrentIndex(tab.method_combo.findText("GraFT"))
     tab.graft_n_dict_spin.setValue(10)
+    tab.graft_lambda_spin.setValue(0.5)
+    tab.graft_lam_forb_spin.setValue(0.2)
+    tab.graft_lam_corr_spin.setValue(0.1)
+    tab.graft_lam_cont_spin.setValue(0.3)
+    tab.graft_learn_eps_spin.setValue(0.005)
     tab._on_run_graft_clicked()
     _wait_for_worker(tab, timeout_ms=30000)
 
     assert len(tab._candidates) > 0
     for roi in tab._candidates:
-        assert roi.params == {"n_dict": 10}
+        assert roi.params == {
+            "n_dict": 10, "lambda": 0.5, "lamForb": 0.2, "lamCorr": 0.1, "lamCont": 0.3, "learn_eps": 0.005,
+        }
