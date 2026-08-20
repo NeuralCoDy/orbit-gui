@@ -28,6 +28,7 @@ gui = [
     "tifffile>=2023.7",
     "h5py>=3.9",
     "roiapp>=0.1.0",
+    "matplotlib>=3.7",
 ]
 
 [project.scripts]
