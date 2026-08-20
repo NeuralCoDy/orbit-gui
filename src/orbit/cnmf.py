@@ -202,11 +202,13 @@ def merge_overlapping_components(
 
 def _finalize_result(movie: np.ndarray, footprints: np.ndarray, spike_traces: np.ndarray) -> CNMFResult:
     """Boolean masks + measured (masked-mean) traces from final
-    footprints. The ROI's *primary* trace is the measured signal
-    (masked-mean of the movie itself, e.g. dF/F if the movie was
-    normalized upstream), not the OASIS-denoised model reconstruction --
-    that's still available via spike_traces' deconvolution, just not
-    what callers see as "the trace"."""
+    footprints -- shared by the single-patch and patch-based entry
+    points below, since both need this identical last step. The ROI's
+    *primary* trace is the measured signal (masked-mean of the movie
+    itself, e.g. dF/F if the movie was normalized upstream), not the
+    OASIS-denoised model reconstruction -- that's still available via
+    spike_traces' deconvolution, just not what callers see as "the
+    trace"."""
     masks = [f > 0 for f in footprints]
     traces = [masked_mean_trace(movie, mask) for mask in masks]
     return CNMFResult(masks=masks, traces=traces, spike_traces=list(spike_traces))
@@ -223,7 +225,10 @@ def cnmf_source_extraction(
     n_iterations: int = 2,
 ) -> CNMFResult:
     """Full pipeline: greedy init -> [spatial update -> threshold ->
-    temporal update (+ OASIS) -> merge] x n_iterations -> final masks."""
+    temporal update (+ OASIS) -> merge] x n_iterations -> final masks.
+    See patch_cnmf_source_extraction for a version that splits a large
+    field of view into patches first, for the frames/movies where this
+    whole-FOV version doesn't scale well."""
     footprints, traces = greedy_roi_init(movie, n_components, gauss_sigma, init_radius)
     residual = movie - np.einsum("khw,kt->hwt", footprints, traces)
     background_spatial, background_temporal = estimate_background(np.clip(residual, 0, None), n_background_components)
@@ -247,3 +252,93 @@ def cnmf_source_extraction(
             noise_stds = [estimate_noise_std(t) for t in traces]
 
     return _finalize_result(movie, footprints, spike_traces)
+
+
+def _patch_bounds(size: int, patch_extent: int, overlap: int) -> list[int]:
+    """Start offsets of overlapping patches of length ``patch_extent``
+    tiling ``[0, size)`` -- the last one is pulled back to end exactly at
+    ``size`` (rather than running past it) so every pixel is covered by
+    at least one patch, matching however unevenly `size` divides. When
+    the regular stride already lands within half a stride of that edge
+    position, the last regular start is shifted to the edge instead of
+    an extra patch being appended there -- otherwise a small remainder
+    (e.g. tiling 256px with a 100px/25px-overlap patch leaves a 6px
+    remainder) adds a near-duplicate patch just a few pixels over from
+    the previous one, close to doubling total patch coverage for
+    negligible extra frame coverage."""
+    if size <= patch_extent:
+        return [0]
+    stride = max(1, patch_extent - overlap)
+    starts = list(range(0, size - patch_extent + 1, stride))
+    edge = size - patch_extent
+    if starts[-1] != edge:
+        # Shifting (rather than appending) only when there's already a
+        # second-to-last start to keep the near-0 edge covered -- if
+        # starts is just [0], shifting it away from 0 would leave [0,
+        # edge) uncovered entirely, since nothing else covers that end.
+        if len(starts) > 1 and edge - starts[-1] < stride / 2:
+            starts[-1] = edge
+        else:
+            starts.append(edge)
+    return starts
+
+
+def _make_patches(height: int, width: int, patch_size: tuple[int, int], overlap: int) -> list[tuple[int, int, int, int]]:
+    """(row0, row1, col0, col1) bounds of every patch tiling (height, width)."""
+    patch_h, patch_w = min(patch_size[0], height), min(patch_size[1], width)
+    row_starts = _patch_bounds(height, patch_h, overlap)
+    col_starts = _patch_bounds(width, patch_w, overlap)
+    return [(r0, r0 + patch_h, c0, c0 + patch_w) for r0 in row_starts for c0 in col_starts]
+
+
+def patch_cnmf_source_extraction(
+    movie: np.ndarray,
+    patch_size: tuple[int, int] = (80, 80),
+    overlap: int = 20,
+    n_components_per_patch: int = 10,
+    merge_thresh: float = 0.8,
+    progress_callback=None,
+    **cnmf_kwargs,
+) -> CNMFResult:
+    """Runs cnmf_source_extraction independently on overlapping spatial
+    patches instead of the whole field of view at once, then merges
+    components found in more than one patch's overlap region -- reusing
+    merge_overlapping_components, the same logic a single-patch run
+    already uses to resolve split/duplicate components.
+
+    Patching exists because several of cnmf_source_extraction's costs
+    scale with the *whole frame*, regardless of how many components are
+    actually in it or where (confirmed by profiling: the background NMF
+    fit dominates on a large FOV) -- restricting each run to a patch
+    keeps those bounded by patch_size instead of the full (H, W).
+    cnmf_kwargs are forwarded to every patch's cnmf_source_extraction
+    call (gauss_sigma, init_radius, search_radius, n_iterations, ...).
+    progress_callback, if given, is called as progress_callback(
+    patches_done, total_patches)."""
+    height, width, _n_frames = movie.shape
+    patches = _make_patches(height, width, patch_size, overlap)
+
+    all_footprints, all_traces, all_spikes, all_g = [], [], [], []
+    for i, (r0, r1, c0, c1) in enumerate(patches):
+        result = cnmf_source_extraction(
+            movie[r0:r1, c0:c1, :], n_components=n_components_per_patch, merge_thresh=merge_thresh, **cnmf_kwargs
+        )
+        for mask, trace, spike in zip(result.masks, result.traces, result.spike_traces):
+            if not mask.any():
+                continue
+            full_footprint = np.zeros((height, width))
+            full_footprint[r0:r1, c0:c1] = mask
+            all_footprints.append(full_footprint)
+            all_traces.append(trace)
+            all_spikes.append(spike)
+            all_g.append(estimate_ar1_coefficient(trace))
+        if progress_callback is not None:
+            progress_callback(i + 1, len(patches))
+
+    if not all_footprints:
+        return CNMFResult(masks=[], traces=[], spike_traces=[])
+
+    merged_footprints, _merged_traces, merged_spikes, _g = merge_overlapping_components(
+        np.stack(all_footprints), np.stack(all_traces), np.stack(all_spikes), all_g, merge_thresh
+    )
+    return _finalize_result(movie, merged_footprints, merged_spikes)

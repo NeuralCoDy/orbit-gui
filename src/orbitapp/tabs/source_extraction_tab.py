@@ -34,6 +34,7 @@ from __future__ import annotations
 import numpy as np
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QHBoxLayout,
     QLabel,
@@ -44,7 +45,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from orbit.cnmf import CNMFResult, cnmf_source_extraction
+from orbit.cnmf import CNMFResult, cnmf_source_extraction, patch_cnmf_source_extraction
 from orbit.neuropil import compute_neuropil_traces
 from orbit.projections import local_correlation_projection
 from orbit.roi_extraction_corr import find_seed_candidates, roi_from_seed
@@ -120,6 +121,19 @@ class SourceExtractionTab(QWidget):
         self.cnmf_search_radius_spin = make_spinbox(1, 200, 10, decimal=True)
         self.cnmf_merge_thresh_spin = make_spinbox(0.0, 1.0, 0.8, step=0.05, decimal=True)
 
+        # Patch-based CNMF: splits the FOV into overlapping square patches
+        # and runs CNMF independently on each (see orbit.cnmf docstring --
+        # several of the whole-FOV algorithm's costs scale with frame
+        # area regardless of component count, which patching bounds).
+        # Rows below live in their own "cnmf_patch" params-dialog group,
+        # nested inside "cnmf", so they only show when both the CNMF
+        # method AND this checkbox are active (_update_cnmf_patch_rows_visibility).
+        self.cnmf_patch_check = QCheckBox("Use patch-based extraction (for large fields of view)")
+        self.cnmf_patch_check.toggled.connect(self._update_cnmf_patch_rows_visibility)
+        self.cnmf_patch_size_spin = make_spinbox(10, 2000, 80)
+        self.cnmf_patch_overlap_spin = make_spinbox(0, 500, 20)
+        self.cnmf_components_per_patch_spin = make_spinbox(1, 200, 10)
+
         # Correlation click-to-add's own parameters live on the main screen
         # (see _build_correlation_rows), not in this dialog -- it's always
         # active, not tied to the Method combo below, so this dialog only
@@ -132,6 +146,10 @@ class SourceExtractionTab(QWidget):
         self.params_dialog.add_row("number of components", self.cnmf_n_components_spin, group="cnmf")
         self.params_dialog.add_row("search radius (px)", self.cnmf_search_radius_spin, group="cnmf")
         self.params_dialog.add_row("merge threshold", self.cnmf_merge_thresh_spin, group="cnmf")
+        self.params_dialog.add_row("", self.cnmf_patch_check, group="cnmf")
+        self.params_dialog.add_row("patch size (px)", self.cnmf_patch_size_spin, group="cnmf_patch")
+        self.params_dialog.add_row("patch overlap (px)", self.cnmf_patch_overlap_spin, group="cnmf_patch")
+        self.params_dialog.add_row("components per patch", self.cnmf_components_per_patch_spin, group="cnmf_patch")
 
         controls_row = QHBoxLayout()
         controls_row.addWidget(QLabel("Method:"))
@@ -225,7 +243,13 @@ class SourceExtractionTab(QWidget):
     def _on_method_changed(self, label: str) -> None:
         method = _METHOD_KEYS[label]
         self.params_dialog.show_only_group(method)
+        self._update_cnmf_patch_rows_visibility()  # show_only_group above always hides "cnmf_patch" -- reapply on top
         self.action_stack.setCurrentIndex(_METHOD_ORDER.index(method))
+
+    def _update_cnmf_patch_rows_visibility(self) -> None:
+        method = _METHOD_KEYS[self.method_combo.currentText()]
+        visible = method == "cnmf" and self.cnmf_patch_check.isChecked()
+        self.params_dialog.set_group_visible("cnmf_patch", visible)
 
     def on_data_loaded(self) -> None:
         movie = self.state.active_data()
@@ -379,6 +403,20 @@ class SourceExtractionTab(QWidget):
         self._add_candidates(rois)
 
     def _on_run_cnmf_clicked(self) -> None:
+        if self.cnmf_patch_check.isChecked():
+            patch = self.cnmf_patch_size_spin.value()
+            self._pending_batch_params = dict(
+                patch_size=(patch, patch), overlap=self.cnmf_patch_overlap_spin.value(),
+                n_components_per_patch=self.cnmf_components_per_patch_spin.value(),
+                merge_thresh=self.cnmf_merge_thresh_spin.value(),
+                search_radius=self.cnmf_search_radius_spin.value(),
+            )
+            self._run_batch_method(
+                "Running patch-based CNMF (this can take a while)...", patch_cnmf_source_extraction,
+                self._on_cnmf_finished, **self._pending_batch_params,
+            )
+            return
+
         self._pending_batch_params = dict(
             n_components=self.cnmf_n_components_spin.value(), search_radius=self.cnmf_search_radius_spin.value(),
             merge_thresh=self.cnmf_merge_thresh_spin.value(),

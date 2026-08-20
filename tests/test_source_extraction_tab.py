@@ -94,6 +94,29 @@ def test_params_dialog_only_shows_selected_methods_group():
     assert tab.params_dialog.form.isRowVisible(tab.cnmf_n_components_spin)
 
 
+def test_cnmf_patch_rows_only_visible_for_cnmf_method_and_when_checked():
+    state = AppState()
+    tab = SourceExtractionTab(state)
+
+    # Default: PCA-ICA selected, checkbox unchecked -- patch rows hidden either way.
+    assert not tab.params_dialog.form.isRowVisible(tab.cnmf_patch_size_spin)
+
+    tab.method_combo.setCurrentIndex(tab.method_combo.findText("CNMF"))
+    assert tab.params_dialog.form.isRowVisible(tab.cnmf_patch_check)
+    assert not tab.params_dialog.form.isRowVisible(tab.cnmf_patch_size_spin)  # checkbox still unchecked
+
+    tab.cnmf_patch_check.setChecked(True)
+    assert tab.params_dialog.form.isRowVisible(tab.cnmf_patch_size_spin)
+    assert tab.params_dialog.form.isRowVisible(tab.cnmf_patch_overlap_spin)
+    assert tab.params_dialog.form.isRowVisible(tab.cnmf_components_per_patch_spin)
+
+    # Switching away and back to CNMF must not lose the checked state's rows.
+    tab.method_combo.setCurrentIndex(tab.method_combo.findText("PCA-ICA"))
+    assert not tab.params_dialog.form.isRowVisible(tab.cnmf_patch_size_spin)
+    tab.method_combo.setCurrentIndex(tab.method_combo.findText("CNMF"))
+    assert tab.params_dialog.form.isRowVisible(tab.cnmf_patch_size_spin)
+
+
 def test_fov_view_panning_is_always_disabled():
     # Clicking the FOV view always seeds a new ROI now (no separate "click
     # mode" toggle), so pyqtgraph's default left-drag panning -- which a
@@ -398,6 +421,57 @@ def test_run_cnmf_adds_candidates_from_both_synthetic_blobs():
     near_a = any(np.hypot(*(c - (7.5, 7.5))) < 4 for c in centers)
     near_b = any(np.hypot(*(c - (22.5, 22.5))) < 4 for c in centers)
     assert near_a and near_b
+
+
+def test_run_patch_cnmf_adds_candidates_from_both_synthetic_blobs():
+    state = AppState()
+    movie = _synthetic_movie()
+    state.load("movie.tif", movie)
+    tab = SourceExtractionTab(state)
+    tab.on_data_loaded()
+    _wait_for_worker(tab)
+
+    tab.method_combo.setCurrentIndex(tab.method_combo.findText("CNMF"))
+    tab.cnmf_patch_check.setChecked(True)
+    tab.cnmf_patch_size_spin.setValue(18)
+    tab.cnmf_patch_overlap_spin.setValue(6)
+    tab.cnmf_components_per_patch_spin.setValue(2)
+    tab.cnmf_search_radius_spin.setValue(8)
+    tab._on_run_cnmf_clicked()
+    _wait_for_worker(tab)
+
+    assert len(tab._candidates) > 0
+    assert all(roi.source_method == "cnmf" for roi in tab._candidates)
+    assert all(roi.status == "pending" for roi in tab._candidates)
+    assert all(roi.spike_trace is not None for roi in tab._candidates)
+
+    centers = [np.argwhere(roi.mask).mean(axis=0) for roi in tab._candidates if roi.mask.any()]
+    near_a = any(np.hypot(*(c - (7.5, 7.5))) < 4 for c in centers)
+    near_b = any(np.hypot(*(c - (22.5, 22.5))) < 4 for c in centers)
+    assert near_a and near_b
+
+
+def test_run_patch_cnmf_records_patch_params_on_each_roi():
+    state = AppState()
+    movie = _synthetic_movie()
+    state.load("movie.tif", movie)
+    tab = SourceExtractionTab(state)
+    tab.on_data_loaded()
+    _wait_for_worker(tab)
+
+    tab.method_combo.setCurrentIndex(tab.method_combo.findText("CNMF"))
+    tab.cnmf_patch_check.setChecked(True)
+    tab.cnmf_patch_size_spin.setValue(18)
+    tab.cnmf_patch_overlap_spin.setValue(6)
+    tab.cnmf_components_per_patch_spin.setValue(2)
+    tab._on_run_cnmf_clicked()
+    _wait_for_worker(tab)
+
+    assert len(tab._candidates) > 0
+    for roi in tab._candidates:
+        assert roi.params["patch_size"] == (18, 18)
+        assert roi.params["overlap"] == 6
+        assert roi.params["n_components_per_patch"] == 2
 
 
 def test_run_cnmf_without_data_warns(monkeypatch):
