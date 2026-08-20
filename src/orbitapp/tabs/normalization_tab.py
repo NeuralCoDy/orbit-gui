@@ -17,11 +17,11 @@ import pyqtgraph as pg
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QCheckBox, QComboBox, QHBoxLayout, QLabel, QPushButton
 
-from orbit.normalization import normalize_movie, pixel_value_histogram, summary_stats
+from orbit.normalization import describe_normalization, normalize_movie, pixel_value_histogram, summary_stats
 from orbit.qc_traces import qc_trace_samples
 
 from ..state import AppState
-from ..widgets import ParametersDialog, QCPlotGrid, add_location_markers, split_by_kind
+from ..widgets import ParametersDialog, QCPlotGrid, add_location_markers, pixels_to_data_pos, split_by_kind
 from ..workers import run_worker
 from .stage_tab import StageTab
 
@@ -62,6 +62,7 @@ def _plot_histograms(plots: list[pg.PlotWidget], sample: dict) -> None:
 class NormalizationTab(StageTab):
     _stage_name = "Normalization"
     _result_key = "normalized"
+    _stage_key = "normalization"
 
     def __init__(self, state: AppState, parent=None) -> None:
         super().__init__(state, apply_label="Apply Normalization", parent=parent)
@@ -71,13 +72,17 @@ class NormalizationTab(StageTab):
         self.center_check.setChecked(True)
         self.center_baseline_combo = QComboBox()
         self.center_baseline_combo.addItems(_CENTER_BASELINES)
+        self.center_baseline_combo.setCurrentText("mode")
         self.pixel_center_check = QCheckBox("Center per-pixel (not globally)")
+        self.pixel_center_check.setChecked(True)
 
         self.normalize_check = QCheckBox("Normalize")
         self.normalize_check.setChecked(True)
         self.norm_baseline_combo = QComboBox()
         self.norm_baseline_combo.addItems(_NORM_BASELINES)
+        self.norm_baseline_combo.setCurrentText("robuststd")
         self.pixel_norm_check = QCheckBox("Normalize per-pixel (not globally)")
+        self.pixel_norm_check.setChecked(True)
 
         self.params_dialog = ParametersDialog(title="Normalization Parameters", parent=self)
         self.params_dialog.add_row("", self.center_check)
@@ -105,13 +110,45 @@ class NormalizationTab(StageTab):
             plots_per_sample=2, sub_labels=["Before", "After"],
             xlabel="pixel value", ylabel="count", add_legend=False,
         )
+        # Every "Before" plot shares one x-axis, every "After" plot shares
+        # another -- directly comparable within a column (before/after can
+        # differ wildly in scale from each other, which is why they're
+        # separate plots rather than overlaid in the first place).
+        rows = self.hist_grid.left_rows + self.hist_grid.right_rows
+        for column in range(2):
+            plots_in_column = [row[column] for row in rows]
+            for plot in plots_in_column[1:]:
+                plot.setXLink(plots_in_column[0])
         self.panel.add_metric_widget(self.hist_grid)
 
     def _on_data_reset(self) -> None:
         self._location_markers.clear()
 
+    def _current_fingerprint(self) -> dict:
+        return dict(
+            center=self.center_check.isChecked(), center_baseline=self.center_baseline_combo.currentText(),
+            pixel_center=self.pixel_center_check.isChecked(), normalize=self.normalize_check.isChecked(),
+            norm_baseline=self.norm_baseline_combo.currentText(), pixel_norm=self.pixel_norm_check.isChecked(),
+        )
+
+    def restore_params(self, params: dict) -> None:
+        if "center" in params:
+            self.center_check.setChecked(params["center"])
+        if "center_baseline" in params:
+            self.center_baseline_combo.setCurrentText(params["center_baseline"])
+        if "pixel_center" in params:
+            self.pixel_center_check.setChecked(params["pixel_center"])
+        if "normalize" in params:
+            self.normalize_check.setChecked(params["normalize"])
+        if "norm_baseline" in params:
+            self.norm_baseline_combo.setCurrentText(params["norm_baseline"])
+        if "pixel_norm" in params:
+            self.pixel_norm_check.setChecked(params["pixel_norm"])
+
+    def _extract_metrics(self, result: dict) -> dict:
+        return dict(stats_before=result["stats_before"], stats_after=result["stats_after"])
+
     def _start_worker(self, movie: np.ndarray) -> None:
-        self._pending_step_label = "Normalize"
         kwargs = dict(
             center=self.center_check.isChecked(),
             center_baseline=self.center_baseline_combo.currentText(),
@@ -120,6 +157,7 @@ class NormalizationTab(StageTab):
             norm_baseline=self.norm_baseline_combo.currentText(),
             pixel_norm=self.pixel_norm_check.isChecked(),
         )
+        self._pending_step_label = f"Normalize {describe_normalization(**kwargs)}"
         self.worker = run_worker(
             self.busy_bar, "Running normalization and metrics...",
             _run_and_assess, movie, on_success=self._on_finished, on_failure=self._on_failed, **kwargs,
@@ -136,6 +174,10 @@ class NormalizationTab(StageTab):
         )
 
         qc_traces = result["qc_traces"]
-        self._location_markers.setData([s["row"] + 0.5 for s in qc_traces], [s["col"] + 0.5 for s in qc_traces])
+        marker_xs, marker_ys = pixels_to_data_pos(
+            self.panel.before_view.getImageItem(),
+            [s["row"] + 0.5 for s in qc_traces], [s["col"] + 0.5 for s in qc_traces],
+        )
+        self._location_markers.setData(marker_xs, marker_ys)
         peak_samples, low_samples = split_by_kind(qc_traces)
         self.hist_grid.fill(peak_samples, low_samples, _plot_histograms)

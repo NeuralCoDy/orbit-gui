@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 from .. import io as orbitapp_io
 from ..format import format_movie_summary
 from ..state import AppState
-from ..widgets import BusyBar
+from ..widgets import BusyBar, confirm_recompute, show_movie_popout
 from ..workers import FunctionWorker, run_worker
 
 
@@ -41,6 +41,7 @@ class LoadTab(QWidget):
         self.state = state
         self.worker: FunctionWorker | None = None
         self._pending_path: str | None = None
+        self._movie_player: MovieSliderWidget | None = None
 
         sidebar = QWidget()
         sidebar_layout = QVBoxLayout(sidebar)
@@ -48,11 +49,17 @@ class LoadTab(QWidget):
         for label, slot in (
             ("Browse File...", self._browse_file),
             ("Browse Folder (TIFF sequence)...", self._browse_folder),
+            ("Load Default Dataset", self._load_default_dataset),
         ):
             btn = QPushButton(label)
             btn.clicked.connect(slot)
             sidebar_layout.addWidget(btn)
             self._browse_buttons.append(btn)
+
+        self.view_movie_btn = QPushButton("View Movie")
+        self.view_movie_btn.setEnabled(False)
+        self.view_movie_btn.clicked.connect(self._on_view_movie_clicked)
+        sidebar_layout.addWidget(self.view_movie_btn)
 
         self.busy_bar = BusyBar()
         sidebar_layout.addWidget(self.busy_bar)
@@ -86,12 +93,27 @@ class LoadTab(QWidget):
             self._load(path)
 
     def _load(self, path: str) -> None:
+        self._begin_load(path, f"Loading {path}...", orbitapp_io.load_movie, path)
+
+    def _load_default_dataset(self) -> None:
+        path = str(orbitapp_io.DEFAULT_DATASET_PATH)
+        self._begin_load(path, "Loading default dataset (downloading if needed)...", orbitapp_io.load_default_dataset)
+
+    def _begin_load(self, path: str, message: str, fn, *args) -> None:
+        """Shared by every "load a movie" action -- skips redoing the
+        work (after confirming) if this exact path is already the active
+        dataset, since re-downloading/re-reading it would just reproduce
+        what's already loaded."""
+        if self.state.data_path == path and not confirm_recompute(self, f"'{path}' is already loaded."):
+            return
         self._pending_path = path
+        self._start_load(message, fn, *args)
+
+    def _start_load(self, message: str, fn, *args) -> None:
         for btn in self._browse_buttons:
             btn.setEnabled(False)
         self.worker = run_worker(
-            self.busy_bar, f"Loading {path}...", orbitapp_io.load_movie, path,
-            on_success=self._on_loaded, on_failure=self._on_failed,
+            self.busy_bar, message, fn, *args, on_success=self._on_loaded, on_failure=self._on_failed
         )
 
     def _on_loaded(self, movie: np.ndarray) -> None:
@@ -111,8 +133,15 @@ class LoadTab(QWidget):
         self.busy_bar.stop(f"Loaded {path}.")
         for btn in self._browse_buttons:
             btn.setEnabled(True)
+        self.view_movie_btn.setEnabled(True)
 
         self.data_loaded.emit()
+
+    def _on_view_movie_clicked(self) -> None:
+        movie = self.state.active_data()
+        if movie is None:
+            return
+        self._movie_player = show_movie_popout(self._movie_player, movie, "Movie Player - Loaded Movie")
 
     def _on_failed(self, message: str) -> None:
         self.busy_bar.stop("Load failed.")

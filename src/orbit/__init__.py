@@ -6,6 +6,7 @@ every stage and every metric is a standalone, independently testable
 function, called by the GUI rather than implemented inside it.
 """
 
+from .cnmf import CNMFResult, cnmf_source_extraction
 from .denoising import (
     denoise_gaussian,
     denoise_median,
@@ -20,7 +21,8 @@ from .motion_metrics import (
     mean_max_intensity_difference,
     spatiotemporal_svd,
 )
-from .normalization import normalize_movie, pixel_value_histogram, robust_std, summary_stats
+from .neuropil import compute_neuropil_traces, neuropil_ring_mask
+from .normalization import describe_normalization, normalize_movie, pixel_value_histogram, robust_std, summary_stats
 from .patchwarp import patchwarp_motion_correct
 from .projections import (
     fano_factor_projection,
@@ -31,6 +33,8 @@ from .projections import (
     variance_projection,
 )
 from .qc_traces import qc_trace_samples
+from .roi_extraction_corr import CorrMaskResult, find_seed_candidates, roi_from_seed
+from .roi_extraction_pca_ica import PCAICAResult, pca_ica_source_extraction
 
 __all__ = [
     "mean_projection",
@@ -54,7 +58,17 @@ __all__ = [
     "qc_trace_samples",
     "residual_energy_fraction",
     "normalize_movie",
+    "describe_normalization",
     "pixel_value_histogram",
     "robust_std",
     "summary_stats",
+    "CorrMaskResult",
+    "roi_from_seed",
+    "find_seed_candidates",
+    "compute_neuropil_traces",
+    "neuropil_ring_mask",
+    "PCAICAResult",
+    "pca_ica_source_extraction",
+    "CNMFResult",
+    "cnmf_source_extraction",
 ]

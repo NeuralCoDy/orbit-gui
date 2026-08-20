@@ -1,6 +1,6 @@
 import numpy as np
 
-from orbit.normalization import normalize_movie, pixel_value_histogram, robust_std, summary_stats
+from orbit.normalization import describe_normalization, normalize_movie, pixel_value_histogram, robust_std, summary_stats
 
 
 def test_robust_std_matches_std_for_normal_data():
@@ -91,3 +91,27 @@ def test_pixel_value_histogram_bin_count_matches_n_bins():
     trace = rng.standard_normal(500)
     hist = pixel_value_histogram(trace, n_bins=15)
     assert len(hist["counts"]) == 15
+
+
+def test_describe_normalization_both_pixel_wise():
+    desc = describe_normalization(
+        center=True, center_baseline="mode", pixel_center=True,
+        normalize=True, norm_baseline="median", pixel_norm=True,
+    )
+    assert desc == "(pixel-mode, pixel-median)"
+
+
+def test_describe_normalization_center_disabled_normalize_global():
+    desc = describe_normalization(
+        center=False, center_baseline="min", pixel_center=False,
+        normalize=True, norm_baseline="median", pixel_norm=False,
+    )
+    assert desc == "([], all-median)"
+
+
+def test_describe_normalization_both_disabled():
+    desc = describe_normalization(
+        center=False, center_baseline="min", pixel_center=False,
+        normalize=False, norm_baseline="median", pixel_norm=False,
+    )
+    assert desc == "([], [])"

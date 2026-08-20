@@ -79,6 +79,22 @@ def normalize_movie(
     return np.nan_to_num(movie, nan=0.0)
 
 
+def describe_normalization(
+    center: bool, center_baseline: str, pixel_center: bool, normalize: bool, norm_baseline: str, pixel_norm: bool
+) -> str:
+    """Human-readable summary of a normalize_movie() call, e.g.
+    "(pixel-mode, pixel-median)" or "([], all-median)" -- used as the
+    pipeline-breadcrumb detail for a committed normalization step, since
+    "Normalize" alone doesn't say which baseline/scope was actually used."""
+
+    def _describe(enabled: bool, baseline: str, pixel_wise: bool) -> str:
+        if not enabled:
+            return "[]"
+        return f"{'pixel' if pixel_wise else 'all'}-{baseline}"
+
+    return f"({_describe(center, center_baseline, pixel_center)}, {_describe(normalize, norm_baseline, pixel_norm)})"
+
+
 def summary_stats(movie: np.ndarray) -> dict[str, float]:
     """Basic distribution summary -- a quick sanity check that a
     centering/normalization transform did something reasonable (values

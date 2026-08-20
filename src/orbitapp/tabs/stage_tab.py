@@ -5,9 +5,19 @@ active dataset and records the step in the pipeline breadcrumb. Nothing
 overwrites the active dataset until Commit is clicked.
 
 Subclasses provide the algorithm-specific pieces: `_stage_name` and
-`_result_key` class attributes, `_build_controls_row`/`_build_metrics`
-to lay out their own widgets, `_start_worker` to launch the Apply run,
-and `_render_result` to show a finished candidate.
+`_result_key`/`_stage_key` class attributes, `_build_controls_row`/
+`_build_metrics` to lay out their own widgets, `_current_fingerprint` to
+snapshot their parameter widgets as a named dict (see below),
+`restore_params` to set widgets back from a loaded dict (the inverse),
+`_start_worker` to launch the Apply run, and `_render_result` to show a
+finished candidate. `_extract_metrics` is optional -- headline QC
+numbers worth recording alongside a commit (see session_io.py).
+
+Clicking Apply again with the same input data and the same parameters as
+the last successful run would just reproduce the same candidate, so
+that's caught before spending real time on it -- confirmed once via a
+Yes/No dialog rather than silently blocked, in case the algorithm is
+non-deterministic or the user just wants to force a rerun.
 """
 
 from __future__ import annotations
@@ -17,7 +27,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QMessageBox, QVBoxLayout, QWidget
 
 from ..state import AppState
-from ..widgets import BusyBar, CommitControls, StagePanel
+from ..widgets import BusyBar, CommitControls, StagePanel, confirm_recompute
 from ..workers import FunctionWorker
 
 
@@ -26,6 +36,7 @@ class StageTab(QWidget):
 
     _stage_name = "Stage"  # used in the failure dialog title
     _result_key = "result"  # key into the worker's result dict for the candidate array
+    _stage_key = "stage"  # lowercase identifier recorded in AppState.steps / session_io.py
 
     def __init__(
         self,
@@ -41,6 +52,9 @@ class StageTab(QWidget):
         self._input_movie: np.ndarray | None = None
         self._pending_result: dict | None = None
         self._pending_step_label: str | None = None
+        self._pending_params: dict = {}
+        self._pending_fingerprint: tuple | None = None
+        self._last_run: tuple | None = None  # (id(movie), fingerprint of _current_fingerprint()) of the last successful Apply
 
         layout = QVBoxLayout(self)
 
@@ -81,11 +95,36 @@ class StageTab(QWidget):
         self.commit_controls.set_commit_enabled(False)
         self._pending_result = None
         self._pending_step_label = None
+        self._last_run = None  # a new/changed movie invalidates any prior "already run" state
         self._on_data_reset()
         if movie is not None:
             self.panel.before_view.setImage(movie.mean(axis=2))
             self.panel.set_before_movie(movie)
             self.status_label.setText(f"Ready. shape={movie.shape}")
+
+    def _current_fingerprint(self) -> dict:
+        """Named snapshot of every widget value that affects the
+        algorithm's output -- subclasses read their own parameter
+        widgets into a dict. Doubles as (a) a hashable-once-sorted
+        fingerprint to detect an unchanged rerun and (b) the exact params
+        recorded against a commit for session_io.py's pipeline file --
+        see restore_params for the inverse (loading a session back in)."""
+        raise NotImplementedError
+
+    def restore_params(self, params: dict) -> None:
+        """Sets this stage's parameter widgets from a previously-saved
+        _current_fingerprint() dict -- used when loading a session back
+        in. Subclasses should tolerate missing/extra keys gracefully
+        (a saved session may predate a newer parameter)."""
+        raise NotImplementedError
+
+    def _extract_metrics(self, result: dict) -> dict:
+        """Headline scalar QC numbers worth recording alongside a commit
+        (see session_io.py) -- e.g. a residual energy fraction or a
+        before/after correlation. No-op by default; only the *small*,
+        JSON-serializable summary numbers belong here, not full arrays
+        (those already live in the candidate result itself)."""
+        return {}
 
     def _start_worker(self, movie: np.ndarray) -> None:
         """Sets self._pending_step_label and launches self.worker via
@@ -98,6 +137,15 @@ class StageTab(QWidget):
             QMessageBox.warning(self, "No data", "Load data on the Load tab first.")
             return
 
+        params = self._current_fingerprint()
+        fingerprint = (id(movie), tuple(sorted(params.items())))
+        if fingerprint == self._last_run:
+            message = f"{self._stage_name} was already run with these exact parameters on this data."
+            if not confirm_recompute(self, message):
+                return
+
+        self._pending_fingerprint = fingerprint
+        self._pending_params = params
         self._input_movie = movie
         self.commit_controls.set_apply_enabled(False)
         self.commit_controls.set_commit_enabled(False)
@@ -109,6 +157,7 @@ class StageTab(QWidget):
         raise NotImplementedError
 
     def _on_finished(self, result: dict) -> None:
+        self._last_run = self._pending_fingerprint
         self._pending_result = result
         self._render_result(result)
 
@@ -129,7 +178,11 @@ class StageTab(QWidget):
     def _commit(self) -> None:
         if self._pending_result is None:
             return
-        self.state.commit(self._pending_result[self._result_key], self._pending_step_label)
+        metrics = self._extract_metrics(self._pending_result)
+        self.state.commit(
+            self._pending_result[self._result_key], self._pending_step_label,
+            stage=self._stage_key, params=self._pending_params, metrics=metrics,
+        )
         self.status_label.setText(f"Committed as pipeline step '{self._pending_step_label}'.")
         self.commit_controls.set_commit_enabled(False)
         self.data_changed.emit()

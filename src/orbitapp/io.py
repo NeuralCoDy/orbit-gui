@@ -6,9 +6,29 @@ doesn't require all of them (see tests/test_io.py's importorskip use).
 
 from __future__ import annotations
 
+import tempfile
+import urllib.request
 from pathlib import Path
 
 import numpy as np
+
+# Dropbox share links serve an HTML preview page unless dl=1 forces the raw
+# file -- swapping that one query param is enough, no API/auth needed.
+_DEFAULT_DATASET_URL = (
+    "https://www.dropbox.com/scl/fi/agql0ng6zbilpmf5dk4cw/file_00001.tif"
+    "?rlkey=67fjgkves4y9rj2msd3cvg40d&st=t6p7taa4&dl=1"
+)
+DEFAULT_DATASET_PATH = Path(tempfile.gettempdir()) / "orbit_gui_default_dataset.tif"
+
+
+def load_default_dataset() -> np.ndarray:
+    """Loads the bundled example movie, downloading it from Dropbox into a
+    local temp-dir cache the first time it's needed -- later calls (even
+    from a future app launch) reuse that same cached file instead of
+    re-downloading."""
+    if not DEFAULT_DATASET_PATH.exists():
+        urllib.request.urlretrieve(_DEFAULT_DATASET_URL, DEFAULT_DATASET_PATH)
+    return load_movie(DEFAULT_DATASET_PATH)
 
 
 def load_movie(path: str | Path) -> np.ndarray:

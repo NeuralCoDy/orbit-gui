@@ -59,6 +59,7 @@ def _run_and_assess(movie: np.ndarray, method: str, n_components: int, **kwargs)
 class MotionCorrectionTab(StageTab):
     _stage_name = "Motion correction"
     _result_key = "registered"
+    _stage_key = "motion_correction"
 
     def __init__(self, state: AppState, parent=None) -> None:
         super().__init__(state, apply_label="Apply Motion Correction", parent=parent)
@@ -118,6 +119,31 @@ class MotionCorrectionTab(StageTab):
         self.pc_slideshow = ImageSlideshow()
         pc_layout.addWidget(self.pc_slideshow)
         self.panel.add_metric_widget(pc_container)
+
+    def _current_fingerprint(self) -> dict:
+        return dict(
+            method=self.method_combo.currentText(), max_shift=self.max_shift_spin.value(),
+            upsample_factor=self.upsample_spin.value(), n_iter=self.n_iter_spin.value(),
+            grid_size=self.grid_size_spin.value(), patchwarp_grid=self.patchwarp_grid_spin.value(),
+            overlap_frac=self.overlap_frac_spin.value(), ecc_iterations=self.ecc_iterations_spin.value(),
+            pyramid_levels=self.pyramid_levels_spin.value(), n_components=self.pc_count_spin.value(),
+        )
+
+    def restore_params(self, params: dict) -> None:
+        if "method" in params:
+            self.method_combo.setCurrentText(params["method"])
+        for key, spin in (
+            ("max_shift", self.max_shift_spin), ("upsample_factor", self.upsample_spin),
+            ("n_iter", self.n_iter_spin), ("grid_size", self.grid_size_spin),
+            ("patchwarp_grid", self.patchwarp_grid_spin), ("overlap_frac", self.overlap_frac_spin),
+            ("ecc_iterations", self.ecc_iterations_spin), ("pyramid_levels", self.pyramid_levels_spin),
+            ("n_components", self.pc_count_spin),
+        ):
+            if key in params:
+                spin.setValue(params[key])
+
+    def _extract_metrics(self, result: dict) -> dict:
+        return dict(mmd=result["mmd"], mcm_before=result["mcm_before"], mcm_after=result["mcm_after"], ecc=result["ecc"])
 
     def _start_worker(self, movie: np.ndarray) -> None:
         method_text = self.method_combo.currentText()

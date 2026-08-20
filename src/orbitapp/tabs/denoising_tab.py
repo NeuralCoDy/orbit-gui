@@ -25,7 +25,7 @@ from orbit.projections import local_correlation_projection
 from orbit.qc_traces import qc_trace_samples
 
 from ..state import AppState
-from ..widgets import ParametersDialog, QCPlotGrid, add_location_markers, make_spinbox, split_by_kind
+from ..widgets import ParametersDialog, QCPlotGrid, add_location_markers, make_spinbox, pixels_to_data_pos, split_by_kind
 from ..workers import run_worker
 from .stage_tab import StageTab
 
@@ -90,6 +90,7 @@ def _plot_trace(plots, sample: dict) -> None:
 class DenoisingTab(StageTab):
     _stage_name = "Denoising"
     _result_key = "denoised"
+    _stage_key = "denoising"
 
     def __init__(self, state: AppState, parent=None) -> None:
         super().__init__(state, apply_label="Apply Denoising", parent=parent)
@@ -147,6 +148,35 @@ class DenoisingTab(StageTab):
     def _on_data_reset(self) -> None:
         self._location_markers.clear()
 
+    def _current_fingerprint(self) -> dict:
+        return dict(
+            algorithm=self.method_combo.currentText(), wavelet=self.wavelet_combo.currentText(),
+            level=self.level_spin.value(), threshold_method=self.threshold_combo.currentText(),
+            spatial_sigma=self.gaussian_spatial_spin.value(), temporal_sigma=self.gaussian_temporal_spin.value(),
+            space_window=self.median_space_spin.value(), time_window=self.median_time_spin.value(),
+        )
+
+    def restore_params(self, params: dict) -> None:
+        if "algorithm" in params:
+            self.method_combo.setCurrentText(params["algorithm"])
+        if "threshold_method" in params:
+            self.threshold_combo.setCurrentText(params["threshold_method"])
+        if "wavelet" in params:
+            self.wavelet_combo.setCurrentText(params["wavelet"])
+        for key, spin in (
+            ("level", self.level_spin), ("spatial_sigma", self.gaussian_spatial_spin),
+            ("temporal_sigma", self.gaussian_temporal_spin), ("space_window", self.median_space_spin),
+            ("time_window", self.median_time_spin),
+        ):
+            if key in params:
+                spin.setValue(params[key])
+
+    def _extract_metrics(self, result: dict) -> dict:
+        return dict(
+            residual_energy_fraction=result["residual_energy_fraction"], corr_before=result["corr_before"],
+            corr_after=result["corr_after"],
+        )
+
     def _start_worker(self, movie: np.ndarray) -> None:
         algorithm = _ALGORITHM_KEYS[self.method_combo.currentText()]
         self._pending_step_label = _PIPELINE_LABELS[algorithm]
@@ -180,6 +210,10 @@ class DenoisingTab(StageTab):
         )
 
         qc_traces = result["qc_traces"]
-        self._location_markers.setData([s["row"] + 0.5 for s in qc_traces], [s["col"] + 0.5 for s in qc_traces])
+        marker_xs, marker_ys = pixels_to_data_pos(
+            self.panel.before_view.getImageItem(),
+            [s["row"] + 0.5 for s in qc_traces], [s["col"] + 0.5 for s in qc_traces],
+        )
+        self._location_markers.setData(marker_xs, marker_ys)
         peak_samples, low_samples = split_by_kind(qc_traces)
         self.trace_grid.fill(peak_samples, low_samples, _plot_trace)

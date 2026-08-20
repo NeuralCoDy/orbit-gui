@@ -5,6 +5,7 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import QApplication, QDoubleSpinBox, QLabel, QSpinBox  # noqa: E402
 
+from orbitapp.state import ROI  # noqa: E402
 from orbitapp.widgets import (  # noqa: E402
     BusyBar,
     CommitControls,
@@ -12,6 +13,7 @@ from orbitapp.widgets import (  # noqa: E402
     ImageSlideshow,
     ParametersDialog,
     QCPlotGrid,
+    ROIReviewPanel,
     StagePanel,
     make_spinbox,
     split_by_kind,
@@ -322,3 +324,112 @@ def test_qc_plot_grid_multiple_plots_per_sample():
     calls = []
     grid.fill([{"id": "p1"}], [{"id": "l1"}], lambda plots, sample: calls.append((len(plots), sample["id"])))
     assert calls == [(2, "p1"), (2, "l1")]
+
+
+def _make_roi(roi_id, status="pending"):
+    mask = np.zeros((5, 5), dtype=bool)
+    mask[roi_id, roi_id] = True
+    return ROI(id=roi_id, mask=mask, trace=np.arange(10, dtype=float), source_method="correlation", status=status)
+
+
+def test_roi_review_panel_set_candidates_populates_table():
+    panel = ROIReviewPanel()
+    panel.set_candidates([_make_roi(0), _make_roi(1)])
+
+    assert panel.table.rowCount() == 2
+    assert panel.table.item(0, 0).text() == "0"
+    assert panel.table.item(1, 2).text() == "pending"
+
+
+def test_roi_review_panel_accept_all_updates_status_and_emits():
+    panel = ROIReviewPanel()
+    rois = [_make_roi(0), _make_roi(1)]
+    panel.set_candidates(rois)
+
+    changes = []
+    panel.roi_status_changed.connect(lambda roi_id, status: changes.append((roi_id, status)))
+    panel._set_all_status("accepted")
+
+    assert all(roi.status == "accepted" for roi in rois)
+    assert changes == [(0, "accepted"), (1, "accepted")]
+    assert panel.table.item(0, 2).text() == "accepted"
+
+
+def test_roi_review_panel_selection_plots_trace_and_emits_selected():
+    panel = ROIReviewPanel()
+    panel.set_candidates([_make_roi(0), _make_roi(1)])
+
+    selected = []
+    panel.roi_selected.connect(selected.append)
+    panel.table.selectRow(1)
+
+    assert selected == [1]
+    assert len(panel.trace_plot.getPlotItem().listDataItems()) == 1
+    assert len(panel.diff_plot.getPlotItem().listDataItems()) == 0  # no neuropil_trace on this fixture
+
+
+def test_roi_review_panel_selection_plots_trace_minus_neuropil_in_diff_plot():
+    panel = ROIReviewPanel()
+    roi = _make_roi(0)
+    roi.neuropil_trace = roi.trace - 1.0
+    panel.set_candidates([roi])
+
+    panel.table.selectRow(0)
+
+    diff_items = panel.diff_plot.getPlotItem().listDataItems()
+    assert len(diff_items) == 1
+    assert np.allclose(diff_items[0].yData, roi.trace - roi.neuropil_trace)
+
+
+def test_roi_review_panel_set_preview_roi_highlights_fov_panel():
+    panel = ROIReviewPanel()
+    mask = np.zeros((5, 5), dtype=bool)
+    mask[2, 2] = True
+    preview = ROI(id=-1, mask=mask, trace=np.arange(10, dtype=float), source_method="correlation", status="preview")
+
+    panel.set_preview_roi(preview)
+    assert panel._highlight_item.image is not None
+    assert panel.table.rowCount() == 1  # listed as "ROI -1"
+
+    panel.set_preview_roi(None)
+    assert panel._highlight_item.image is None
+    assert panel.table.rowCount() == 0
+
+
+def test_roi_review_panel_selecting_a_roi_highlights_it_in_the_fov_panel():
+    # The merged FOV/Selected-ROI panel highlights whichever ROI is
+    # selected -- from the table or the Current ROIs view -- and clears
+    # once it's gone from the collection.
+    panel = ROIReviewPanel()
+    panel.set_candidates([_make_roi(0), _make_roi(1)])
+
+    panel.table.selectRow(1)
+    assert panel._highlight_item.image is not None
+
+    panel._delete_selected()
+    assert panel._highlight_item.image is None
+
+
+def test_roi_review_panel_find_roi_at_pixel_matches_the_covering_mask():
+    panel = ROIReviewPanel()
+    panel.set_candidates([_make_roi(0), _make_roi(1)])
+
+    assert panel._find_roi_at_pixel(0, 0) == 0
+    assert panel._find_roi_at_pixel(1, 1) == 1
+    assert panel._find_roi_at_pixel(4, 4) is None
+
+
+def test_roi_review_panel_delete_selected_removes_from_collection_and_emits():
+    panel = ROIReviewPanel()
+    rois = [_make_roi(0), _make_roi(1)]
+    panel.set_candidates(rois)
+
+    deleted = []
+    panel.roi_deleted.connect(deleted.append)
+    panel.table.selectRow(0)
+    panel._delete_selected()
+
+    assert deleted == [0]
+    assert len(rois) == 1  # panel._rois is the same list object -- mutated in place
+    assert rois[0].id == 1
+    assert panel.table.rowCount() == 1

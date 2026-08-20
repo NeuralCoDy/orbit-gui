@@ -1,6 +1,6 @@
 import numpy as np
 
-from orbitapp.state import AppState
+from orbitapp.state import ROI, AppState
 
 
 def test_active_data_prefers_preprocessed_over_original():
@@ -50,3 +50,46 @@ def test_commit_can_be_called_multiple_times():
 
     assert state.pipeline == ["Load", "Patch Warp", "Normalize"]
     assert np.all(state.active_data() == 2.0)
+
+
+def _make_roi(roi_id: int, source_method: str = "correlation") -> ROI:
+    return ROI(
+        id=roi_id,
+        mask=np.zeros((4, 4), dtype=bool),
+        trace=np.zeros(5),
+        source_method=source_method,
+    )
+
+
+def test_commit_rois_accumulates_across_calls_and_methods():
+    state = AppState()
+    state.load("/some/movie.tif", np.zeros((4, 4, 5)))
+
+    state.commit_rois([_make_roi(1, "correlation"), _make_roi(2, "correlation")], "Correlation ROIs")
+    state.commit_rois([_make_roi(3, "pca_ica")], "PCA-ICA")
+
+    assert [r.id for r in state.rois] == [1, 2, 3]
+    assert {r.source_method for r in state.rois} == {"correlation", "pca_ica"}
+    assert state.pipeline == ["Load", "Correlation ROIs", "PCA-ICA"]
+
+
+def test_load_resets_rois():
+    state = AppState()
+    state.load("/some/movie.tif", np.zeros((4, 4, 5)))
+    state.commit_rois([_make_roi(1)], "Correlation ROIs")
+
+    state.load("/other/movie.tif", np.zeros((4, 4, 5)))
+
+    assert state.rois == []
+    assert state.pipeline == ["Load"]
+
+
+def test_clear_rois_empties_committed_rois_but_keeps_pipeline_history():
+    state = AppState()
+    state.load("/some/movie.tif", np.zeros((4, 4, 5)))
+    state.commit_rois([_make_roi(1, "correlation"), _make_roi(2, "correlation")], "Correlation ROIs")
+
+    state.clear_rois()
+
+    assert state.rois == []
+    assert state.pipeline == ["Load", "Correlation ROIs"]  # history log, not current state
