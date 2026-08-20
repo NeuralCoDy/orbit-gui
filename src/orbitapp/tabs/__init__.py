@@ -3,6 +3,8 @@ from .load_tab import LoadTab
 from .motion_correction_tab import MotionCorrectionTab
 from .normalization_tab import NormalizationTab
 from .projections_tab import ProjectionsTab
+from .roi_validation_tab import ROIValidationTab
+from .save_tab import SaveTab
 from .source_extraction_tab import SourceExtractionTab
 
 __all__ = [
@@ -12,4 +14,6 @@ __all__ = [
     "DenoisingTab",
     "NormalizationTab",
     "SourceExtractionTab",
+    "ROIValidationTab",
+    "SaveTab",
 ]

@@ -7,12 +7,22 @@ from __future__ import annotations
 import sys
 import time
 
-from PySide6.QtWidgets import QApplication, QMainWindow, QSplashScreen, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QSplashScreen, QTabWidget, QVBoxLayout, QWidget
 
+from . import io as orbitapp_io
 from .assets import LOGO_PATH, load_logo_on_black
 from .format import format_header_summary
 from .state import AppState
-from .tabs import DenoisingTab, LoadTab, MotionCorrectionTab, NormalizationTab, ProjectionsTab
+from .tabs import (
+    DenoisingTab,
+    LoadTab,
+    MotionCorrectionTab,
+    NormalizationTab,
+    ProjectionsTab,
+    ROIValidationTab,
+    SaveTab,
+    SourceExtractionTab,
+)
 from .theme import apply_dark_theme
 from .widgets import HeaderBar
 
@@ -34,16 +44,27 @@ class MainWindow(QMainWindow):
         self.motion_correction_tab = MotionCorrectionTab(self.state)
         self.denoising_tab = DenoisingTab(self.state)
         self.normalization_tab = NormalizationTab(self.state)
+        self.source_extraction_tab = SourceExtractionTab(self.state)
+        self.roi_validation_tab = ROIValidationTab(self.state)
+        self.save_tab = SaveTab(self.state, self.roi_validation_tab)
 
         # Every tab that reads active_data() -- refreshed whenever new data
         # loads or any stage below commits a change (see the wiring loop).
+        # ROI Validation also depends on state.rois, which only Source
+        # Extraction's Commit changes -- wired separately below since it's
+        # not one of _mutating_tabs (that set changes the active *movie*).
         self._stage_tabs = [
             self.projections_tab,
             self.motion_correction_tab,
             self.denoising_tab,
             self.normalization_tab,
+            self.source_extraction_tab,
+            self.roi_validation_tab,
         ]
-        # Subset that can actually mutate the active dataset (Commit).
+        # Subset that can mutate the active *movie* (Commit). Source
+        # Extraction's Commit only adds to state.rois -- active_data() is
+        # unchanged, so there's nothing for other movie-consuming tabs to
+        # refresh -- it's wired to the header breadcrumb separately below.
         self._mutating_tabs = [self.motion_correction_tab, self.denoising_tab, self.normalization_tab]
 
         self.tabs = QTabWidget()
@@ -52,6 +73,9 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.motion_correction_tab, "Motion Correction")
         self.tabs.addTab(self.denoising_tab, "Denoising")
         self.tabs.addTab(self.normalization_tab, "Normalization")
+        self.tabs.addTab(self.source_extraction_tab, "Source Extraction")
+        self.tabs.addTab(self.roi_validation_tab, "ROI Validation")
+        self.tabs.addTab(self.save_tab, "Save")
 
         central = QWidget()
         central_layout = QVBoxLayout(central)
@@ -69,6 +93,11 @@ class MainWindow(QMainWindow):
             tab.data_changed.connect(self._on_data_committed)
             for other in self._stage_tabs:
                 tab.data_changed.connect(other.on_data_loaded)
+
+        self.source_extraction_tab.data_changed.connect(self._on_data_committed)
+        self.source_extraction_tab.data_changed.connect(self.roi_validation_tab.on_data_loaded)
+
+        self.save_tab.session_loaded.connect(self._on_session_loaded)
 
         self.tabs.currentChanged.connect(self._on_tab_changed)
         self._on_tab_changed(self.tabs.currentIndex())
@@ -88,6 +117,61 @@ class MainWindow(QMainWindow):
 
     def _on_tab_changed(self, index: int) -> None:
         self.header.set_active_stage(self.tabs.tabText(index))
+
+    def _on_session_loaded(self, session: dict) -> None:
+        """SaveTab only reads/writes files -- reconstructing AppState and
+        refreshing every other tab from what it loaded is done here,
+        same as every other cross-tab wiring in this class."""
+        pipeline = session.get("pipeline")
+        output = session.get("output")
+
+        data_path = pipeline["data_path"] if pipeline else None
+        if data_path:
+            try:
+                movie = orbitapp_io.load_movie(data_path)
+                self.state.load(data_path, movie)
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.warning(self, "Could not reload movie", f"{data_path}: {exc}")
+
+        if pipeline is not None:
+            self.state.pipeline = pipeline["pipeline"]
+            self.state.steps = pipeline["steps"]
+            tabs_by_stage = {
+                self.motion_correction_tab._stage_key: self.motion_correction_tab,
+                self.denoising_tab._stage_key: self.denoising_tab,
+                self.normalization_tab._stage_key: self.normalization_tab,
+            }
+            for step in pipeline["steps"]:
+                tab = tabs_by_stage.get(step.stage)
+                if tab is not None and step.params:
+                    tab.restore_params(step.params)
+
+        if output is not None:
+            self.state.rois = output["rois"]
+            # the pipeline file (if also loaded) is the only place
+            # seed_loc/params survive -- the output file only has the
+            # mask/trace/spike/neuropil arrays, matched back up by id.
+            if pipeline is not None:
+                meta_by_id = {meta["id"]: meta for meta in pipeline["source_extraction_rois"]}
+                for roi in self.state.rois:
+                    meta = meta_by_id.get(roi.id)
+                    if meta is not None:
+                        roi.seed_loc = meta["seed_loc"]
+                        roi.params = meta["params"] or None
+        elif pipeline is not None and pipeline["source_extraction_rois"]:
+            QMessageBox.information(
+                self, "Partial load",
+                "Pipeline loaded, but no output file was found alongside it -- ROI mask/trace "
+                "data wasn't restored, only its recorded parameters.",
+            )
+
+        for tab in self._stage_tabs:
+            tab.on_data_loaded()
+        self._on_data_loaded()
+
+        if output is not None and output["roi_validation_results"] is not None and self.state.rois:
+            self.roi_validation_tab._on_load_rois_clicked()
+            self.roi_validation_tab.import_results(output["roi_validation_results"])
 
 
 def run() -> None:
