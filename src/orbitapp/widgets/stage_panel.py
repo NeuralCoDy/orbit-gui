@@ -17,6 +17,7 @@ import pyqtgraph as pg
 from movieslider.gui.movie_slider_widget import MovieSliderWidget
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
+from ..io import preview_slice
 from .movie_popout import show_movie_popout
 
 
@@ -63,4 +64,9 @@ class StagePanel(QWidget):
         movie = self._movies[key]
         if movie is None:
             return
-        self._players[key] = show_movie_popout(self._players[key], movie, f"Movie Player - {self._titles[key]}")
+        # preview_slice caps a memmap-backed movie to its first 5000
+        # frames -- show_movie's full-array histogram scan would
+        # otherwise force a full read of an otherwise-still-lazy movie.
+        self._players[key] = show_movie_popout(
+            self._players[key], preview_slice(movie), f"Movie Player - {self._titles[key]}"
+        )

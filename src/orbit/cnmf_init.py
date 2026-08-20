@@ -84,9 +84,16 @@ def greedy_roi_init(
 def estimate_background(residual_movie: np.ndarray, n_components: int = 1) -> tuple[np.ndarray, np.ndarray]:
     """Low-rank NMF background model over whatever's left after the cell
     components are subtracted out -- CaImAn's own greedyROI background
-    step. Returns (spatial (H, W, n_bg), temporal (n_bg, T))."""
+    step. Returns (spatial (H, W, n_bg), temporal (n_bg, T)).
+
+    Clips ``residual_movie`` to nonnegative in place (reshape is a view,
+    so this mutates the caller's array too) rather than allocating a
+    fresh clipped (H, W, T) copy -- callers of this internal helper
+    don't need their residual afterward, and this movie-sized array is
+    typically the single biggest temporary in a CNMF run."""
     height, width, n_frames = residual_movie.shape
-    flat = np.clip(residual_movie.reshape(-1, n_frames), 0, None)
+    flat = residual_movie.reshape(-1, n_frames)
+    np.clip(flat, 0, None, out=flat)
     nmf = NMF(n_components=n_components, init="nndsvda", max_iter=200)
     spatial = nmf.fit_transform(flat)  # (H*W, n_bg)
     temporal = nmf.components_  # (n_bg, T)

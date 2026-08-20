@@ -11,11 +11,13 @@ every StageTab -- see that module's docstring.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
-from orbit.motion_correction import motion_correct
+from orbit.motion_correction import motion_correct, rigid_motion_correct, patch_motion_correct
 from orbit.motion_metrics import (
     enhanced_correlation_coefficient,
     mean_correlation_to_reference,
@@ -23,6 +25,8 @@ from orbit.motion_metrics import (
     spatiotemporal_svd,
 )
 
+from ..fits_io import create_fits_memmap
+from ..io import preview_slice
 from ..state import AppState
 from ..widgets import ImageSlideshow, ParametersDialog, make_spinbox
 from ..workers import run_worker
@@ -145,7 +149,13 @@ class MotionCorrectionTab(StageTab):
     def _extract_metrics(self, result: dict) -> dict:
         return dict(mmd=result["mmd"], mcm_before=result["mcm_before"], mcm_after=result["mcm_after"], ecc=result["ecc"])
 
-    def _start_worker(self, movie: np.ndarray) -> None:
+    def _method_and_kwargs(self, init_batch: int) -> tuple[str, dict]:
+        """The algorithm name + kwargs _start_worker/_chunked_commit both
+        need, built from the current widget values. ``init_batch`` is
+        passed in rather than derived from a movie array here, since
+        Apply (preview, <=5000 frames) and a memmap Commit (the whole
+        movie, which could be far larger) need very different bounds --
+        the template bootstrap must never scan an entire huge movie."""
         method_text = self.method_combo.currentText()
         if method_text.startswith("Rigid"):
             method = "rigid"
@@ -153,30 +163,29 @@ class MotionCorrectionTab(StageTab):
             method = "patch"
         else:
             method = "patchwarp"
-        self._pending_step_label = _METHOD_LABELS[method]
 
         max_shift = self.max_shift_spin.value()
         n_iter = self.n_iter_spin.value()
 
         if method in ("rigid", "patch"):
             kwargs = dict(
-                max_shift=max_shift,
-                upsample_factor=self.upsample_spin.value(),
-                n_iter=n_iter,
-                init_batch=movie.shape[-1],
+                max_shift=max_shift, upsample_factor=self.upsample_spin.value(), n_iter=n_iter,
+                init_batch=init_batch,
             )
             if method == "patch":
                 kwargs["grid_size"] = self.grid_size_spin.value()
                 kwargs["max_dev"] = max(1.0, max_shift / 3)
         else:
             kwargs = dict(
-                grid_size=self.patchwarp_grid_spin.value(),
-                overlap_frac=self.overlap_frac_spin.value(),
-                rigid_max_shift=max_shift,
-                rigid_n_iter=n_iter,
-                ecc_iterations=self.ecc_iterations_spin.value(),
+                grid_size=self.patchwarp_grid_spin.value(), overlap_frac=self.overlap_frac_spin.value(),
+                rigid_max_shift=max_shift, rigid_n_iter=n_iter, ecc_iterations=self.ecc_iterations_spin.value(),
                 pyramid_levels=self.pyramid_levels_spin.value(),
             )
+        return method, kwargs
+
+    def _start_worker(self, movie: np.ndarray) -> None:
+        method, kwargs = self._method_and_kwargs(init_batch=movie.shape[-1])
+        self._pending_step_label = _METHOD_LABELS[method]
         kwargs["n_components"] = self.pc_count_spin.value()
 
         self.worker = run_worker(
@@ -184,8 +193,27 @@ class MotionCorrectionTab(StageTab):
             _run_and_assess, movie, method, on_success=self._on_finished, on_failure=self._on_failed, **kwargs,
         )
 
+    def _chunked_commit(self, source: np.ndarray, output_path: Path) -> np.ndarray:
+        method, kwargs = self._method_and_kwargs(init_batch=min(source.shape[-1], 5000))
+        if method == "patchwarp":
+            raise NotImplementedError(
+                "PatchWarp doesn't yet support committing a memory-mapped movie -- use Rigid or "
+                "Patch-based for very large files, or turn off memory mapping on the Load tab."
+            )
+        kwargs["bin_width"] = self._chunk_frames
+        output = create_fits_memmap(output_path, source.shape, np.float32)
+        fn = rigid_motion_correct if method == "rigid" else patch_motion_correct
+        fn(source, output=output, **kwargs)
+        output.flush()
+        return output
+
     def _render_result(self, result: dict) -> None:
-        self.panel.before_view.setImage(self._input_movie.mean(axis=2))
+        # preview_slice bounds this to the same (<=5000-frame) preview
+        # Apply actually ran against -- self._input_movie can be a much
+        # longer memmap movie now that Commit re-runs against the whole
+        # thing, and a full .mean(axis=2) over that would force a full
+        # read just to draw the "before" thumbnail.
+        self.panel.before_view.setImage(preview_slice(self._input_movie).mean(axis=2))
         self.panel.after_view.setImage(result["registered"].mean(axis=2))
         self.panel.set_after_movie(result["registered"])
 

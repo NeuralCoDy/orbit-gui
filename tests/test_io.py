@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from orbitapp.io import load_movie
+from orbitapp.io import is_memmap, load_movie, preview_slice
 
 
 def test_load_npy_roundtrip(tmp_path):
@@ -13,6 +13,83 @@ def test_load_npy_roundtrip(tmp_path):
 
     assert loaded.shape == movie.shape
     assert np.array_equal(loaded, movie)
+
+
+def test_load_npy_mmap_returns_a_real_memmap(tmp_path):
+    movie = np.arange(2 * 3 * 4, dtype=float).reshape(2, 3, 4)
+    path = tmp_path / "movie.npy"
+    np.save(path, movie)
+
+    loaded = load_movie(path, mmap=True)
+
+    assert is_memmap(loaded)
+    assert np.array_equal(loaded, movie)
+
+
+def test_load_tiff_stack_without_mmap_is_never_a_memmap_even_though_the_loader_tries_one_internally(tmp_path):
+    # _load_tiff_stack opportunistically tries tifffile.memmap() even
+    # when mmap=False was requested (fewer copies either way) -- a real
+    # memmap result from that internal attempt must not leak out as the
+    # return value unless the caller actually asked for mmap=True, or
+    # every ordinary (non-memmap) load of a well-formed contiguous TIFF
+    # would silently come back disk-backed instead of a plain in-RAM
+    # array, which downstream code relies on by default.
+    tifffile = pytest.importorskip("tifffile")
+
+    frames = np.arange(3 * 5 * 4, dtype="uint16").reshape(3, 5, 4)
+    path = tmp_path / "movie.tif"
+    tifffile.imwrite(path, frames)
+
+    loaded = load_movie(path)  # mmap=False (default)
+
+    assert not is_memmap(loaded)
+    assert np.array_equal(loaded, np.moveaxis(frames, 0, -1))
+
+
+def test_load_tiff_stack_mmap_returns_a_real_memmap(tmp_path):
+    tifffile = pytest.importorskip("tifffile")
+
+    frames = np.arange(3 * 5 * 4, dtype="uint16").reshape(3, 5, 4)  # (T, H, W)
+    path = tmp_path / "movie.tif"
+    tifffile.imwrite(path, frames)
+
+    loaded = load_movie(path, mmap=True)
+
+    assert is_memmap(loaded)
+    assert loaded.shape == (5, 4, 3)  # (H, W, T)
+    assert np.array_equal(loaded, np.moveaxis(frames, 0, -1))
+
+
+def test_load_mmap_unsupported_format_falls_back_and_warns(tmp_path):
+    h5py = pytest.importorskip("h5py")
+
+    movie = np.arange(4 * 5 * 6, dtype=float).reshape(4, 5, 6)
+    path = tmp_path / "movie.h5"
+    with h5py.File(path, "w") as f:
+        f.create_dataset("movie", data=movie)
+
+    with pytest.warns(UserWarning, match="Memory mapping requested"):
+        loaded = load_movie(path, mmap=True)
+
+    assert not is_memmap(loaded)
+    assert np.array_equal(loaded, movie)
+
+
+def test_preview_slice_caps_a_long_memmap_but_leaves_short_or_in_ram_movies_alone(tmp_path):
+    movie = np.arange(2 * 3 * 20, dtype=float).reshape(2, 3, 20)
+    path = tmp_path / "movie.npy"
+    np.save(path, movie)
+    mmap_movie = load_movie(path, mmap=True)
+
+    capped = preview_slice(mmap_movie, max_frames=5)
+    assert capped.shape == (2, 3, 5)
+    assert is_memmap(capped)
+    assert np.array_equal(capped, movie[:, :, :5])
+
+    # a memmap shorter than max_frames, or a plain in-RAM array, pass through unchanged
+    assert preview_slice(mmap_movie, max_frames=100) is mmap_movie
+    in_ram = np.array(movie)
+    assert preview_slice(in_ram, max_frames=5) is in_ram
 
 
 def test_load_unsupported_suffix_raises(tmp_path):

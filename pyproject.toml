@@ -29,6 +29,7 @@ gui = [
     "h5py>=3.9",
     "roiapp>=0.1.0",
     "matplotlib>=3.7",
+    "astropy>=5.3",
 ]
 
 [project.scripts]

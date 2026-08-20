@@ -152,3 +152,60 @@ def test_motion_correct_rejects_unknown_method():
     movie = np.zeros((10, 10, 3))
     with pytest.raises(ValueError, match="Unknown motion correction method"):
         motion_correct(movie, method="bogus")
+
+
+def test_rigid_motion_correct_output_param_matches_default_in_ram_path():
+    # output= (used for a memmap movie's chunked Commit) must produce
+    # numerically identical results to the normal in-RAM path -- it's a
+    # where-results-are-written change, not an algorithm change.
+    rng = np.random.default_rng(5)
+    movie = gaussian_filter(rng.standard_normal((16, 16, 25)), (2, 2, 0))
+
+    reg_default, shifts_default, tmpl_default, init_default = rigid_motion_correct(
+        movie, bin_width=7, n_iter=2, upsample_factor=10, init_batch=10
+    )
+    output = np.zeros_like(movie)
+    reg_output, shifts_output, tmpl_output, init_output = rigid_motion_correct(
+        movie, bin_width=7, n_iter=2, upsample_factor=10, init_batch=10, output=output
+    )
+
+    assert reg_output is output
+    np.testing.assert_allclose(reg_default, reg_output)
+    np.testing.assert_allclose(shifts_default, shifts_output)
+    np.testing.assert_allclose(tmpl_default, tmpl_output)
+    np.testing.assert_array_equal(init_default, init_output)
+
+
+def test_patch_motion_correct_output_param_matches_default_in_ram_path():
+    rng = np.random.default_rng(6)
+    movie = gaussian_filter(rng.standard_normal((16, 16, 25)), (2, 2, 0))
+
+    reg_default, sf_default, tmpl_default, init_default = patch_motion_correct(
+        movie, grid_size=8, bin_width=7, n_iter=1, upsample_factor=10, init_batch=10, min_patch_contrast=0
+    )
+    output = np.zeros_like(movie)
+    reg_output, sf_output, tmpl_output, init_output = patch_motion_correct(
+        movie, grid_size=8, bin_width=7, n_iter=1, upsample_factor=10, init_batch=10, min_patch_contrast=0,
+        output=output,
+    )
+
+    assert reg_output is output
+    np.testing.assert_allclose(reg_default, reg_output)
+    np.testing.assert_allclose(sf_default, sf_output)
+    np.testing.assert_allclose(tmpl_default, tmpl_output)
+    np.testing.assert_array_equal(init_default, init_output)
+
+
+def test_rigid_motion_correct_output_param_reads_from_movie_not_uninitialized_output():
+    # A regression check for the exact bug this feature could introduce:
+    # if the first pass ever read from `output` before it's populated
+    # (rather than from `movie`), results would silently be garbage
+    # (registering against zeros) instead of matching the in-RAM path.
+    rng = np.random.default_rng(7)
+    movie = gaussian_filter(rng.standard_normal((16, 16, 12)), (2, 2, 0))
+
+    output = np.full_like(movie, np.nan)  # would poison results if ever read before being written
+    registered, _shifts, _tmpl, _init = rigid_motion_correct(
+        movie, bin_width=4, n_iter=1, upsample_factor=10, init_batch=6, output=output
+    )
+    assert np.all(np.isfinite(registered))

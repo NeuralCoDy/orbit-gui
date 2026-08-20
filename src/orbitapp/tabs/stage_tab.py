@@ -18,17 +18,36 @@ the last successful run would just reproduce the same candidate, so
 that's caught before spending real time on it -- confirmed once via a
 Yes/No dialog rather than silently blocked, in case the algorithm is
 non-deterministic or the user just wants to force a rerun.
+
+When the active movie is memmap-backed (see orbitapp.io.is_memmap),
+Apply and Commit split into two different-sized jobs rather than one:
+Apply always previews just the first 5000 frames (bounded, in RAM,
+using the existing algorithm unmodified -- see orbitapp.io.preview_slice)
+while Commit re-runs the stage across the *whole* movie in time chunks,
+writing straight to a new FITS-backed memmap (see orbitapp.fits_io) so
+the full result never needs to fit in RAM either. Subclasses that
+produce a movie (Motion Correction, Denoising, Normalization) implement
+`_chunked_commit`; subclasses without one simply can't be committed
+against a memmap input (StageTab's own default raises, which becomes a
+Commit failure dialog rather than any silent wrong behavior). Non-memmap
+input is completely unaffected -- Commit stays the free "promote
+whatever Apply already computed" it's always been.
 """
 
 from __future__ import annotations
+
+import os
+import tempfile
+from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QMessageBox, QVBoxLayout, QWidget
 
+from ..io import is_memmap, preview_slice
 from ..state import AppState
 from ..widgets import BusyBar, CommitControls, StagePanel, confirm_recompute
-from ..workers import FunctionWorker
+from ..workers import FunctionWorker, run_worker
 
 
 class StageTab(QWidget):
@@ -37,6 +56,7 @@ class StageTab(QWidget):
     _stage_name = "Stage"  # used in the failure dialog title
     _result_key = "result"  # key into the worker's result dict for the candidate array
     _stage_key = "stage"  # lowercase identifier recorded in AppState.steps / session_io.py
+    _chunk_frames = 500  # time-chunk size for a memmap input's chunked Commit
 
     def __init__(
         self,
@@ -98,7 +118,11 @@ class StageTab(QWidget):
         self._last_run = None  # a new/changed movie invalidates any prior "already run" state
         self._on_data_reset()
         if movie is not None:
-            self.panel.before_view.setImage(movie.mean(axis=2))
+            # preview_slice bounds this to the first 5000 frames for a
+            # memmap movie -- otherwise this mean projection alone would
+            # force a full read of an arbitrarily large movie just to
+            # populate the "Raw" thumbnail.
+            self.panel.before_view.setImage(preview_slice(movie).mean(axis=2))
             self.panel.set_before_movie(movie)
             self.status_label.setText(f"Ready. shape={movie.shape}")
 
@@ -146,10 +170,13 @@ class StageTab(QWidget):
 
         self._pending_fingerprint = fingerprint
         self._pending_params = params
+        # self._input_movie stays the REAL (possibly memmap, possibly
+        # much longer than 5000 frames) movie -- Commit needs it for the
+        # chunked full-movie pass. Only the worker's own input is capped.
         self._input_movie = movie
         self.commit_controls.set_apply_enabled(False)
         self.commit_controls.set_commit_enabled(False)
-        self._start_worker(movie)
+        self._start_worker(preview_slice(movie))
 
     def _render_result(self, result: dict) -> None:
         """Updates the panel images/movies and self.metrics_label (plus
@@ -175,14 +202,55 @@ class StageTab(QWidget):
         QMessageBox.critical(self, f"{self._stage_name} failed", message)
         self.commit_controls.set_apply_enabled(True)
 
+    def _chunked_commit(self, source: np.ndarray, output_path: Path) -> np.ndarray:
+        """Runs this stage across the WHOLE ``source`` movie (a memmap,
+        possibly far longer than the 5000-frame preview Apply ran
+        against) in `self._chunk_frames`-sized time chunks, writing each
+        chunk into a new FITS-backed memmap at ``output_path`` (see
+        orbitapp.fits_io.create_fits_memmap) and returning it. Only
+        needed by subclasses that produce a movie (Motion Correction,
+        Denoising, Normalization); subclasses that don't override this
+        (e.g. anything not chunkable) simply can't be committed against
+        a memmap input -- surfaces as a Commit failure dialog via
+        _on_chunked_commit_failed, not a silent full materialization."""
+        raise NotImplementedError(f"{self._stage_name} doesn't support committing a memory-mapped movie.")
+
     def _commit(self) -> None:
         if self._pending_result is None:
             return
+        if is_memmap(self._input_movie):
+            self._start_chunked_commit()
+            return
+        self._finish_commit(self._pending_result[self._result_key])
+
+    def _finish_commit(self, data: np.ndarray) -> None:
         metrics = self._extract_metrics(self._pending_result)
         self.state.commit(
-            self._pending_result[self._result_key], self._pending_step_label,
-            stage=self._stage_key, params=self._pending_params, metrics=metrics,
+            data, self._pending_step_label, stage=self._stage_key, params=self._pending_params, metrics=metrics,
         )
         self.status_label.setText(f"Committed as pipeline step '{self._pending_step_label}'.")
         self.commit_controls.set_commit_enabled(False)
         self.data_changed.emit()
+
+    def _start_chunked_commit(self) -> None:
+        self.commit_controls.set_apply_enabled(False)
+        self.commit_controls.set_commit_enabled(False)
+        fd, path = tempfile.mkstemp(suffix=".fits", prefix=f"orbit_{self._stage_key}_")
+        os.close(fd)
+        self.worker = run_worker(
+            self.busy_bar, f"Committing {self._stage_name} across the full movie (this can take a while)...",
+            self._chunked_commit, self._input_movie, Path(path),
+            on_success=self._on_chunked_commit_finished, on_failure=self._on_chunked_commit_failed,
+        )
+
+    def _on_chunked_commit_finished(self, output: np.ndarray) -> None:
+        self.busy_bar.stop("")
+        self.commit_controls.set_apply_enabled(True)
+        self._finish_commit(output)
+
+    def _on_chunked_commit_failed(self, message: str) -> None:
+        self.busy_bar.stop("Commit failed.")
+        self.status_label.setText(f"Commit failed: {message}")
+        QMessageBox.critical(self, f"{self._stage_name} commit failed", message)
+        self.commit_controls.set_apply_enabled(True)
+        self.commit_controls.set_commit_enabled(True)  # candidate is still there -- let them retry or Apply again

@@ -11,6 +11,8 @@ every StageTab -- see that module's docstring.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton
 
@@ -24,6 +26,8 @@ from orbit.denoising import (
 from orbit.projections import local_correlation_projection
 from orbit.qc_traces import qc_trace_samples
 
+from ..fits_io import create_fits_memmap
+from ..io import preview_slice
 from ..state import AppState
 from ..widgets import ParametersDialog, QCPlotGrid, add_location_markers, make_spinbox, pixels_to_data_pos, split_by_kind
 from ..workers import run_worker
@@ -177,9 +181,8 @@ class DenoisingTab(StageTab):
             corr_after=result["corr_after"],
         )
 
-    def _start_worker(self, movie: np.ndarray) -> None:
+    def _algorithm_and_kwargs(self) -> tuple[str, dict]:
         algorithm = _ALGORITHM_KEYS[self.method_combo.currentText()]
-        self._pending_step_label = _PIPELINE_LABELS[algorithm]
         if algorithm in ("wavelet_time", "wavelet_space"):
             kwargs = dict(
                 wavelet=self.wavelet_combo.currentText(),
@@ -192,14 +195,60 @@ class DenoisingTab(StageTab):
             )
         else:
             kwargs = dict(space_window=self.median_space_spin.value(), time_window=self.median_time_spin.value())
+        return algorithm, kwargs
+
+    def _start_worker(self, movie: np.ndarray) -> None:
+        algorithm, kwargs = self._algorithm_and_kwargs()
+        self._pending_step_label = _PIPELINE_LABELS[algorithm]
 
         self.worker = run_worker(
             self.busy_bar, "Running denoising and metrics (this can take a while)...",
             _run_and_assess, movie, algorithm, on_success=self._on_finished, on_failure=self._on_failed, **kwargs,
         )
 
+    @staticmethod
+    def _temporal_margin(algorithm: str, kwargs: dict) -> int:
+        """Extra frames to read on each side of a chunk so a temporal
+        filter's edge frames aren't computed from a truncated window --
+        0 for algorithms with no temporal reach (wavelet_space, or
+        gaussian/median with their temporal parameter left at its
+        no-op default). Matches scipy.ndimage's own default truncate=4.0
+        for the Gaussian case; verified numerically identical to the
+        whole-movie result for both gaussian and median (see tests)."""
+        if algorithm == "gaussian":
+            temporal_sigma = kwargs["temporal_sigma"]
+            return int(np.ceil(4 * temporal_sigma)) if temporal_sigma > 0 else 0
+        if algorithm == "median":
+            return kwargs["time_window"] // 2
+        return 0
+
+    def _chunked_commit(self, source: np.ndarray, output_path: Path) -> np.ndarray:
+        algorithm, kwargs = self._algorithm_and_kwargs()
+        if algorithm == "wavelet_time":
+            raise NotImplementedError(
+                "Wavelet Denoising (Temporal) needs each pixel's whole time series and can't be "
+                "committed chunk-by-chunk against a memory-mapped movie -- use Wavelet (Spatial), "
+                "Gaussian, or Median for very large files, or turn off memory mapping on the Load tab."
+            )
+
+        margin = self._temporal_margin(algorithm, kwargs)
+        denoise_fn = _DENOISE_FUNCS[algorithm]
+        T = source.shape[-1]
+        output = create_fits_memmap(output_path, source.shape, np.float32)
+
+        for t0 in range(0, T, self._chunk_frames):
+            t1 = min(t0 + self._chunk_frames, T)
+            pad_lo = min(margin, t0)
+            pad_hi = min(margin, T - t1)
+            chunk = np.asarray(source[:, :, t0 - pad_lo : t1 + pad_hi], dtype=np.float32)
+            denoised_chunk = denoise_fn(chunk, **kwargs)
+            output[:, :, t0:t1] = denoised_chunk[:, :, pad_lo : pad_lo + (t1 - t0)]
+
+        output.flush()
+        return output
+
     def _render_result(self, result: dict) -> None:
-        self.panel.before_view.setImage(self._input_movie.mean(axis=2))
+        self.panel.before_view.setImage(preview_slice(self._input_movie).mean(axis=2))
         self.panel.after_view.setImage(result["denoised"].mean(axis=2))
         self.panel.set_after_movie(result["denoised"])
 

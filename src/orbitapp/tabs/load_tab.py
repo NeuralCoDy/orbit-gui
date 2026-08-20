@@ -16,6 +16,7 @@ from movieslider.gui.movie_slider_widget import MovieSliderWidget
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -55,6 +56,15 @@ class LoadTab(QWidget):
             btn.clicked.connect(slot)
             sidebar_layout.addWidget(btn)
             self._browse_buttons.append(btn)
+
+        self.mmap_check = QCheckBox("Memory mapping (for very large files)")
+        self.mmap_check.setToolTip(
+            "Keeps the movie disk-backed (numpy.memmap) instead of reading it fully into RAM -- "
+            "for files too large to comfortably fit in memory. Only single-file .tif/.tiff and "
+            ".npy support this; other formats fall back to a normal full load with a warning. "
+            "The viewer only shows the first 5000 frames when this is on."
+        )
+        sidebar_layout.addWidget(self.mmap_check)
 
         self.view_movie_btn = QPushButton("View Movie")
         self.view_movie_btn.setEnabled(False)
@@ -107,13 +117,13 @@ class LoadTab(QWidget):
         if self.state.data_path == path and not confirm_recompute(self, f"'{path}' is already loaded."):
             return
         self._pending_path = path
-        self._start_load(message, fn, *args)
+        self._start_load(message, fn, *args, mmap=self.mmap_check.isChecked())
 
-    def _start_load(self, message: str, fn, *args) -> None:
+    def _start_load(self, message: str, fn, *args, **kwargs) -> None:
         for btn in self._browse_buttons:
             btn.setEnabled(False)
         self.worker = run_worker(
-            self.busy_bar, message, fn, *args, on_success=self._on_loaded, on_failure=self._on_failed
+            self.busy_bar, message, fn, *args, on_success=self._on_loaded, on_failure=self._on_failed, **kwargs
         )
 
     def _on_loaded(self, movie: np.ndarray) -> None:
@@ -126,9 +136,13 @@ class LoadTab(QWidget):
         # it has to run synchronously here (Qt widgets aren't safe to
         # touch off the GUI thread), so at least say what's happening
         # rather than freezing silently after "Loading" disappears.
+        # preview_slice caps this to the first 5000 frames when the
+        # movie is memmap-backed and longer than that, so the histogram
+        # (and every other full-array scan show_movie does) stays bounded
+        # instead of forcing a full read of an otherwise-still-lazy movie.
         self.busy_bar.set_message(f"Rendering movie viewer for {path}...")
         QApplication.processEvents()
-        self.movie_view.show_movie(movie)
+        self.movie_view.show_movie(orbitapp_io.preview_slice(movie))
 
         self.busy_bar.stop(f"Loaded {path}.")
         for btn in self._browse_buttons:
@@ -141,7 +155,9 @@ class LoadTab(QWidget):
         movie = self.state.active_data()
         if movie is None:
             return
-        self._movie_player = show_movie_popout(self._movie_player, movie, "Movie Player - Loaded Movie")
+        self._movie_player = show_movie_popout(
+            self._movie_player, orbitapp_io.preview_slice(movie), "Movie Player - Loaded Movie"
+        )
 
     def _on_failed(self, message: str) -> None:
         self.busy_bar.stop("Load failed.")

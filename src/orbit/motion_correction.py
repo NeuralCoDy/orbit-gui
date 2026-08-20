@@ -25,6 +25,25 @@ def _resolve_max_workers(max_workers: int | None, bin_width: int) -> int:
     return min(_DEFAULT_MAX_WORKERS, os.cpu_count() or 1, bin_width)
 
 
+def _as_float_working_copy(movie: np.ndarray) -> np.ndarray:
+    """A float64 (H, W, T) array this function owns and can register
+    into in place, without mutating whatever the caller passed in.
+
+    np.asarray(movie, dtype=float) already allocates a fresh, private
+    array whenever a dtype conversion is needed (the common case: raw
+    microscopy movies are usually uint16 or float32) -- calling .copy()
+    on top of that in every case, regardless of whether a conversion
+    happened, doubled peak memory for exactly the inputs most likely to
+    be large (measured: ~13x a uint16 movie's raw size, vs ~7x once this
+    redundant copy is skipped). Only allocate the extra copy when
+    asarray returned the caller's own array unchanged (dtype was already
+    float64), since that's the one case where skipping it would let
+    per-frame registration mutate data the caller still holds a
+    reference to."""
+    converted = np.asarray(movie, dtype=float)
+    return converted if converted is not movie else converted.copy()
+
+
 def _apply_shift(frame: np.ndarray, shift: np.ndarray) -> np.ndarray:
     """Apply a rigid (dy, dx) subpixel shift via frequency-domain warping."""
     shifted_fft = fourier_shift(np.fft.fftn(frame), shift)
@@ -90,6 +109,38 @@ def _register_in_chunks(
     return template
 
 
+def _setup_registration(
+    movie: np.ndarray, template: np.ndarray | None, init_batch: int, bin_width: int,
+    max_workers: int | None, output: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray | None, np.ndarray, np.ndarray, int, int]:
+    """Shared setup for rigid_motion_correct/patch_motion_correct.
+
+    When ``output`` is given (typically a FITS-backed memmap -- see
+    StageTab._chunked_commit), registration reads frames from ``movie``
+    (possibly itself a memmap, left untouched) and writes corrected
+    frames into ``output`` instead of allocating a second in-RAM working
+    copy -- this is what keeps a memmap Commit's peak memory bounded by
+    chunk size rather than the whole movie. Returns (registered,
+    initial_read_source, template, initial_template, T, workers);
+    ``initial_read_source`` is ``movie`` itself when writing to a
+    separate ``output`` (registered/output starts uninitialized), or
+    None when registering in place (the usual, non-memmap case), meaning
+    the first pass should read from ``registered`` directly."""
+    if output is not None:
+        T = movie.shape[-1]
+        template, initial_template = _bootstrap_template(movie, template, init_batch)
+        registered = output
+        initial_read_source = movie
+    else:
+        movie = _as_float_working_copy(movie)
+        T = movie.shape[-1]
+        template, initial_template = _bootstrap_template(movie, template, init_batch)
+        registered = movie  # movie is already a private float64 copy -- no second copy needed
+        initial_read_source = None
+    workers = _resolve_max_workers(max_workers, bin_width)
+    return registered, initial_read_source, template, initial_template, T, workers
+
+
 def rigid_motion_correct(
     movie: np.ndarray,
     template: np.ndarray | None = None,
@@ -100,6 +151,7 @@ def rigid_motion_correct(
     n_iter: int = 1,
     phase_flag: bool = False,
     max_workers: int | None = None,
+    output: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Whole-frame rigid motion correction (port of NoRMCorre's rigid path).
 
@@ -112,23 +164,26 @@ def rigid_motion_correct(
       image; ``initial_template`` is the bootstrap template before any
       registration -- comparing the two is a useful diagnostic (see
       orbit.motion_metrics).
-    """
-    movie = np.asarray(movie, dtype=float)
-    T = movie.shape[-1]
-    normalization = "phase" if phase_flag else None
-    template, initial_template = _bootstrap_template(movie, template, init_batch)
-    workers = _resolve_max_workers(max_workers, bin_width)
 
-    registered = movie.copy()
+    ``output``, if given, is written into instead of an in-RAM working
+    copy -- see _setup_registration.
+    """
+    normalization = "phase" if phase_flag else None
+    registered, read_source, template, initial_template, T, workers = _setup_registration(
+        movie, template, init_batch, bin_width, max_workers, output
+    )
     shifts = np.zeros((T, 2))
 
-    def _process_one(t: int, chunk_template: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        frame = registered[:, :, t]
-        shift = _estimate_shift(chunk_template, frame, upsample_factor, normalization, max_shift)
-        return _apply_shift(frame, shift), shift
-
     for _ in range(n_iter):
+        source = read_source if read_source is not None else registered
+
+        def _process_one(t: int, chunk_template: np.ndarray, _source: np.ndarray = source) -> tuple[np.ndarray, np.ndarray]:
+            frame = _source[:, :, t]
+            shift = _estimate_shift(chunk_template, frame, upsample_factor, normalization, max_shift)
+            return _apply_shift(frame, shift), shift
+
         template = _register_in_chunks(T, bin_width, workers, _process_one, registered, shifts, template)
+        read_source = None  # subsequent iterations refine `registered` in place
 
     return registered, shifts, template, initial_template
 
@@ -232,6 +287,7 @@ def patch_motion_correct(
     phase_flag: bool = False,
     min_patch_contrast: float = 0.1,
     max_workers: int | None = None,
+    output: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Piecewise-rigid (non-rigid) motion correction (port of NoRMCorre's
     non-rigid path): splits each frame into a ``grid_size``-ish grid of
@@ -247,33 +303,36 @@ def patch_motion_correct(
 
     ``min_patch_contrast`` (default 0.1): warns (doesn't fail) if any
     patch's local contrast is too low for phase correlation to lock onto
-    -- pass 0 to disable.
+    -- pass 0 to disable. ``output``, if given, is written into instead
+    of an in-RAM working copy -- see _setup_registration.
     """
-    movie = np.asarray(movie, dtype=float)
-    H, W, T = movie.shape
     normalization = "phase" if phase_flag else None
-    template, initial_template = _bootstrap_template(movie, template, init_batch)
-    workers = _resolve_max_workers(max_workers, bin_width)
+    registered, read_source, template, initial_template, T, workers = _setup_registration(
+        movie, template, init_batch, bin_width, max_workers, output
+    )
+    H, W = registered.shape[:2]
 
     y_centers, y_edges = _patch_centers(H, grid_size)
     x_centers, x_edges = _patch_centers(W, grid_size)
     ny, nx = len(y_centers), len(x_centers)
     _warn_if_low_signal(initial_template, y_edges, x_edges, min_patch_contrast)
 
-    registered = movie.copy()
     shift_fields = np.zeros((T, ny, nx, 2))
 
-    def _process_one(t: int, chunk_template: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        frame = registered[:, :, t]
-        rigid_shift = _estimate_shift(chunk_template, frame, upsample_factor, normalization, max_shift)
-        patch_shift = _estimate_patch_shift_field(
-            chunk_template, frame, y_edges, x_edges, rigid_shift, max_dev, upsample_factor, normalization
-        )
-        disp_y, disp_x = _upsample_shift_field(patch_shift, y_centers, x_centers, H, W)
-        return _apply_displacement_field(frame, disp_y, disp_x), patch_shift
-
     for _ in range(n_iter):
+        source = read_source if read_source is not None else registered
+
+        def _process_one(t: int, chunk_template: np.ndarray, _source: np.ndarray = source) -> tuple[np.ndarray, np.ndarray]:
+            frame = _source[:, :, t]
+            rigid_shift = _estimate_shift(chunk_template, frame, upsample_factor, normalization, max_shift)
+            patch_shift = _estimate_patch_shift_field(
+                chunk_template, frame, y_edges, x_edges, rigid_shift, max_dev, upsample_factor, normalization
+            )
+            disp_y, disp_x = _upsample_shift_field(patch_shift, y_centers, x_centers, H, W)
+            return _apply_displacement_field(frame, disp_y, disp_x), patch_shift
+
         template = _register_in_chunks(T, bin_width, workers, _process_one, registered, shift_fields, template)
+        read_source = None  # subsequent iterations refine `registered` in place
 
     return registered, shift_fields, template, initial_template
 

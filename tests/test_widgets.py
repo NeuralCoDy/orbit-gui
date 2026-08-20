@@ -79,6 +79,22 @@ def test_stage_panel_play_movie_opens_a_player_for_the_right_panel():
     assert panel._players["after"].windowTitle() == "Movie Player - Corrected"
 
 
+def test_stage_panel_play_movie_caps_a_memmapped_movie_to_5000_frames(tmp_path):
+    tifffile = pytest.importorskip("tifffile")
+    from orbitapp.io import load_movie
+
+    movie_path = tmp_path / "movie.tif"
+    tifffile.imwrite(movie_path, np.zeros((5200, 4, 4), dtype="uint16"))  # (T, H, W)
+    movie = load_movie(movie_path, mmap=True)
+    assert movie.shape[-1] == 5200
+
+    panel = StagePanel()
+    panel.set_before_movie(movie)
+    panel._play_movie("before")
+
+    assert panel._players["before"].state.movie.shape[-1] == 5000
+
+
 def test_stage_panel_metrics_row_accepts_widgets():
     panel = StagePanel()
     assert panel.metrics_row.count() == 0

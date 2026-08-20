@@ -231,7 +231,11 @@ def cnmf_source_extraction(
     whole-FOV version doesn't scale well."""
     footprints, traces = greedy_roi_init(movie, n_components, gauss_sigma, init_radius)
     residual = movie - np.einsum("khw,kt->hwt", footprints, traces)
-    background_spatial, background_temporal = estimate_background(np.clip(residual, 0, None), n_background_components)
+    # residual isn't read again after this call, so estimate_background is
+    # allowed to clip it in place -- avoids a second full-(H, W, T) clipped
+    # copy on top of the one `movie - einsum(...)` already allocated above.
+    np.clip(residual, 0, None, out=residual)
+    background_spatial, background_temporal = estimate_background(residual, n_background_components)
 
     g_list = [estimate_ar1_coefficient(t) for t in traces]
     noise_stds = [estimate_noise_std(t) for t in traces]

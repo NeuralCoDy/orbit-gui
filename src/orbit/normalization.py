@@ -38,21 +38,62 @@ _CENTER_BASELINES = {"median": np.median, "mean": np.mean, "min": np.min, "mode"
 _NORM_BASELINES = {"median": np.median, "mean": np.mean, "max": np.max, "robuststd": robust_std}
 
 
-def _center(movie: np.ndarray, baseline_name: str, pixel_wise: bool) -> np.ndarray:
+def _center_baseline(movie: np.ndarray, baseline_name: str, pixel_wise: bool) -> np.ndarray:
     baseline_fn = _CENTER_BASELINES[baseline_name]
-    baseline = baseline_fn(movie, axis=2, keepdims=True) if pixel_wise else baseline_fn(movie)
-    return movie - baseline
+    return baseline_fn(movie, axis=2, keepdims=True) if pixel_wise else baseline_fn(movie)
 
 
-def _normalize(movie: np.ndarray, baseline_name: str, pixel_wise: bool) -> np.ndarray:
+def _norm_baseline(movie: np.ndarray, baseline_name: str, pixel_wise: bool) -> np.ndarray:
     baseline_fn = _NORM_BASELINES[baseline_name]
     if pixel_wise:
         baseline = baseline_fn(movie, axis=2, keepdims=True)
-        baseline = np.where(baseline == 0, 1.0, baseline)
-    else:
-        baseline = baseline_fn(movie)
-        baseline = 1.0 if baseline == 0 else baseline
-    return movie / baseline
+        return np.where(baseline == 0, 1.0, baseline)
+    baseline = baseline_fn(movie)
+    return 1.0 if baseline == 0 else baseline
+
+
+def compute_baselines(
+    movie: np.ndarray,
+    *,
+    center: bool = True,
+    normalize: bool = True,
+    center_baseline: str = "min",
+    norm_baseline: str = "median",
+    pixel_center: bool = False,
+    pixel_norm: bool = False,
+) -> dict:
+    """Computes (without applying) the center/normalize baselines
+    normalize_movie() would use for ``movie``. Split out from
+    normalize_movie so a caller can fit baselines once from a
+    representative sample and apply them to a *different*, possibly
+    much larger array later via apply_baselines() -- see
+    orbitapp.tabs.normalization_tab.NormalizationTab._chunked_commit,
+    which fits from the Apply preview and reuses the result across every
+    chunk of a memory-mapped movie's full-length Commit, since baseline
+    statistics like ``median``/``mode``/``robuststd`` can't be computed
+    exactly from streamed chunks without keeping every value anyway.
+    """
+    movie = np.asarray(movie, dtype=float)
+    baselines: dict = {}
+    if center:
+        baselines["center"] = _center_baseline(movie, center_baseline, pixel_center)
+    if normalize:
+        baselines["normalize"] = _norm_baseline(movie, norm_baseline, pixel_norm)
+    return baselines
+
+
+def apply_baselines(movie: np.ndarray, baselines: dict, *, center: bool = True, normalize: bool = True) -> np.ndarray:
+    """Applies baselines from compute_baselines() (computed against this
+    same movie, or a different one -- e.g. a representative sample) to
+    ``movie``. A per-pixel baseline broadcasts against any T, so this
+    works the same whether ``movie`` is the whole movie the baseline was
+    fit from or just one time-chunk of a much longer one."""
+    movie = np.asarray(movie, dtype=float)
+    if center and "center" in baselines:
+        movie = movie - baselines["center"]
+    if normalize and "normalize" in baselines:
+        movie = movie / baselines["normalize"]
+    return np.nan_to_num(movie, nan=0.0)
 
 
 def normalize_movie(
@@ -72,11 +113,11 @@ def normalize_movie(
     ``norm_baseline`` in {"median", "mean", "max", "robuststd"}.
     """
     movie = np.asarray(movie, dtype=float)
-    if center:
-        movie = _center(movie, center_baseline, pixel_center)
-    if normalize:
-        movie = _normalize(movie, norm_baseline, pixel_norm)
-    return np.nan_to_num(movie, nan=0.0)
+    baselines = compute_baselines(
+        movie, center=center, normalize=normalize, center_baseline=center_baseline, norm_baseline=norm_baseline,
+        pixel_center=pixel_center, pixel_norm=pixel_norm,
+    )
+    return apply_baselines(movie, baselines, center=center, normalize=normalize)
 
 
 def describe_normalization(

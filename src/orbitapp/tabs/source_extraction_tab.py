@@ -45,12 +45,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from orbit._masks import masked_mean_trace
 from orbit.cnmf import CNMFResult, cnmf_source_extraction, patch_cnmf_source_extraction
 from orbit.neuropil import compute_neuropil_traces
 from orbit.projections import local_correlation_projection
 from orbit.roi_extraction_corr import find_seed_candidates, roi_from_seed
 from orbit.roi_extraction_pca_ica import PCAICAResult, pca_ica_source_extraction
 
+from ..io import is_memmap, preview_slice
 from ..state import AppState, ROI
 from ..widgets import BusyBar, ParametersDialog, ROIReviewPanel, confirm_recompute, make_spinbox
 from ..workers import FunctionWorker, run_worker
@@ -73,6 +75,21 @@ def _grow_seeds(movie: np.ndarray, seeds: list[tuple[int, int]], kwargs: dict) -
         result = roi_from_seed(movie, seed, **kwargs)
         results.append({"seed_loc": seed, "mask": result.mask, "trace": result.trace, "thresh": result.thresh})
     return results
+
+
+def _reextract_traces(rois: list[ROI], movie: np.ndarray) -> list[ROI]:
+    """Runs off the GUI thread. Recomputes each ROI's primary trace from
+    the WHOLE movie -- used at Commit time for a memmap-backed dataset,
+    since CNMF/PCA-ICA's own trace may only reflect the 5000-frame
+    preview they were fit against (see _on_run_cnmf_clicked/
+    _on_run_pca_ica_clicked). masked_mean_trace is already bounded per
+    ROI (proportional to mask size x T, not the whole FOV), so this
+    stays memmap-safe regardless of how the trace was first computed --
+    correlation-based ROIs are already exact here too, just redundantly
+    recomputed to the same value, since they're not preview-capped."""
+    for roi in rois:
+        roi.trace = masked_mean_trace(movie, roi.mask)
+    return rois
 
 
 def _corr_shared_params(kwargs: dict) -> dict:
@@ -262,9 +279,14 @@ class SourceExtractionTab(QWidget):
             self.status_label.setText("No data loaded.")
             return
         self.status_label.setText(f"Ready. shape={movie.shape}")
+        # preview_slice bounds this to the first 5000 frames for a
+        # memmap movie -- local_correlation_projection materializes its
+        # whole input, which would otherwise force a full read of an
+        # arbitrarily large movie just to draw the FOV correlation image.
         self.worker = run_worker(
             self.busy_bar, "Computing local correlation image...",
-            local_correlation_projection, movie, on_success=self._on_corr_image_ready, on_failure=self._on_failed,
+            local_correlation_projection, preview_slice(movie),
+            on_success=self._on_corr_image_ready, on_failure=self._on_failed,
         )
 
     def _on_corr_image_ready(self, corr_image: np.ndarray) -> None:
@@ -364,13 +386,20 @@ class SourceExtractionTab(QWidget):
         )
         self._add_candidates(rois)
 
-    def _run_batch_method(self, message: str, fn, on_success, **kwargs) -> None:
+    def _run_batch_method(self, message: str, fn, on_success, worker_movie=None, **kwargs) -> None:
         """Launches a batch extraction algorithm (PCA-ICA, CNMF, ...) in
         the background -- shared by every such method since they only
         differ in the function/message/kwargs/result-handler. Skips
         redoing the work (after confirming) if this exact function+
         parameters already ran on this movie -- it would just reproduce
-        the same candidates."""
+        the same candidates.
+
+        ``worker_movie``, if given, is what actually gets passed to
+        ``fn`` (e.g. a 5000-frame preview_slice of a memmap movie) --
+        the "already ran" fingerprint still keys off the real active
+        movie (``id(movie)``) regardless, so switching between a memmap
+        and non-memmap load of the same path is still treated as a
+        different dataset."""
         movie = self.state.active_data()
         if movie is None:
             QMessageBox.warning(self, "No data", "Load data on the Load tab first.")
@@ -387,15 +416,23 @@ class SourceExtractionTab(QWidget):
             on_success(result)
 
         self.worker = run_worker(
-            self.busy_bar, message, fn, movie, on_success=_on_success, on_failure=self._on_failed, **kwargs
+            self.busy_bar, message, fn, worker_movie if worker_movie is not None else movie,
+            on_success=_on_success, on_failure=self._on_failed, **kwargs,
         )
 
     def _on_run_pca_ica_clicked(self) -> None:
+        movie = self.state.active_data()
         self._pending_batch_params = dict(
             n_pca_components=self.n_pca_components_spin.value(), n_ica_components=self.n_ica_components_spin.value(),
         )
+        # PCA/ICA decomposes the whole (P, T) movie at once -- no
+        # patch-based equivalent exists for it, so a memmap movie is
+        # always capped to the same 5000-frame preview Apply uses
+        # elsewhere in the app, rather than materializing the whole thing.
+        worker_movie = preview_slice(movie) if movie is not None and is_memmap(movie) else None
         self._run_batch_method(
-            "Running PCA-ICA...", pca_ica_source_extraction, self._on_pca_ica_finished, **self._pending_batch_params
+            "Running PCA-ICA...", pca_ica_source_extraction, self._on_pca_ica_finished,
+            worker_movie=worker_movie, **self._pending_batch_params,
         )
 
     def _on_pca_ica_finished(self, result: PCAICAResult) -> None:
@@ -403,6 +440,26 @@ class SourceExtractionTab(QWidget):
         self._add_candidates(rois)
 
     def _on_run_cnmf_clicked(self) -> None:
+        movie = self.state.active_data()
+        memmap_input = movie is not None and is_memmap(movie)
+        if memmap_input and not self.cnmf_patch_check.isChecked():
+            QMessageBox.warning(
+                self, "Patch-based extraction required",
+                "This movie is memory-mapped -- whole-FOV CNMF would need to read the entire "
+                "movie into RAM. Check 'Use patch-based extraction' to run CNMF on it, or turn "
+                "off memory mapping on the Load tab.",
+            )
+            return
+        # Both CNMF modes are capped to the same 5000-frame preview for a
+        # memmap movie: patch-based CNMF is already bounded by patch
+        # size regardless of frame count, but at the sizes memmap users
+        # are dealing with it's still much faster to fit against a
+        # representative sample than the whole recording. _commit()
+        # re-extracts every accepted ROI's trace from the full movie
+        # afterward, so this doesn't leave traces reflecting only the
+        # preview in the committed result.
+        worker_movie = preview_slice(movie) if memmap_input else None
+
         if self.cnmf_patch_check.isChecked():
             patch = self.cnmf_patch_size_spin.value()
             self._pending_batch_params = dict(
@@ -413,7 +470,7 @@ class SourceExtractionTab(QWidget):
             )
             self._run_batch_method(
                 "Running patch-based CNMF (this can take a while)...", patch_cnmf_source_extraction,
-                self._on_cnmf_finished, **self._pending_batch_params,
+                self._on_cnmf_finished, worker_movie=worker_movie, **self._pending_batch_params,
             )
             return
 
@@ -423,7 +480,7 @@ class SourceExtractionTab(QWidget):
         )
         self._run_batch_method(
             "Running CNMF (this can take a while)...", cnmf_source_extraction, self._on_cnmf_finished,
-            **self._pending_batch_params,
+            worker_movie=worker_movie, **self._pending_batch_params,
         )
 
     def _on_cnmf_finished(self, result: CNMFResult) -> None:
@@ -499,6 +556,23 @@ class SourceExtractionTab(QWidget):
             QMessageBox.information(self, "Nothing to commit", "Accept at least one candidate ROI first.")
             return
 
+        movie = self.state.active_data()
+        if movie is not None and is_memmap(movie):
+            self.commit_btn.setEnabled(False)
+            self.worker = run_worker(
+                self.busy_bar, "Re-extracting ROI traces from the full movie before committing...",
+                _reextract_traces, accepted, movie,
+                on_success=self._on_traces_reextracted, on_failure=self._on_failed,
+            )
+            return
+        self._finish_commit(accepted)
+
+    def _on_traces_reextracted(self, accepted: list[ROI]) -> None:
+        self.commit_btn.setEnabled(True)
+        self.busy_bar.stop("")
+        self._finish_commit(accepted)
+
+    def _finish_commit(self, accepted: list[ROI]) -> None:
         methods = {roi.source_method for roi in accepted}
         label = _PIPELINE_LABELS[accepted[0].source_method] if len(methods) == 1 else "Source Extraction"
         self.state.commit_rois(accepted, label)

@@ -12,14 +12,25 @@ every StageTab -- see that module's docstring.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QCheckBox, QComboBox, QHBoxLayout, QLabel, QPushButton
 
-from orbit.normalization import describe_normalization, normalize_movie, pixel_value_histogram, summary_stats
+from orbit.normalization import (
+    apply_baselines,
+    compute_baselines,
+    describe_normalization,
+    normalize_movie,
+    pixel_value_histogram,
+    summary_stats,
+)
 from orbit.qc_traces import qc_trace_samples
 
+from ..fits_io import create_fits_memmap
+from ..io import preview_slice
 from ..state import AppState
 from ..widgets import ParametersDialog, QCPlotGrid, add_location_markers, pixels_to_data_pos, split_by_kind
 from ..workers import run_worker
@@ -148,8 +159,8 @@ class NormalizationTab(StageTab):
     def _extract_metrics(self, result: dict) -> dict:
         return dict(stats_before=result["stats_before"], stats_after=result["stats_after"])
 
-    def _start_worker(self, movie: np.ndarray) -> None:
-        kwargs = dict(
+    def _kwargs(self) -> dict:
+        return dict(
             center=self.center_check.isChecked(),
             center_baseline=self.center_baseline_combo.currentText(),
             pixel_center=self.pixel_center_check.isChecked(),
@@ -157,14 +168,43 @@ class NormalizationTab(StageTab):
             norm_baseline=self.norm_baseline_combo.currentText(),
             pixel_norm=self.pixel_norm_check.isChecked(),
         )
+
+    def _start_worker(self, movie: np.ndarray) -> None:
+        kwargs = self._kwargs()
         self._pending_step_label = f"Normalize {describe_normalization(**kwargs)}"
         self.worker = run_worker(
             self.busy_bar, "Running normalization and metrics...",
             _run_and_assess, movie, on_success=self._on_finished, on_failure=self._on_failed, **kwargs,
         )
 
+    def _chunked_commit(self, source: np.ndarray, output_path: Path) -> np.ndarray:
+        kwargs = self._kwargs()
+        # Baselines (median/mode/robuststd are whole-time-axis per-pixel
+        # statistics -- not exactly computable from streamed chunks
+        # without keeping every value) are fit once from the same
+        # <=5000-frame preview Apply already ran against, then applied
+        # as a fixed transform to every chunk of the full movie. This
+        # matches the preview's own result exactly for that sample, and
+        # is the same "fit on the 5000-frame sample" approximation used
+        # for the preview itself -- not a further approximation on top.
+        preview = preview_slice(source)
+        baselines = compute_baselines(
+            preview, center=kwargs["center"], normalize=kwargs["normalize"],
+            center_baseline=kwargs["center_baseline"], norm_baseline=kwargs["norm_baseline"],
+            pixel_center=kwargs["pixel_center"], pixel_norm=kwargs["pixel_norm"],
+        )
+
+        T = source.shape[-1]
+        output = create_fits_memmap(output_path, source.shape, np.float32)
+        for t0 in range(0, T, self._chunk_frames):
+            t1 = min(t0 + self._chunk_frames, T)
+            chunk = np.asarray(source[:, :, t0:t1], dtype=np.float32)
+            output[:, :, t0:t1] = apply_baselines(chunk, baselines, center=kwargs["center"], normalize=kwargs["normalize"])
+        output.flush()
+        return output
+
     def _render_result(self, result: dict) -> None:
-        self.panel.before_view.setImage(self._input_movie.mean(axis=2))
+        self.panel.before_view.setImage(preview_slice(self._input_movie).mean(axis=2))
         self.panel.after_view.setImage(result["normalized"].mean(axis=2))
         self.panel.set_after_movie(result["normalized"])
 
