@@ -182,3 +182,21 @@ def test_pca_denoising_commit_of_memmap_movie_fails_cleanly(tmp_path, monkeypatc
 
     assert state.active_data() is movie  # nothing got committed
     assert tab.commit_controls.commit_btn.isEnabled()  # candidate still there to retry with a different method
+
+
+def test_ljung_box_metric_appears_after_apply():
+    rng = np.random.default_rng(0)
+    movie = rng.standard_normal((10, 10, 100)).astype(np.float32)
+    state = AppState()
+    state.load("movie.npy", movie)
+    tab = DenoisingTab(state)
+    tab.on_data_loaded()
+
+    tab.method_combo.setCurrentText("Gaussian Filter")
+    tab.gaussian_spatial_spin.setValue(1.5)
+    tab._apply()
+    _wait(tab)
+
+    metrics = tab._extract_metrics(tab._pending_result)
+    assert 0 <= metrics["ljung_box_failed"] <= metrics["ljung_box_total"] == 100
+    assert "Ljung-Box" in tab.metrics_label.text()

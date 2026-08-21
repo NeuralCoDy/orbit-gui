@@ -5,6 +5,7 @@ from orbit.denoising import (
     denoise_median,
     denoise_wavelet_space,
     denoise_wavelet_time,
+    residual_autocorrelation_failures,
     residual_energy_fraction,
 )
 
@@ -154,3 +155,27 @@ def test_residual_energy_fraction_partial_removal():
     movie = np.ones((2, 2, 5))
     half = movie * 0.5
     assert np.isclose(residual_energy_fraction(movie, half), 0.25)
+
+
+def test_residual_autocorrelation_failures_zero_for_a_perfect_denoise():
+    # An exactly-zero residual (denoised == original) is constant --
+    # ljung_box_test_movie always passes a constant trace trivially.
+    rng = np.random.default_rng(0)
+    movie = rng.standard_normal((4, 4, 200))
+    n_failed, n_total = residual_autocorrelation_failures(movie, movie)
+    assert n_failed == 0
+    assert n_total == 16
+
+
+def test_residual_autocorrelation_failures_flags_removed_signal():
+    # Denoising that also subtracts a genuine slow signal (not just
+    # noise) leaves that signal's structure behind in the residual --
+    # every pixel's residual should then fail the whiteness test.
+    rng = np.random.default_rng(1)
+    height, width, n_frames = 4, 4, 200
+    movie = rng.standard_normal((height, width, n_frames))
+    removed_signal = np.sin(np.linspace(0, 6 * np.pi, n_frames))
+    over_denoised = movie - np.broadcast_to(removed_signal, (height, width, n_frames))
+
+    n_failed, n_total = residual_autocorrelation_failures(movie, over_denoised)
+    assert n_failed == n_total == height * width

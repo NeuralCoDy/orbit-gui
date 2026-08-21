@@ -17,6 +17,7 @@ import numpy as np
 import pywt
 from scipy.ndimage import gaussian_filter, median_filter
 
+from .ljung_box import ljung_box_test_movie
 from .normalization import robust_std
 
 
@@ -119,3 +120,17 @@ def residual_energy_fraction(before: np.ndarray, after: np.ndarray) -> float:
     residual = before.astype(np.float64) - after.astype(np.float64)
     denom = np.sum(before.astype(np.float64) ** 2)
     return float(np.sum(residual**2) / denom) if denom > 0 else 0.0
+
+
+def residual_autocorrelation_failures(before: np.ndarray, after: np.ndarray, n_exclude: int = 0) -> tuple[int, int]:
+    """Counts how many pixels' residual (``before - after``) fails the
+    Ljung-Box whiteness test. If denoising removed only noise, the
+    residual should look like white noise everywhere; a pixel whose
+    residual instead shows significant autocorrelation is evidence that
+    real signal -- not just noise -- was subtracted out there.
+    ``n_exclude=0`` by default: unlike a raw fluorescence trace, a clean
+    residual has no indicator-decay kinetics left to explain away, so
+    every lag is fair game. Returns ``(n_failed, n_total)``."""
+    residual = before.astype(np.float64) - after.astype(np.float64)
+    passed, _alpha = ljung_box_test_movie(residual, n_exclude=n_exclude)
+    return int((~passed).sum()), int(passed.size)

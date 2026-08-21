@@ -1,9 +1,11 @@
 """Denoising tab: wavelet shrinkage (temporal or spatial), Gaussian
 filtering (temporal or spatial), or median filtering, via orbit.denoising.
 Residual energy fraction (how much signal was treated as noise and
-removed) and the change in mean local-pixel-correlation (denoising
-should raise it, since it suppresses spatially-independent noise while
-preserving spatially-coherent signal) are shown alongside the images.
+removed), the change in mean local-pixel-correlation (denoising should
+raise it, since it suppresses spatially-independent noise while
+preserving spatially-coherent signal), and how many pixels' residual
+fails a Ljung-Box whiteness test (evidence real signal, not just noise,
+was removed there) are shown alongside the images.
 
 Same Apply-produces-a-candidate / Commit-makes-it-active pattern as
 every StageTab -- see that module's docstring.
@@ -21,6 +23,7 @@ from orbit.denoising import (
     denoise_median,
     denoise_wavelet_space,
     denoise_wavelet_time,
+    residual_autocorrelation_failures,
     residual_energy_fraction,
 )
 from orbit.pca_denoise import pca_denoise
@@ -81,12 +84,15 @@ _PIPELINE_LABELS = {
 def _run_and_assess(movie: np.ndarray, algorithm: str, **kwargs) -> dict:
     """Runs off the GUI thread."""
     denoised = _DENOISE_FUNCS[algorithm](movie, **kwargs)
+    ljung_box_failed, ljung_box_total = residual_autocorrelation_failures(movie, denoised)
     return {
         "denoised": denoised,
         "residual_energy_fraction": residual_energy_fraction(movie, denoised),
         "corr_before": float(local_correlation_projection(movie).mean()),
         "corr_after": float(local_correlation_projection(denoised).mean()),
         "qc_traces": qc_trace_samples(movie, denoised),
+        "ljung_box_failed": ljung_box_failed,
+        "ljung_box_total": ljung_box_total,
     }
 
 
@@ -200,7 +206,8 @@ class DenoisingTab(StageTab):
     def _extract_metrics(self, result: dict) -> dict:
         return dict(
             residual_energy_fraction=result["residual_energy_fraction"], corr_before=result["corr_before"],
-            corr_after=result["corr_after"],
+            corr_after=result["corr_after"], ljung_box_failed=result["ljung_box_failed"],
+            ljung_box_total=result["ljung_box_total"],
         )
 
     def _algorithm_and_kwargs(self) -> tuple[str, dict]:
@@ -297,10 +304,13 @@ class DenoisingTab(StageTab):
         self.panel.after_view.setImage(result["denoised"].mean(axis=2))
         self.panel.set_after_movie(result["denoised"])
 
+        ljung_box_pct = 100 * result["ljung_box_failed"] / result["ljung_box_total"] if result["ljung_box_total"] else 0.0
         self.metrics_label.setText(
             f"Residual energy fraction: {result['residual_energy_fraction']:.3f}\n"
             f"Mean local correlation before -> after: "
-            f"{result['corr_before']:.3f} -> {result['corr_after']:.3f}"
+            f"{result['corr_before']:.3f} -> {result['corr_after']:.3f}\n"
+            f"Residual fails whiteness test (Ljung-Box): "
+            f"{result['ljung_box_failed']}/{result['ljung_box_total']} pixels ({ljung_box_pct:.1f}%)"
         )
 
         qc_traces = result["qc_traces"]
