@@ -179,16 +179,11 @@ py::array_t<float> half_sample_mode(py::array_t<float, py::array::c_style | py::
 }
 
 // ---------------------------------------------------------------------
-// oasis_ar1: exact AR(1) OASIS deconvolution (Friedrich, Zhou & Paninski
-// 2017) -- pool-adjacent-violators. Sequential/stateful, same reasoning
-// as half_sample_mode above for why a compiled kernel matters even
-// without batching across calls: it can't be vectorized with numpy the
-// way mean/variance can, and CNMF's temporal update calls it once per
-// component, each of which bisects an L1 penalty via ~20-30 further
-// calls (see cnmf_deconvolution.constrained_oasis_ar1) -- profiling on
-// a realistic-scale movie found this dominated per-patch runtime.
-// Direct port of orbit.cnmf_deconvolution.oasis_ar1 -- see that
-// docstring for the algorithm itself.
+// oasis_ar1: exact AR(1) OASIS deconvolution (pool-adjacent-violators),
+// direct port of orbit.cnmf_deconvolution.oasis_ar1 -- see that
+// docstring for the algorithm and why a compiled kernel matters here
+// (same "inherently sequential per trace" reasoning as half_sample_mode
+// above).
 // ---------------------------------------------------------------------
 
 struct OasisPool {
@@ -252,6 +247,65 @@ py::tuple oasis_ar1(py::array_t<double, py::array::c_style | py::array::forcecas
     return py::make_tuple(c_arr, s_arr);
 }
 
+// ---------------------------------------------------------------------
+// ljung_box_q_statistic: per-pixel Ljung-Box Q statistic across a whole
+// (H, W, T) movie, parallelized over rows the same way local_correlation
+// and half_sample_mode are above. See orbit.ljung_box for the test
+// itself (lag exclusion, the chi-squared p-value/pass decision) -- this
+// only computes Q per pixel, since that O(H*W*T*n_lags) sum is the
+// expensive part; scipy.stats.chi2.sf on the returned (H, W) array is
+// already cheap and stays in Python.
+// ---------------------------------------------------------------------
+
+static void ljung_box_rows(const double *movie, double *q_out, int height, int width, int n_frames, int n_exclude,
+                            int max_lag, int row_start, int row_end) {
+    std::vector<double> centered(n_frames);
+    for (int i = row_start; i < row_end; ++i) {
+        for (int j = 0; j < width; ++j) {
+            const double *trace = movie + (static_cast<size_t>(i) * width + j) * n_frames;
+            double mean = 0.0;
+            for (int t = 0; t < n_frames; ++t) mean += trace[t];
+            mean /= n_frames;
+            double denom = 0.0;
+            for (int t = 0; t < n_frames; ++t) {
+                centered[t] = trace[t] - mean;
+                denom += centered[t] * centered[t];
+            }
+
+            double q_stat = 0.0;
+            if (denom > 0.0) {
+                for (int lag = n_exclude + 1; lag <= max_lag; ++lag) {
+                    double cov = 0.0;
+                    for (int t = 0; t < n_frames - lag; ++t) cov += centered[t] * centered[t + lag];
+                    double rho = cov / denom;
+                    q_stat += (rho * rho) / static_cast<double>(n_frames - lag);
+                }
+                q_stat *= static_cast<double>(n_frames) * (n_frames + 2);
+            }
+            q_out[i * width + j] = q_stat;
+        }
+    }
+}
+
+py::array_t<double> ljung_box_q_statistic(py::array_t<double, py::array::c_style | py::array::forcecast> movie,
+                                           int n_exclude, int max_lag) {
+    auto buf = movie.request();
+    if (buf.ndim != 3) throw std::runtime_error("expected a (H, W, T) array");
+    int height = static_cast<int>(buf.shape[0]);
+    int width = static_cast<int>(buf.shape[1]);
+    int n_frames = static_cast<int>(buf.shape[2]);
+
+    py::array_t<double> result({height, width});
+    const double *in_ptr = static_cast<const double *>(buf.ptr);
+    double *out_ptr = static_cast<double *>(result.request().ptr);
+
+    parallel_over_rows(height, [=](int row_start, int row_end) {
+        ljung_box_rows(in_ptr, out_ptr, height, width, n_frames, n_exclude, max_lag, row_start, row_end);
+    });
+
+    return result;
+}
+
 PYBIND11_MODULE(_orbit_native, m) {
     m.doc() = "Optional native (C++) accelerators for orbit's per-pixel projections.";
     m.def("local_correlation", &local_correlation,
@@ -261,4 +315,6 @@ PYBIND11_MODULE(_orbit_native, m) {
           "Per-pixel half-sample mode across time (Bickel & Fruehwirth 2006).");
     m.def("oasis_ar1", &oasis_ar1, "Exact AR(1) OASIS deconvolution (pool-adjacent-violators).", py::arg("trace"),
           py::arg("g"), py::arg("lam") = 0.0, py::arg("s_min") = 0.0);
+    m.def("ljung_box_q_statistic", &ljung_box_q_statistic, "Per-pixel Ljung-Box Q statistic across a movie.",
+          py::arg("movie"), py::arg("n_exclude"), py::arg("max_lag"));
 }

@@ -22,8 +22,8 @@ pip install -e ".[test,gui,native]"
 ```
 
 Optionally build the native (C++) accelerators for the slower per-pixel/per-trace
-operations (local correlation and mode projections, OASIS deconvolution) --
-falls back to pure numpy/Python if skipped:
+operations (local correlation and mode projections, OASIS deconvolution, the
+per-pixel Ljung-Box test) -- falls back to pure numpy/Python if skipped:
 
 ```bash
 src/orbit/_native/build_native.sh

@@ -22,27 +22,20 @@ import numpy as np
 from graft import solvers as graft_solvers
 
 from ._masks import masked_mean_trace, threshold_footprint
+from ._patches import make_patches_2d
 from .cnmf_deconvolution import constrained_oasis_ar1, estimate_ar1_coefficient, estimate_noise_std
 from .cnmf_init import estimate_background, greedy_roi_init
 
 # Patches run in separate processes (not threads): a patch's own OASIS
-# deconvolution step is pure-Python and GIL-bound, so threads wouldn't
-# actually overlap that part of the work. Capped at a small constant
-# rather than os.cpu_count() for the same oversubscription reason
-# GraFT's own patch runner is (roi_extraction_graft.py's
-# _MAX_PATCH_WORKERS): each patch's NNLS/NMF solves are themselves
-# BLAS-threaded, so cpu_count() worker processes x BLAS's own internal
-# threads would oversubscribe the machine.
+# step is pure-Python/GIL-bound, so threads wouldn't overlap it. Capped
+# at a small constant, not os.cpu_count(), to avoid oversubscribing
+# against each patch's own BLAS-threaded solves -- see
+# _single_threaded_blas_for_children below for the measured impact.
 _DEFAULT_MAX_WORKERS = 4
 
-# This runs inside a PySide6 GUI, which keeps its own background threads
-# alive (QThread workers, Qt's internal threads) -- forking (the default
-# start method on Linux/Mac) a multi-threaded process risks the child
-# deadlocking on a lock some other thread held at fork time (confirmed:
-# ProcessPoolExecutor's default emits exactly this DeprecationWarning
-# when created from this app's test suite, itself multi-threaded via
-# pytest-qt). spawn starts each worker as a fresh interpreter instead,
-# sidestepping that hazard at the cost of slower worker startup.
+# spawn, not fork (the POSIX default): this runs inside a PySide6 GUI
+# with its own background threads, and forking a multi-threaded process
+# risks the child deadlocking on a lock held elsewhere at fork time.
 _MP_CONTEXT = multiprocessing.get_context("spawn")
 
 
@@ -74,20 +67,16 @@ def update_spatial_components(
     to keep footprints spatially local. Only the union of components'
     search disks is scanned, not the whole frame.
 
-    Pixels are grouped by their exact candidate set (usually far fewer
-    distinct groups than pixels -- e.g. 24 groups covering 6000
-    candidate pixels was typical for a 250x250 frame/20 components in
-    testing, since the candidate set only changes where a pixel crosses
-    a search-disk boundary) and each group's NNLS solves are batched
-    into one call to ``graft.solvers.solve_nonneg_qp_batch`` -- the
-    ``pygraft-gui`` dependency's own native (falls back to pure-Python)
-    accelerator, which factors the group's shared Gram matrix once via
-    Cholesky and solves every pixel in the group in parallel (OpenMP)
-    rather than scipy.optimize.nnls's from-scratch solve per pixel.
-    ``min_x ||Ax-b||^2 s.t. x>=0`` (the per-pixel problem here) is
-    equivalent to solve_nonneg_qp_batch's ``min_x x'Hx - c'x`` with
-    ``H=A'A``, ``c=2*A'b`` -- verified numerically identical to
-    scipy.optimize.nnls to float64 precision before relying on this."""
+    Pixels are grouped by their exact candidate set (nearby pixels
+    usually share one -- the set only changes where a pixel crosses a
+    search-disk boundary) and each group's NNLS solves are batched into
+    one call to ``graft.solvers.solve_nonneg_qp_batch`` (pygraft-gui's
+    own native accelerator), which factors the group's shared Gram
+    matrix once and solves every pixel in the group in parallel, rather
+    than scipy.optimize.nnls's from-scratch solve per pixel.
+    ``min_x ||Ax-b||^2 s.t. x>=0`` is equivalent to solve_nonneg_qp_batch's
+    ``min_x x'Hx - c'x`` with ``H=A'A``, ``c=2*A'b`` (see tests for the
+    numerical check against scipy.optimize.nnls)."""
     height, width, _n_frames = movie.shape
     n_background = len(background_temporal)
     n_components = len(footprints)
@@ -187,23 +176,16 @@ def update_temporal_components(
 
     residual_no_bg = y_flat - spatial_flat @ c_updated
     if background_flat.shape[1] > 0:
-        # Normal equations instead of lstsq: background_flat is (P, n_bg)
-        # with P=H*W >> n_bg (typically 1), so this is a heavily
-        # overdetermined system with very few unknowns -- lstsq's
-        # general SVD-based solve does a full factorization of the (P,
-        # n_bg) matrix for that, while solving the tiny (n_bg, n_bg)
-        # normal-equations system directly is mathematically the same
-        # least-squares solution (confirmed numerically identical to
-        # lstsq to ~1e-16) and, at realistic frame sizes, measured
-        # 5-14x faster since it doesn't touch a P-sized factorization at
-        # all. A small ridge term guards against a near-singular Gram
-        # matrix the way lstsq's own rcond cutoff would.
+        # Normal equations, not lstsq: background_flat is (P, n_bg) with
+        # P=H*W >> n_bg (typically 1), so solving the tiny (n_bg, n_bg)
+        # Gram system directly is the same least-squares answer as
+        # lstsq's general SVD-based solve (see tests) but 5-14x faster
+        # at realistic frame sizes, since it skips a P-sized
+        # factorization. Ridge term guards a near-singular Gram matrix.
         gram = background_flat.T @ background_flat  # (n_bg, n_bg)
         rhs = background_flat.T @ residual_no_bg  # (n_bg, T)
         jitter = 1e-10 * np.trace(gram) / max(gram.shape[0], 1)
-        new_background_temporal = np.clip(
-            np.linalg.solve(gram + jitter * np.eye(gram.shape[0]), rhs), 0, None
-        )
+        new_background_temporal = np.clip(np.linalg.solve(gram + jitter * np.eye(gram.shape[0]), rhs), 0, None)
     else:
         new_background_temporal = background_temporal
 
@@ -293,12 +275,10 @@ def cnmf_source_extraction(
     whole-FOV version doesn't scale well."""
     footprints, traces = greedy_roi_init(movie, n_components, gauss_sigma, init_radius)
     height, width, _n_frames = movie.shape
-    # A plain reshape+matmul instead of einsum("khw,kt->hwt", ...): both
-    # compute the identical (H, W, T) reconstruction (confirmed
-    # numerically identical to ~1e-14), but einsum's generic contraction
-    # engine doesn't recognize this shape as a plain matrix product and
-    # falls back to a slow unoptimized loop instead of BLAS -- measured
-    # >50x slower than the reshape+matmul form at realistic movie sizes.
+    # reshape+matmul instead of einsum("khw,kt->hwt", ...) -- identical
+    # math, but einsum doesn't recognize this as a plain matrix product
+    # and falls back to a slow generic loop instead of BLAS (>50x slower
+    # at realistic movie sizes).
     recon = (footprints.reshape(n_components, -1).T @ traces).reshape(height, width, -1)
     residual = movie - recon
     # residual isn't read again after this call, so estimate_background is
@@ -328,70 +308,25 @@ def cnmf_source_extraction(
     return _finalize_result(movie, footprints, spike_traces)
 
 
-def _patch_bounds(size: int, patch_extent: int, overlap: int) -> list[int]:
-    """Start offsets of overlapping patches of length ``patch_extent``
-    tiling ``[0, size)`` -- the last one is pulled back to end exactly at
-    ``size`` (rather than running past it) so every pixel is covered by
-    at least one patch, matching however unevenly `size` divides. When
-    the regular stride already lands within half a stride of that edge
-    position, the last regular start is shifted to the edge instead of
-    an extra patch being appended there -- otherwise a small remainder
-    (e.g. tiling 256px with a 100px/25px-overlap patch leaves a 6px
-    remainder) adds a near-duplicate patch just a few pixels over from
-    the previous one, close to doubling total patch coverage for
-    negligible extra frame coverage."""
-    if size <= patch_extent:
-        return [0]
-    stride = max(1, patch_extent - overlap)
-    starts = list(range(0, size - patch_extent + 1, stride))
-    edge = size - patch_extent
-    if starts[-1] != edge:
-        # Shifting (rather than appending) only when there's already a
-        # second-to-last start to keep the near-0 edge covered -- if
-        # starts is just [0], shifting it away from 0 would leave [0,
-        # edge) uncovered entirely, since nothing else covers that end.
-        if len(starts) > 1 and edge - starts[-1] < stride / 2:
-            starts[-1] = edge
-        else:
-            starts.append(edge)
-    return starts
-
-
-def _make_patches(height: int, width: int, patch_size: tuple[int, int], overlap: int) -> list[tuple[int, int, int, int]]:
-    """(row0, row1, col0, col1) bounds of every patch tiling (height, width)."""
-    patch_h, patch_w = min(patch_size[0], height), min(patch_size[1], width)
-    row_starts = _patch_bounds(height, patch_h, overlap)
-    col_starts = _patch_bounds(width, patch_w, overlap)
-    return [(r0, r0 + patch_h, c0, c0 + patch_w) for r0 in row_starts for c0 in col_starts]
-
-
 _BLAS_THREAD_ENV_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS")
 
 
 @contextmanager
 def _single_threaded_blas_for_children():
-    """Temporarily pins BLAS thread-count env vars to 1 in THIS
-    process, for spawned worker child processes to inherit (spawn
-    copies the parent's os.environ at spawn time) -- restored on exit
-    so this process's own (non-patch) BLAS calls, e.g. a later
-    whole-FOV cnmf_source_extraction call, aren't affected.
+    """Pins BLAS thread-count env vars to 1 in this process for spawned
+    workers to inherit (spawn copies os.environ at spawn time), restored
+    on exit so this process's own BLAS calls aren't affected. Without
+    this, each (already process-parallel) worker also fans its NNLS/NMF
+    solves out across every core via OpenBLAS's own threading --
+    measured 4 workers running patches ~5x SLOWER than 1, not just
+    failing to speed up, from that oversubscription.
 
-    Without this, each of the (already process-parallel) patch workers
-    would ALSO fan its own NNLS/NMF solves out across every core via
-    OpenBLAS's own threading, oversubscribing the machine the same way
-    GraFT's own patch runner could (see roi_extraction_graft.py's
-    _MAX_PATCH_WORKERS comment) -- confirmed by direct measurement: with
-    this unset, 4 worker processes ran patches ~5x SLOWER than 1, not
-    just failed to speed up, because OpenBLAS defaults to using every
-    core (MAX_THREADS=64) in each process independently.
-
-    A worker-side ProcessPoolExecutor `initializer` was tried first and
-    does NOT work: resolving a pickled reference to it requires
-    importing this module (and therefore numpy) in the child BEFORE the
-    initializer body runs, by which point OpenBLAS's thread pool is
-    already sized from the inherited (unset) env var -- setting it
-    inside the initializer is too late. Setting it here, in the parent,
-    before any worker is spawned, is the only point early enough."""
+    A ProcessPoolExecutor `initializer` doesn't work here: resolving a
+    pickled reference to it re-imports this module (and numpy) in the
+    child BEFORE the initializer body runs, by which point OpenBLAS's
+    thread pool is already sized -- setting the env var here, in the
+    parent before any worker spawns, is the earliest point that
+    actually works."""
     previous = {var: os.environ.get(var) for var in _BLAS_THREAD_ENV_VARS}
     for var in _BLAS_THREAD_ENV_VARS:
         os.environ[var] = "1"
@@ -430,9 +365,9 @@ def patch_cnmf_source_extraction(
     already uses to resolve split/duplicate components.
 
     Patching exists because several of cnmf_source_extraction's costs
-    scale with the *whole frame*, regardless of how many components are
-    actually in it or where (confirmed by profiling: the background NMF
-    fit dominates on a large FOV) -- restricting each run to a patch
+    scale with the *whole frame* regardless of how many components are
+    actually in it (background estimation, the initial reconstruction,
+    the spatial-update scan region) -- restricting each run to a patch
     keeps those bounded by patch_size instead of the full (H, W).
     cnmf_kwargs are forwarded to every patch's cnmf_source_extraction
     call (gauss_sigma, init_radius, search_radius, n_iterations, ...).
@@ -445,7 +380,7 @@ def patch_cnmf_source_extraction(
     _DEFAULT_MAX_WORKERS' comment for why that stays a small constant
     rather than just os.cpu_count()."""
     height, width, _n_frames = movie.shape
-    patches = _make_patches(height, width, patch_size, overlap)
+    patches = make_patches_2d(height, width, patch_size, overlap)
     workers = max_workers if max_workers is not None else min(_DEFAULT_MAX_WORKERS, os.cpu_count() or 1, len(patches))
 
     all_footprints, all_traces, all_spikes, all_g = [], [], [], []

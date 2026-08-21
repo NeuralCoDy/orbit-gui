@@ -6,6 +6,7 @@ pytest.importorskip("PySide6")
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from orbit.denoising import denoise_gaussian, denoise_median, denoise_wavelet_space  # noqa: E402
+from orbit.pca_denoise import pca_denoise  # noqa: E402
 from orbitapp.io import is_memmap, load_movie  # noqa: E402
 from orbitapp.state import AppState  # noqa: E402
 from orbitapp.tabs.denoising_tab import DenoisingTab  # noqa: E402
@@ -135,3 +136,49 @@ def test_gaussian_with_zero_temporal_sigma_needs_no_margin_and_still_matches(tmp
     committed = state.active_data()
     expected = denoise_gaussian(np.asarray(movie, dtype=np.float32), spatial_sigma=1.0, temporal_sigma=0.0)
     np.testing.assert_allclose(np.asarray(committed), expected, atol=1e-5)
+
+
+def test_pca_denoising_apply_and_commit_on_a_non_memmap_movie():
+    rng = np.random.default_rng(0)
+    height, width, n_frames = 15, 15, 60
+    movie = rng.standard_normal((height, width, n_frames)).astype(np.float32)
+    state = AppState()
+    state.load("movie.npy", movie)
+    tab = DenoisingTab(state)
+    tab.on_data_loaded()
+
+    tab.method_combo.setCurrentText("PCA Denoising")
+    tab.pca_n_components_spin.setValue(3)
+    tab._apply()
+    _wait(tab)
+    tab._commit()
+    _wait(tab)
+
+    committed = state.active_data()
+    expected = pca_denoise(movie, n_components=3, block_size=(250, 250), block_frames=5000)
+    np.testing.assert_allclose(np.asarray(committed), expected, atol=1e-4)
+
+
+def test_pca_denoising_commit_of_memmap_movie_fails_cleanly(tmp_path, monkeypatch):
+    # PCA Denoising's blocks are a global, blended tiling of the whole
+    # movie -- it can't be committed chunk-by-chunk against a memmap
+    # movie without changing the result (see _chunked_commit), so it
+    # should fail the same clean way wavelet_time already does rather
+    # than silently commit something inconsistent with its own preview.
+    monkeypatch.setattr("orbitapp.tabs.stage_tab.QMessageBox.critical", lambda *a, **k: None)
+
+    path, movie = _memmapped_movie(tmp_path)
+    state = AppState()
+    state.load(str(path), movie)
+    tab = DenoisingTab(state)
+    tab.on_data_loaded()
+
+    tab.method_combo.setCurrentText("PCA Denoising")
+    tab._apply()
+    _wait(tab)
+
+    tab._commit()
+    _wait(tab)
+
+    assert state.active_data() is movie  # nothing got committed
+    assert tab.commit_controls.commit_btn.isEnabled()  # candidate still there to retry with a different method

@@ -23,6 +23,7 @@ from orbit.denoising import (
     denoise_wavelet_time,
     residual_energy_fraction,
 )
+from orbit.pca_denoise import pca_denoise
 from orbit.projections import local_correlation_projection
 from orbit.qc_traces import qc_trace_samples
 
@@ -45,6 +46,7 @@ _ALGORITHMS = (
     ("Wavelet - Spatial (per frame)", "wavelet_space"),
     ("Gaussian Filter", "gaussian"),
     ("Median Filter", "median"),
+    ("PCA Denoising", "pca"),
 )
 _ALGORITHM_KEYS = dict(_ALGORITHMS)
 _DENOISE_FUNCS = {
@@ -52,6 +54,7 @@ _DENOISE_FUNCS = {
     "wavelet_space": denoise_wavelet_space,
     "gaussian": denoise_gaussian,
     "median": denoise_median,
+    "pca": pca_denoise,
 }
 # Which ParametersDialog group each algorithm's fields belong to --
 # several algorithms can share a group (both wavelet domains use the
@@ -61,6 +64,7 @@ _GROUP_BY_ALGORITHM = {
     "wavelet_space": "wavelet",
     "gaussian": "gaussian",
     "median": "median",
+    "pca": "pca",
 }
 # Pipeline-breadcrumb label per algorithm -- specific enough to tell
 # denoising methods apart in the header ("Load > Gaussian Denoising >
@@ -70,6 +74,7 @@ _PIPELINE_LABELS = {
     "wavelet_space": "Wavelet Denoising (Spatial)",
     "gaussian": "Gaussian Denoising",
     "median": "Median Filtering",
+    "pca": "PCA Denoising",
 }
 
 
@@ -113,6 +118,11 @@ class DenoisingTab(StageTab):
         self.gaussian_temporal_spin = make_spinbox(0.0, 50.0, 0.0, step=0.5, decimal=True)
         self.median_space_spin = make_spinbox(1, 51, 3)
         self.median_time_spin = make_spinbox(1, 51, 1)
+        self.pca_n_components_spin = make_spinbox(1, 500, 20)
+        self.pca_block_size_spin = make_spinbox(10, 2000, 250)
+        self.pca_block_frames_spin = make_spinbox(10, 50000, 5000)
+        self.pca_spatial_overlap_spin = make_spinbox(0, 500, 30)
+        self.pca_temporal_overlap_spin = make_spinbox(0, 20000, 500)
 
         self.params_dialog = ParametersDialog(title="Denoising Parameters", parent=self)
         self.params_dialog.add_row("wavelet", self.wavelet_combo, group="wavelet")
@@ -122,6 +132,11 @@ class DenoisingTab(StageTab):
         self.params_dialog.add_row("temporal width (frames, 0 = spatial only)", self.gaussian_temporal_spin, group="gaussian")
         self.params_dialog.add_row("space_window", self.median_space_spin, group="median")
         self.params_dialog.add_row("time_window", self.median_time_spin, group="median")
+        self.params_dialog.add_row("number of components", self.pca_n_components_spin, group="pca")
+        self.params_dialog.add_row("block size (pixels)", self.pca_block_size_spin, group="pca")
+        self.params_dialog.add_row("block length (frames)", self.pca_block_frames_spin, group="pca")
+        self.params_dialog.add_row("spatial overlap (pixels)", self.pca_spatial_overlap_spin, group="pca")
+        self.params_dialog.add_row("temporal overlap (frames)", self.pca_temporal_overlap_spin, group="pca")
         self._update_visible_params(self.method_combo.currentText())
 
         controls_row = QHBoxLayout()
@@ -158,6 +173,10 @@ class DenoisingTab(StageTab):
             level=self.level_spin.value(), threshold_method=self.threshold_combo.currentText(),
             spatial_sigma=self.gaussian_spatial_spin.value(), temporal_sigma=self.gaussian_temporal_spin.value(),
             space_window=self.median_space_spin.value(), time_window=self.median_time_spin.value(),
+            pca_n_components=self.pca_n_components_spin.value(), pca_block_size=self.pca_block_size_spin.value(),
+            pca_block_frames=self.pca_block_frames_spin.value(),
+            pca_spatial_overlap=self.pca_spatial_overlap_spin.value(),
+            pca_temporal_overlap=self.pca_temporal_overlap_spin.value(),
         )
 
     def restore_params(self, params: dict) -> None:
@@ -170,7 +189,10 @@ class DenoisingTab(StageTab):
         for key, spin in (
             ("level", self.level_spin), ("spatial_sigma", self.gaussian_spatial_spin),
             ("temporal_sigma", self.gaussian_temporal_spin), ("space_window", self.median_space_spin),
-            ("time_window", self.median_time_spin),
+            ("time_window", self.median_time_spin), ("pca_n_components", self.pca_n_components_spin),
+            ("pca_block_size", self.pca_block_size_spin), ("pca_block_frames", self.pca_block_frames_spin),
+            ("pca_spatial_overlap", self.pca_spatial_overlap_spin),
+            ("pca_temporal_overlap", self.pca_temporal_overlap_spin),
         ):
             if key in params:
                 spin.setValue(params[key])
@@ -193,8 +215,16 @@ class DenoisingTab(StageTab):
             kwargs = dict(
                 spatial_sigma=self.gaussian_spatial_spin.value(), temporal_sigma=self.gaussian_temporal_spin.value()
             )
-        else:
+        elif algorithm == "median":
             kwargs = dict(space_window=self.median_space_spin.value(), time_window=self.median_time_spin.value())
+        else:
+            block = self.pca_block_size_spin.value()
+            kwargs = dict(
+                n_components=self.pca_n_components_spin.value(), block_size=(block, block),
+                block_frames=self.pca_block_frames_spin.value(),
+                spatial_overlap=self.pca_spatial_overlap_spin.value(),
+                temporal_overlap=self.pca_temporal_overlap_spin.value(),
+            )
         return algorithm, kwargs
 
     def _start_worker(self, movie: np.ndarray) -> None:
@@ -229,6 +259,21 @@ class DenoisingTab(StageTab):
                 "Wavelet Denoising (Temporal) needs each pixel's whole time series and can't be "
                 "committed chunk-by-chunk against a memory-mapped movie -- use Wavelet (Spatial), "
                 "Gaussian, or Median for very large files, or turn off memory mapping on the Load tab."
+            )
+        if algorithm == "pca":
+            # Unlike the local-window filters below, PCA Denoising's
+            # blocks are a *global* tiling of the whole movie, blended
+            # where they overlap -- chunking Commit at any granularity
+            # other than that exact same tiling would silently diverge
+            # from what one whole-movie call produces (not just an
+            # approximation of it), and reproducing that tiling exactly
+            # would require accumulator arrays sized to the whole movie,
+            # defeating chunked Commit's entire bounded-memory point.
+            raise NotImplementedError(
+                "PCA Denoising's blocks span a large, blended region of the whole movie and can't "
+                "be committed chunk-by-chunk without changing the result -- use Wavelet (Spatial), "
+                "Gaussian, or Median for very large memory-mapped files, or turn off memory "
+                "mapping on the Load tab."
             )
 
         margin = self._temporal_margin(algorithm, kwargs)

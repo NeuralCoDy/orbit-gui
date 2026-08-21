@@ -105,23 +105,17 @@ def estimate_background(residual_movie: np.ndarray, n_components: int = 1) -> tu
     typically the single biggest temporary in a CNMF run.
 
     n_components=1 -- this function's default, and the only value the
-    GUI currently exposes/uses -- takes the same rank-1 ALS
-    finetune_component uses per cell component instead of routing
-    through sklearn's general multi-component NMF solver: profiling
-    found sklearn's fit was the single largest cost in a typical
-    whole-FOV CNMF run, and this turned out to be a rank-1-specific
-    pathology in sklearn's coordinate-descent solver (confirmed: it
-    never converges within max_iter=200 for rank 1 on realistic
-    background data, vs. converging in 3-4 iterations for rank 2-3 on
-    equivalent data) -- the ALS reaches the same solution (confirmed via
-    reconstruction error against sklearn's own fully-converged fit) in
-    ~1 iteration instead. n_components > 1 (not currently reachable from
-    the GUI) still uses sklearn's NMF: a from-scratch alternating
-    nonnegative least squares generalization was tried and measured
-    SLOWER than sklearn at this scale (its naive random init needs many
-    more outer iterations to reach comparable quality than sklearn's
-    SVD-informed one saves it) -- sklearn already isn't the bottleneck
-    for rank >1, so it was kept rather than shipping a regression."""
+    GUI exposes -- uses the same rank-1 ALS finetune_component uses per
+    cell component instead of sklearn's NMF: sklearn's fit was the
+    single largest cost in a whole-FOV CNMF run, a rank-1-specific
+    non-convergence pathology in its coordinate-descent solver (never
+    converges within max_iter=200 for rank 1, vs. 3-4 iterations for
+    rank 2-3 on equivalent data) -- the ALS reaches the same
+    reconstruction quality in ~1 iteration instead. n_components > 1
+    (not reachable from the GUI) still uses sklearn's NMF: a
+    from-scratch ALS generalization was tried and measured slower at
+    this scale, since sklearn's own convergence isn't the bottleneck for
+    rank >1 the way it was for rank 1."""
     height, width, n_frames = residual_movie.shape
     flat = residual_movie.reshape(-1, n_frames)
     np.clip(flat, 0, None, out=flat)

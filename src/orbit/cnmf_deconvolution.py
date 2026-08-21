@@ -48,15 +48,13 @@ def oasis_ar1(trace: np.ndarray, g: float, lam: float = 0.0, s_min: float = 0.0)
     solving the full system. ``lam`` is an L1 sparsity penalty on the
     spike train; ``s_min`` hard-zeros any spike below that height.
 
-    Uses the native (C++) kernel in _native/ when built (falls back to
-    the pure-Python implementation below otherwise -- see
-    _native/build_native.sh). This is one of the cases where a compiled
-    kernel matters most: OASIS's pool-merging is inherently sequential
-    per trace (can't vectorize with numpy the way mean/variance can),
-    and CNMF's temporal update calls it once per component, each of
-    which bisects an L1 penalty via ~20-30 further calls (see
-    constrained_oasis_ar1 below) -- profiling on a realistic-scale
-    movie found this dominated per-patch runtime."""
+    Uses the native (C++) kernel in _native/ when built, falling back to
+    the pure-Python implementation below otherwise (see
+    _native/build_native.sh) -- OASIS's pool-merging is inherently
+    sequential per trace (can't vectorize with numpy), and gets called
+    dozens of times per component via constrained_oasis_ar1's bisection
+    below, so this dominated per-patch CNMF runtime before the native
+    port."""
     if _native.NATIVE_AVAILABLE:
         c, s = _native.oasis_ar1_native(np.asarray(trace, dtype=np.float64), float(g), float(lam), float(s_min))
         return np.asarray(c), np.asarray(s)

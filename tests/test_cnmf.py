@@ -2,8 +2,6 @@ import numpy as np
 
 from orbit._masks import threshold_footprint
 from orbit.cnmf import (
-    _make_patches,
-    _patch_bounds,
     cnmf_source_extraction,
     merge_overlapping_components,
     patch_cnmf_source_extraction,
@@ -210,30 +208,6 @@ def test_cnmf_source_extraction_traces_are_measured_not_the_oasis_reconstruction
         rows, cols = np.nonzero(mask)
         expected = movie[rows, cols, :].mean(axis=0)
         assert np.allclose(trace, expected)
-
-
-def test_patch_bounds_covers_frame_without_a_near_duplicate_final_patch():
-    # 256 % 75 == 31, so the naive stride sequence [0, 75, 150] lands only
-    # 6px short of the true edge (156) -- appending a *new* patch there
-    # (rather than shifting the last one) would nearly double coverage for
-    # 6 extra pixels of frame.
-    starts = _patch_bounds(size=256, patch_extent=100, overlap=25)
-    assert starts == [0, 75, 156]
-    assert starts[-1] + 100 == 256  # last patch flush with the far edge
-    assert starts[0] == 0
-
-    # a size that fits inside one patch collapses to a single patch
-    assert _patch_bounds(size=50, patch_extent=100, overlap=25) == [0]
-
-
-def test_make_patches_bounds_tile_the_full_frame():
-    patches = _make_patches(height=120, width=90, patch_size=(70, 70), overlap=20)
-    covered = np.zeros((120, 90), dtype=bool)
-    for r0, r1, c0, c1 in patches:
-        assert 0 <= r0 < r1 <= 120
-        assert 0 <= c0 < c1 <= 90
-        covered[r0:r1, c0:c1] = True
-    assert covered.all()  # every pixel is inside at least one patch
 
 
 def _synthetic_multi_cell_movie(height, width, centers, n_frames=150, radius=4.0, seed=0):
