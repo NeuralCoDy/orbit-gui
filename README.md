@@ -21,8 +21,9 @@ source identification, demixing, ...), not bolted on at the end.
 pip install -e ".[test,gui,native]"
 ```
 
-Optionally build the native (C++) accelerators for the slower per-pixel projections
-(local correlation, mode) -- falls back to pure numpy if skipped:
+Optionally build the native (C++) accelerators for the slower per-pixel/per-trace
+operations (local correlation and mode projections, OASIS deconvolution) --
+falls back to pure numpy/Python if skipped:
 
 ```bash
 src/orbit/_native/build_native.sh

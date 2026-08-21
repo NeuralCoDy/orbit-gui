@@ -178,6 +178,80 @@ py::array_t<float> half_sample_mode(py::array_t<float, py::array::c_style | py::
     return result;
 }
 
+// ---------------------------------------------------------------------
+// oasis_ar1: exact AR(1) OASIS deconvolution (Friedrich, Zhou & Paninski
+// 2017) -- pool-adjacent-violators. Sequential/stateful, same reasoning
+// as half_sample_mode above for why a compiled kernel matters even
+// without batching across calls: it can't be vectorized with numpy the
+// way mean/variance can, and CNMF's temporal update calls it once per
+// component, each of which bisects an L1 penalty via ~20-30 further
+// calls (see cnmf_deconvolution.constrained_oasis_ar1) -- profiling on
+// a realistic-scale movie found this dominated per-patch runtime.
+// Direct port of orbit.cnmf_deconvolution.oasis_ar1 -- see that
+// docstring for the algorithm itself.
+// ---------------------------------------------------------------------
+
+struct OasisPool {
+    int start;
+    int length;
+    double value;
+    double weight;
+};
+
+py::tuple oasis_ar1(py::array_t<double, py::array::c_style | py::array::forcecast> trace, double g, double lam,
+                     double s_min) {
+    auto buf = trace.request();
+    if (buf.ndim != 1) throw std::runtime_error("expected a 1D array");
+    int n_frames = static_cast<int>(buf.shape[0]);
+    const double *y = static_cast<const double *>(buf.ptr);
+
+    py::array_t<double> c_arr(n_frames);
+    py::array_t<double> s_arr(n_frames);
+    double *c_out = static_cast<double *>(c_arr.request().ptr);
+    double *s_out = static_cast<double *>(s_arr.request().ptr);
+
+    {
+        py::gil_scoped_release release;
+        std::vector<OasisPool> pools;
+        pools.reserve(n_frames);
+        for (int i = 0; i < n_frames; ++i) {
+            double yi = y[i] - (i == n_frames - 1 ? lam : lam * (1.0 - g));
+            pools.push_back({i, 1, yi, 1.0});
+            while (pools.size() > 1) {
+                OasisPool &p1 = pools[pools.size() - 2];
+                OasisPool &p2 = pools[pools.size() - 1];
+                double gl1 = std::pow(g, p1.length);
+                if (p2.value / p2.weight < gl1 * p1.value / p1.weight + s_min) {
+                    double g2l1 = std::pow(g, 2 * p1.length);
+                    p1.length += p2.length;
+                    p1.value += gl1 * p2.value;
+                    p1.weight += g2l1 * p2.weight;
+                    pools.pop_back();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        for (const auto &p : pools) {
+            double base = p.value / p.weight;
+            double gp = 1.0;
+            for (int k = 0; k < p.length; ++k) {
+                c_out[p.start + k] = base * gp;
+                gp *= g;
+            }
+        }
+
+        s_out[0] = c_out[0];
+        for (int i = 1; i < n_frames; ++i) s_out[i] = c_out[i] - g * c_out[i - 1];
+        for (int i = 0; i < n_frames; ++i) {
+            if (s_out[i] < s_min) s_out[i] = 0.0;
+        }
+    }
+
+    return py::make_tuple(c_arr, s_arr);
+}
+
 PYBIND11_MODULE(_orbit_native, m) {
     m.doc() = "Optional native (C++) accelerators for orbit's per-pixel projections.";
     m.def("local_correlation", &local_correlation,
@@ -185,4 +259,6 @@ PYBIND11_MODULE(_orbit_native, m) {
           "with the mean trace of its up-to-8 spatial neighbors.");
     m.def("half_sample_mode", &half_sample_mode,
           "Per-pixel half-sample mode across time (Bickel & Fruehwirth 2006).");
+    m.def("oasis_ar1", &oasis_ar1, "Exact AR(1) OASIS deconvolution (pool-adjacent-violators).", py::arg("trace"),
+          py::arg("g"), py::arg("lam") = 0.0, py::arg("s_min") = 0.0);
 }

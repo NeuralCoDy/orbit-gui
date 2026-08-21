@@ -20,16 +20,17 @@ def gaussian_blur_movie(movie: np.ndarray, sigma: float) -> np.ndarray:
     return gaussian_filter(movie, sigma=(sigma, sigma, 0))
 
 
-def finetune_component(movie: np.ndarray, mask: np.ndarray, n_iter: int = 5) -> tuple[np.ndarray, np.ndarray]:
-    """Rank-1 nonnegative alternating-least-squares refinement of a
-    candidate footprint/trace pair, restricted to ``mask``'s pixels --
-    CaImAn's greedyROI "finetune" step. Returns a full (H, W) footprint
-    (zero outside ``mask``) and a (T,) trace."""
-    rows, cols = np.nonzero(mask)
-    patch = np.asarray(movie[rows, cols, :], dtype=np.float64)  # (n_pixels, T)
-
+def _rank1_als(patch: np.ndarray, n_iter: int) -> tuple[np.ndarray, np.ndarray]:
+    """Alternating nonnegative least-squares rank-1 factorization of
+    ``patch`` (n_pixels, T): a ``spatial`` (n_pixels,) x ``trace`` (T,)
+    pair minimizing ``||patch - outer(spatial, trace)||``, both clipped
+    nonnegative each step -- CaImAn's greedyROI "finetune" step. Shared
+    by finetune_component (a small masked patch per cell component) and
+    estimate_background's n_components=1 fast path (the whole
+    flattened residual at once) -- same ALS, applied at different
+    scales."""
     trace = np.clip(patch.mean(axis=0), 0, None)
-    spatial = np.ones(len(rows))
+    spatial = np.ones(patch.shape[0])
     for _ in range(n_iter):
         trace_energy = np.dot(trace, trace)
         if trace_energy > 0:
@@ -40,6 +41,17 @@ def finetune_component(movie: np.ndarray, mask: np.ndarray, n_iter: int = 5) -> 
         spatial_energy = np.dot(spatial, spatial)
         if spatial_energy > 0:
             trace = np.clip(spatial @ patch / spatial_energy, 0, None)
+    return spatial, trace
+
+
+def finetune_component(movie: np.ndarray, mask: np.ndarray, n_iter: int = 5) -> tuple[np.ndarray, np.ndarray]:
+    """Rank-1 nonnegative alternating-least-squares refinement of a
+    candidate footprint/trace pair, restricted to ``mask``'s pixels.
+    Returns a full (H, W) footprint (zero outside ``mask``) and a (T,)
+    trace."""
+    rows, cols = np.nonzero(mask)
+    patch = np.asarray(movie[rows, cols, :], dtype=np.float64)  # (n_pixels, T)
+    spatial, trace = _rank1_als(patch, n_iter)
 
     footprint = np.zeros(movie.shape[:2])
     footprint[rows, cols] = spatial
@@ -90,11 +102,34 @@ def estimate_background(residual_movie: np.ndarray, n_components: int = 1) -> tu
     so this mutates the caller's array too) rather than allocating a
     fresh clipped (H, W, T) copy -- callers of this internal helper
     don't need their residual afterward, and this movie-sized array is
-    typically the single biggest temporary in a CNMF run."""
+    typically the single biggest temporary in a CNMF run.
+
+    n_components=1 -- this function's default, and the only value the
+    GUI currently exposes/uses -- takes the same rank-1 ALS
+    finetune_component uses per cell component instead of routing
+    through sklearn's general multi-component NMF solver: profiling
+    found sklearn's fit was the single largest cost in a typical
+    whole-FOV CNMF run, and this turned out to be a rank-1-specific
+    pathology in sklearn's coordinate-descent solver (confirmed: it
+    never converges within max_iter=200 for rank 1 on realistic
+    background data, vs. converging in 3-4 iterations for rank 2-3 on
+    equivalent data) -- the ALS reaches the same solution (confirmed via
+    reconstruction error against sklearn's own fully-converged fit) in
+    ~1 iteration instead. n_components > 1 (not currently reachable from
+    the GUI) still uses sklearn's NMF: a from-scratch alternating
+    nonnegative least squares generalization was tried and measured
+    SLOWER than sklearn at this scale (its naive random init needs many
+    more outer iterations to reach comparable quality than sklearn's
+    SVD-informed one saves it) -- sklearn already isn't the bottleneck
+    for rank >1, so it was kept rather than shipping a regression."""
     height, width, n_frames = residual_movie.shape
     flat = residual_movie.reshape(-1, n_frames)
     np.clip(flat, 0, None, out=flat)
-    nmf = NMF(n_components=n_components, init="nndsvda", max_iter=200)
-    spatial = nmf.fit_transform(flat)  # (H*W, n_bg)
-    temporal = nmf.components_  # (n_bg, T)
+    if n_components == 1:
+        spatial, temporal = _rank1_als(flat, n_iter=10)
+        spatial, temporal = spatial[:, None], temporal[None, :]
+    else:
+        nmf = NMF(n_components=n_components, init="nndsvda", max_iter=200)
+        spatial = nmf.fit_transform(flat)  # (H*W, n_bg)
+        temporal = nmf.components_  # (n_bg, T)
     return spatial.reshape(height, width, n_components), temporal

@@ -57,6 +57,50 @@ def test_update_spatial_components_shapes_and_nonnegative():
     assert new_footprints[1, 20:25, 20:25].sum() > new_footprints[1, 5:10, 5:10].sum()
 
 
+def test_update_spatial_components_matches_per_pixel_scipy_nnls():
+    # update_spatial_components batches pixels sharing an identical
+    # candidate set into one graft.solvers.solve_nonneg_qp_batch call
+    # (see its own docstring) instead of scipy.optimize.nnls per pixel --
+    # this pins that batched reformulation to the original brute-force
+    # per-pixel solve, on a layout with genuinely overlapping search
+    # disks (so more than one candidate-set group is actually exercised,
+    # unlike the well-separated-blobs case above).
+    from scipy.optimize import nnls
+
+    from orbit.cnmf import _centroid
+
+    rng = np.random.default_rng(0)
+    height, width, n_frames = 40, 40, 60
+    movie = np.clip(rng.standard_normal((height, width, n_frames)) * 0.1 + 1.0, 0, None)
+    footprints = np.zeros((3, height, width))
+    footprints[0, 10:14, 10:14] = 1.0
+    footprints[1, 12:16, 12:16] = 1.0  # overlaps component 0's search disk
+    footprints[2, 28:32, 28:32] = 1.0  # isolated
+    traces = np.stack([rng.standard_normal(n_frames) for _ in range(3)])
+    background_temporal = np.stack([np.ones(n_frames), rng.standard_normal(n_frames)])
+
+    new_footprints, new_background_spatial = update_spatial_components(
+        movie, footprints, traces, background_temporal, search_radius=6
+    )
+
+    # Must match update_spatial_components' own centroid computation exactly
+    # -- an approximate/rounded stand-in shifts which candidate set a
+    # near-boundary pixel falls into and produces false mismatches.
+    centroids = np.array([_centroid(f) for f in footprints])
+    row_lo, row_hi = 4, 36
+    col_lo, col_hi = 4, 36
+    for row in range(row_lo, row_hi):
+        row_dist2 = (centroids[:, 0] - row) ** 2
+        for col in range(col_lo, col_hi):
+            candidates = np.where(row_dist2 + (centroids[:, 1] - col) ** 2 <= 6.0**2)[0]
+            if len(candidates) == 0:
+                continue
+            design = np.vstack([traces[candidates], background_temporal]).T
+            expected_coeffs, _ = nnls(design, movie[row, col, :])
+            got = np.concatenate([new_footprints[candidates, row, col], new_background_spatial[row, col, :]])
+            assert np.allclose(got, expected_coeffs, atol=1e-6), (row, col)
+
+
 def test_update_temporal_components_shapes_and_spikes_nonnegative():
     movie = _synthetic_cell_movie()
     footprints = np.zeros((2, 30, 30))
@@ -77,6 +121,36 @@ def test_update_temporal_components_shapes_and_spikes_nonnegative():
     assert new_bg_temporal.shape == background_temporal.shape
     assert (new_s >= 0).all()
     assert (new_bg_temporal >= 0).all()
+
+
+def test_update_temporal_components_background_matches_lstsq_with_two_bg_components():
+    # update_temporal_components solves for background_temporal via
+    # normal equations (a small (n_bg, n_bg) solve) instead of
+    # np.linalg.lstsq on the full (P, n_bg) system, for speed -- pins
+    # that against lstsq's own answer on the exact residual
+    # update_temporal_components itself produces, with n_bg=2 (not just
+    # the GUI's default 1) to exercise a real multi-component solve.
+    movie = _synthetic_cell_movie()
+    footprints = np.zeros((2, 30, 30))
+    footprints[0, 5:10, 5:10] = 1.0
+    footprints[1, 20:25, 20:25] = 1.0
+    traces = np.stack([movie[5:10, 5:10, :].mean(axis=(0, 1)), movie[20:25, 20:25, :].mean(axis=(0, 1))])
+    background_spatial = np.stack([np.full((30, 30), 0.1), np.full((30, 30), 0.05)], axis=-1)
+    background_temporal = np.ones((2, movie.shape[2]))
+    g_list = [0.9, 0.9]
+    noise_stds = [0.2, 0.2]
+
+    new_c, _new_s, new_bg_temporal = update_temporal_components(
+        movie, footprints, traces, background_spatial, background_temporal, g_list, noise_stds
+    )
+
+    y_flat = movie.reshape(-1, movie.shape[2])
+    spatial_flat = footprints.reshape(2, -1).T
+    background_flat = background_spatial.reshape(-1, 2)
+    residual_no_bg = y_flat - spatial_flat @ new_c
+    expected = np.clip(np.linalg.lstsq(background_flat, residual_no_bg, rcond=None)[0], 0, None)
+
+    assert np.allclose(new_bg_temporal, expected, atol=1e-8)
 
 
 def test_merge_overlapping_components_combines_correlated_overlapping_pair():

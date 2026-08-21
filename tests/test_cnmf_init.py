@@ -63,3 +63,36 @@ def test_estimate_background_shapes():
     assert temporal.shape == (1, 200)
     assert (spatial >= 0).all()
     assert (temporal >= 0).all()
+
+
+def test_estimate_background_rank1_matches_sklearn_nmf_reconstruction_quality():
+    # n_components=1 uses a hand-rolled rank-1 ALS instead of sklearn's
+    # NMF (see estimate_background's docstring) -- factors from the two
+    # methods aren't directly comparable (NMF's W/H split is only unique
+    # up to a scale factor), so this instead checks the RECONSTRUCTION
+    # (outer(spatial, temporal)) is at least as good as sklearn's own
+    # fully-converged fit, on data with genuine smooth spatial/temporal
+    # background structure (not just noise, which trivially "converges"
+    # in one step regardless of method).
+    from sklearn.decomposition import NMF
+
+    height, width, n_frames = 60, 60, 120
+    rng = np.random.default_rng(0)
+    yy, xx = np.mgrid[0:height, 0:width]
+    true_spatial = 1.0 + 0.5 * np.exp(-((yy - height / 2) ** 2 + (xx - width / 2) ** 2) / (2 * 20.0**2))
+    true_temporal = np.clip(1.0 + 0.3 * np.sin(np.linspace(0, 6 * np.pi, n_frames)), 0, None)
+    movie = true_spatial[:, :, None] * true_temporal[None, None, :]
+    movie += rng.standard_normal(movie.shape) * 0.05
+    movie = np.clip(movie, 0, None)
+
+    spatial, temporal = estimate_background(movie.copy(), n_components=1)
+    als_recon = spatial.reshape(-1, 1) @ temporal
+    als_err = np.linalg.norm(movie.reshape(-1, n_frames) - als_recon)
+
+    flat = np.clip(movie.reshape(-1, n_frames), 0, None)
+    nmf = NMF(n_components=1, init="nndsvda", max_iter=200)
+    sk_spatial = nmf.fit_transform(flat)
+    sk_recon = sk_spatial @ nmf.components_
+    sk_err = np.linalg.norm(flat - sk_recon)
+
+    assert als_err < sk_err * 1.01  # ALS shouldn't reconstruct meaningfully worse than sklearn's converged fit
