@@ -118,6 +118,47 @@ def test_loaded_memmap_movie_is_capped_to_5000_frames_in_the_viewer(tmp_path):
     assert state.original_data.shape[-1] == 5200
 
 
+def test_modality_toggles_off_by_default():
+    state = AppState()
+    tab = LoadTab(state)
+    assert not any(check.isChecked() for check in tab._modality_checks.values())
+    assert state.modality_modifiers() == []
+
+
+def test_modality_toggle_updates_state_and_emits_modality_changed():
+    state = AppState()
+    tab = LoadTab(state)
+
+    emitted = []
+    tab.modality_changed.connect(lambda: emitted.append(1))
+
+    tab._modality_checks["widefield"].setChecked(True)
+
+    assert state.widefield
+    assert state.modality_modifiers() == ["widefield"]
+    assert len(emitted) == 1
+
+
+def test_modality_modifiers_reflects_fixed_display_order_regardless_of_toggle_order():
+    state = AppState()
+    tab = LoadTab(state)
+
+    tab._modality_checks["volumetric"].setChecked(True)
+    tab._modality_checks["dendrites"].setChecked(True)
+
+    assert state.modality_modifiers() == ["dendrites", "volumetric"]
+
+
+def test_untoggling_a_modality_removes_it():
+    state = AppState()
+    tab = LoadTab(state)
+    tab._modality_checks["axons"].setChecked(True)
+    assert state.modality_modifiers() == ["axons"]
+
+    tab._modality_checks["axons"].setChecked(False)
+    assert state.modality_modifiers() == []
+
+
 def test_loading_a_different_path_does_not_prompt(tmp_path, monkeypatch):
     state = AppState()
     old_path = tmp_path / "old.tif"

@@ -1,12 +1,14 @@
 """Persistent header strip shown above the tabs on every stage: what's
 loaded and the committed processing pipeline so far -- labeled "Current
-pipeline:" -- as a block diagram (one box per step, connected by
-arrows, e.g. "[Load] -> [Patch Warp] -> [Normalize]"), plus the full
-orbit logo in the top-right corner -- all stay visible no matter which
-tab is open (unlike pyGraFT's per-tab-only status labels). Two rows:
-the "ORBIT GUI" title sits above the data-loaded status text on the
-left; the pipeline diagram shares the row directly under that with the
-logo, at the same vertical level.
+pipeline:" (or "Current pipeline (widefield):" etc. if any of the Load
+tab's data-modality toggles are on -- see set_pipeline's modifiers) --
+as a block diagram (one box per step, connected by arrows, e.g.
+"[Load] -> [Patch Warp] -> [Normalize]"), plus the full orbit logo in
+the top-right corner -- all stay visible no matter which tab is open
+(unlike pyGraFT's per-tab-only status labels). Two rows: the "ORBIT
+GUI" title sits above the data-loaded status text on the left; the
+pipeline diagram shares the row directly under that with the logo, at
+the same vertical level.
 """
 
 from __future__ import annotations
@@ -100,7 +102,8 @@ class HeaderBar(QWidget):
         outer.addLayout(top_row)
 
         pipeline_row = QHBoxLayout()
-        pipeline_row.addWidget(QLabel("Current pipeline:"), 0, Qt.AlignmentFlag.AlignVCenter)
+        self.pipeline_caption_label = QLabel("Current pipeline:")
+        pipeline_row.addWidget(self.pipeline_caption_label, 0, Qt.AlignmentFlag.AlignVCenter)
         self.pipeline_diagram = _PipelineDiagram()
         pipeline_row.addWidget(self.pipeline_diagram, 0, Qt.AlignmentFlag.AlignVCenter)
         pipeline_row.addStretch()
@@ -116,5 +119,11 @@ class HeaderBar(QWidget):
     def set_data_info(self, summary: str | None) -> None:
         self.data_label.setText(summary or "No data loaded.")
 
-    def set_pipeline(self, steps: list[str]) -> None:
+    def set_pipeline(self, steps: list[str], modifiers: list[str] | None = None) -> None:
+        """``modifiers`` are the Load tab's active data-modality toggles
+        (see AppState.modality_modifiers), shown parenthetically in the
+        caption, e.g. "Current pipeline (widefield):" -- purely a label
+        for now."""
+        suffix = f" ({', '.join(modifiers)})" if modifiers else ""
+        self.pipeline_caption_label.setText(f"Current pipeline{suffix}:")
         self.pipeline_diagram.set_steps(steps)

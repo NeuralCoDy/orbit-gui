@@ -182,6 +182,21 @@ def test_header_bar_has_current_pipeline_caption():
     assert any(w.text() == "Current pipeline:" for w in header.findChildren(QLabel))
 
 
+def test_header_bar_pipeline_caption_shows_active_modality_modifiers():
+    header = HeaderBar()
+    header.set_pipeline(["Load"], ["widefield"])
+    assert header.pipeline_caption_label.text() == "Current pipeline (widefield):"
+
+    header.set_pipeline(["Load"], ["dendrites", "volumetric"])
+    assert header.pipeline_caption_label.text() == "Current pipeline (dendrites, volumetric):"
+
+    header.set_pipeline(["Load"], [])
+    assert header.pipeline_caption_label.text() == "Current pipeline:"
+
+    header.set_pipeline(["Load"])  # modifiers defaults to None
+    assert header.pipeline_caption_label.text() == "Current pipeline:"
+
+
 def test_busy_bar_starts_hidden_and_toggles_on_start_stop():
     bar = BusyBar()
     assert bar.bar.isVisibleTo(bar) is False

@@ -16,6 +16,7 @@ from .state import AppState
 from .tabs import (
     DenoisingTab,
     LoadTab,
+    MaskTab,
     MotionCorrectionTab,
     NormalizationTab,
     ProjectionsTab,
@@ -42,6 +43,7 @@ class MainWindow(QMainWindow):
         self.load_tab = LoadTab(self.state)
         self.projections_tab = ProjectionsTab(self.state)
         self.motion_correction_tab = MotionCorrectionTab(self.state)
+        self.mask_tab = MaskTab(self.state)
         self.denoising_tab = DenoisingTab(self.state)
         self.normalization_tab = NormalizationTab(self.state)
         self.source_extraction_tab = SourceExtractionTab(self.state)
@@ -56,6 +58,7 @@ class MainWindow(QMainWindow):
         self._stage_tabs = [
             self.projections_tab,
             self.motion_correction_tab,
+            self.mask_tab,
             self.denoising_tab,
             self.normalization_tab,
             self.source_extraction_tab,
@@ -65,12 +68,13 @@ class MainWindow(QMainWindow):
         # Extraction's Commit only adds to state.rois -- active_data() is
         # unchanged, so there's nothing for other movie-consuming tabs to
         # refresh -- it's wired to the header breadcrumb separately below.
-        self._mutating_tabs = [self.motion_correction_tab, self.denoising_tab, self.normalization_tab]
+        self._mutating_tabs = [self.motion_correction_tab, self.mask_tab, self.denoising_tab, self.normalization_tab]
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.load_tab, "Load")
         self.tabs.addTab(self.projections_tab, "Data Projections")
         self.tabs.addTab(self.motion_correction_tab, "Motion Correction")
+        self.tabs.addTab(self.mask_tab, "Mask")
         self.tabs.addTab(self.denoising_tab, "Denoising")
         self.tabs.addTab(self.normalization_tab, "Normalization")
         self.tabs.addTab(self.source_extraction_tab, "Source Extraction")
@@ -97,6 +101,8 @@ class MainWindow(QMainWindow):
         self.source_extraction_tab.data_changed.connect(self._on_data_committed)
         self.source_extraction_tab.data_changed.connect(self.roi_validation_tab.on_data_loaded)
 
+        self.load_tab.modality_changed.connect(self._on_modality_changed)
+
         self.save_tab.session_loaded.connect(self._on_session_loaded)
 
     def _on_data_loaded(self) -> None:
@@ -104,13 +110,19 @@ class MainWindow(QMainWindow):
         path = self.state.data_path
         summary = None if movie is None or path is None else format_header_summary(path, movie)
         self.header.set_data_info(summary)
-        self.header.set_pipeline(self.state.pipeline)
+        self.header.set_pipeline(self.state.pipeline, self.state.modality_modifiers())
 
     def _on_data_committed(self) -> None:
         """A stage tab committed a new active dataset (see
         orbitapp.widgets.CommitControls) -- reflect the updated pipeline
         breadcrumb."""
-        self.header.set_pipeline(self.state.pipeline)
+        self.header.set_pipeline(self.state.pipeline, self.state.modality_modifiers())
+
+    def _on_modality_changed(self) -> None:
+        """One of the Load tab's data-modality toggles flipped -- only
+        the header caption reflects this today (see AppState.
+        modality_modifiers)."""
+        self.header.set_pipeline(self.state.pipeline, self.state.modality_modifiers())
 
     def _on_session_loaded(self, session: dict) -> None:
         """SaveTab only reads/writes files -- reconstructing AppState and
@@ -132,6 +144,7 @@ class MainWindow(QMainWindow):
             self.state.steps = pipeline["steps"]
             tabs_by_stage = {
                 self.motion_correction_tab._stage_key: self.motion_correction_tab,
+                self.mask_tab._stage_key: self.mask_tab,
                 self.denoising_tab._stage_key: self.denoising_tab,
                 self.normalization_tab._stage_key: self.normalization_tab,
             }

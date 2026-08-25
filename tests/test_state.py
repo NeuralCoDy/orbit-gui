@@ -30,6 +30,28 @@ def test_load_resets_pipeline_and_preprocessed_data():
     assert state.active_data() is movie
 
 
+def test_modality_modifiers_empty_by_default():
+    state = AppState()
+    assert state.modality_modifiers() == []
+
+
+def test_modality_modifiers_in_fixed_display_order():
+    state = AppState()
+    state.volumetric = True
+    state.dendrites = True
+    assert state.modality_modifiers() == ["dendrites", "volumetric"]
+
+
+def test_load_does_not_reset_modality_toggles():
+    # Unlike pipeline/rois/steps, the modality toggles describe the
+    # *kind* of dataset being analyzed, independent of any one file --
+    # a fresh Load shouldn't silently clear the user's selection.
+    state = AppState()
+    state.widefield = True
+    state.load("/some/movie.tif", np.zeros((4, 4, 5)))
+    assert state.widefield
+
+
 def test_commit_updates_active_data_and_appends_pipeline_step():
     state = AppState()
     state.load("/some/movie.tif", np.zeros((4, 4, 5)))

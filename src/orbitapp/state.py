@@ -50,6 +50,24 @@ class AppState:
     rois: list[ROI] = field(default_factory=list)  # committed ROIs; accumulates across commits/methods
     steps: list[PipelineStep] = field(default_factory=list)  # parallel to pipeline, with params/metrics attached
 
+    # Load tab's data-modality toggles -- describe the *kind* of dataset
+    # being analyzed (independent of any one file, so NOT reset by
+    # load() the way pipeline/rois/steps are). Purely informational for
+    # now: they only label the header's pipeline diagram (see
+    # modality_modifiers below) -- a later, larger change will make
+    # these actually affect processing.
+    dendrites: bool = False
+    axons: bool = False
+    widefield: bool = False
+    volumetric: bool = False
+
+    def modality_modifiers(self) -> list[str]:
+        """Which of the Load tab's data-modality toggles are on, in a
+        fixed display order -- used to label the header's pipeline
+        diagram, e.g. "Current pipeline (widefield):"."""
+        names = ("dendrites", "axons", "widefield", "volumetric")
+        return [name for name in names if getattr(self, name)]
+
     def active_data(self) -> np.ndarray | None:
         """The data later stages should operate on: the latest committed
         version if one exists, else the originally-loaded movie. A stage

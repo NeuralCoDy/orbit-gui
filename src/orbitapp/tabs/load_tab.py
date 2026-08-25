@@ -36,6 +36,7 @@ from ..workers import FunctionWorker, run_worker
 
 class LoadTab(QWidget):
     data_loaded = Signal()
+    modality_changed = Signal()
 
     def __init__(self, state: AppState, parent=None) -> None:
         super().__init__(parent)
@@ -65,6 +66,18 @@ class LoadTab(QWidget):
             "The viewer only shows the first 5000 frames when this is on."
         )
         sidebar_layout.addWidget(self.mmap_check)
+
+        # Data-modality toggles: describe the *kind* of dataset being
+        # analyzed. Purely informational for now -- they only label the
+        # header's "Current pipeline:" caption (see AppState.
+        # modality_modifiers) -- a later, larger change will make these
+        # actually affect processing.
+        self._modality_checks: dict[str, QCheckBox] = {}
+        for name in ("dendrites", "axons", "widefield", "volumetric"):
+            check = QCheckBox(name.capitalize())
+            check.toggled.connect(self._on_modality_toggled)
+            sidebar_layout.addWidget(check)
+            self._modality_checks[name] = check
 
         self.view_movie_btn = QPushButton("View Movie")
         self.view_movie_btn.setEnabled(False)
@@ -158,6 +171,11 @@ class LoadTab(QWidget):
         self._movie_player = show_movie_popout(
             self._movie_player, orbitapp_io.preview_slice(movie), "Movie Player - Loaded Movie"
         )
+
+    def _on_modality_toggled(self, _checked: bool) -> None:
+        for name, check in self._modality_checks.items():
+            setattr(self.state, name, check.isChecked())
+        self.modality_changed.emit()
 
     def _on_failed(self, message: str) -> None:
         self.busy_bar.stop("Load failed.")
