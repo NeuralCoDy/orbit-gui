@@ -28,16 +28,13 @@ def qapp():
 def test_header_bar_shows_no_data_by_default():
     header = HeaderBar()
     assert "No data loaded" in header.data_label.text()
-    assert header.stage_label.text() == ""
 
 
-def test_header_bar_reflects_loaded_data_and_active_stage():
+def test_header_bar_reflects_loaded_data():
     header = HeaderBar()
     header.set_data_info("movie.tif  --  64 x 64, 100 time-steps")
-    header.set_active_stage("Motion Correction")
 
     assert "movie.tif" in header.data_label.text()
-    assert header.stage_label.text() == "Stage: Motion Correction"
 
 
 def test_header_bar_reset_to_no_data():
@@ -95,6 +92,38 @@ def test_stage_panel_play_movie_caps_a_memmapped_movie_to_5000_frames(tmp_path):
     assert panel._players["before"].state.movie.shape[-1] == 5000
 
 
+def test_stage_panel_extra_movie_button_plays_its_own_named_movie():
+    panel = StagePanel(before_title="Raw", after_title="Corrected")
+    panel.add_extra_movie_button("after", "residual", "Play Residual Movie")
+    residual_movie = np.full((5, 5, 3), 2.0)
+    panel.set_movie("residual", residual_movie)
+
+    panel._play_movie("residual")
+
+    assert panel._players["residual"] is not None
+    assert panel._players["residual"].windowTitle() == "Movie Player - Play Residual Movie"
+    # unrelated slots are untouched
+    assert panel._players["before"] is None
+    assert panel._players["after"] is None
+
+
+def test_stage_panel_extra_movie_button_sits_beside_play_movie_not_below_it():
+    panel = StagePanel(before_title="Raw", after_title="Corrected")
+    panel.add_extra_movie_button("after", "residual", "Play Residual Movie")
+
+    # Both buttons share the "after" column's one button row (side by
+    # side), not stacked as separate rows in the column's own layout.
+    after_row = panel._button_rows["after"]
+    assert after_row.count() == 2
+    assert after_row.itemAt(0).widget().text() == "Play Movie"
+    assert after_row.itemAt(1).widget().text() == "Play Residual Movie"
+    # each gets equal stretch, splitting the row's width evenly
+    assert after_row.stretch(0) == after_row.stretch(1) == 1
+
+    # the "before" column is unaffected
+    assert panel._button_rows["before"].count() == 1
+
+
 def test_stage_panel_metrics_row_accepts_widgets():
     panel = StagePanel()
     assert panel.metrics_row.count() == 0
@@ -105,15 +134,52 @@ def test_stage_panel_metrics_row_accepts_widgets():
     assert panel.metrics_row.count() == 2
 
 
-def test_header_bar_pipeline_breadcrumb():
+def test_header_bar_pipeline_diagram_shows_one_block_per_step():
     header = HeaderBar()
-    assert header.pipeline_label.text() == ""
+    assert header.pipeline_diagram.step_labels() == []
 
     header.set_pipeline(["Load", "Patch Warp", "Normalize"])
-    assert header.pipeline_label.text() == "Pipeline: Load > Patch Warp > Normalize"
+    assert header.pipeline_diagram.step_labels() == ["Load", "Patch Warp", "Normalize"]
 
     header.set_pipeline([])
-    assert header.pipeline_label.text() == ""
+    assert header.pipeline_diagram.step_labels() == []
+
+
+def test_header_bar_pipeline_diagram_has_an_arrow_between_each_pair_of_blocks():
+    header = HeaderBar()
+    header.set_pipeline(["Load", "Patch Warp", "Normalize"])
+
+    row = header.pipeline_diagram._row
+    widgets = [row.itemAt(i).widget() for i in range(row.count()) if row.itemAt(i).widget() is not None]
+    texts = [w.text() for w in widgets]
+    assert texts == ["Load", "→", "Patch Warp", "→", "Normalize"]
+
+    box_font = widgets[0].font()
+    arrow_font = widgets[1].font()
+    assert arrow_font.bold() and not box_font.bold()
+    assert arrow_font.pointSize() > box_font.pointSize()
+
+
+def test_header_bar_pipeline_diagram_rebuilds_rather_than_appends():
+    header = HeaderBar()
+    header.set_pipeline(["Load", "Patch Warp"])
+    header.set_pipeline(["Load"])  # e.g. a session reset back to just Load
+
+    assert header.pipeline_diagram.step_labels() == ["Load"]
+
+
+def test_header_bar_title_is_bold():
+    header = HeaderBar()
+    title_labels = [
+        w for w in header.findChildren(QLabel) if w.text() == "ORBIT GUI"
+    ]
+    assert len(title_labels) == 1
+    assert title_labels[0].font().bold()
+
+
+def test_header_bar_has_current_pipeline_caption():
+    header = HeaderBar()
+    assert any(w.text() == "Current pipeline:" for w in header.findChildren(QLabel))
 
 
 def test_busy_bar_starts_hidden_and_toggles_on_start_stop():

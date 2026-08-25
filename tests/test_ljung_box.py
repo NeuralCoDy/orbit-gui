@@ -1,13 +1,13 @@
 import numpy as np
 import pytest
 
-from orbit.ljung_box import _default_max_lag, ljung_box_test, ljung_box_test_movie
+from orbit.ljung_box import default_max_lag, ljung_box_test, ljung_box_test_movie
 
 
 def test_default_max_lag_follows_the_10log10_n_rule():
-    assert _default_max_lag(100) == 20  # 10*log10(100) = 20
-    assert _default_max_lag(1000) == 30  # 10*log10(1000) = 30
-    assert _default_max_lag(3) == 2  # capped at n-1
+    assert default_max_lag(100) == 20  # 10*log10(100) = 20
+    assert default_max_lag(1000) == 30  # 10*log10(1000) = 30
+    assert default_max_lag(3) == 2  # capped at n-1
 
 
 def test_ljung_box_test_white_noise_passes():

@@ -1,8 +1,12 @@
 """Persistent header strip shown above the tabs on every stage: what's
-loaded, which stage tab is active, the committed processing pipeline so
-far (e.g. "Load > Patch Warp > Normalize"), and the full orbit logo in
-the top-right corner -- all stay visible no matter which tab is open
-(unlike pyGraFT's per-tab-only status labels).
+loaded and the committed processing pipeline so far -- labeled "Current
+pipeline:" -- as a block diagram (one box per step, connected by
+arrows, e.g. "[Load] -> [Patch Warp] -> [Normalize]"), plus the full
+orbit logo in the top-right corner -- all stay visible no matter which
+tab is open (unlike pyGraFT's per-tab-only status labels). Two rows:
+the "ORBIT GUI" title sits above the data-loaded status text on the
+left; the pipeline diagram shares the row directly under that with the
+logo, at the same vertical level.
 """
 
 from __future__ import annotations
@@ -11,8 +15,67 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from ..assets import LOGO_PATH, load_logo
+from ..theme import ACCENT, BACKGROUND
 
 _LOGO_HEIGHT_PX = 60
+
+# Same colors as every other bordered widget in the app's dark theme
+# (theme.py's own QPushButton/QTabBar/QMainWindow rules all use
+# "border: 1px solid {ACCENT}" against a black background) -- not
+# palette(...) roles, since this app's dark theme is a QSS stylesheet
+# override rather than an actual QPalette change, so palette(...)
+# would resolve to the default (unthemed) system colors instead.
+_BOX_STYLE = (
+    f"QLabel {{ border: 1px solid {ACCENT}; border-radius: 4px; "
+    f"padding: 2px 10px; background-color: {BACKGROUND}; }}"
+)
+
+
+class _PipelineDiagram(QWidget):
+    """A horizontal row of boxes, one per committed pipeline step, each
+    connected to the next by an arrow. Rebuilt from scratch on every
+    set_steps() call (matching how the plain-text breadcrumb this
+    replaces was always given the FULL step list, never appended to)."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._row = QHBoxLayout(self)
+        self._row.setContentsMargins(0, 0, 0, 0)
+        self._boxes: list[QLabel] = []
+
+    def set_steps(self, steps: list[str]) -> None:
+        while self._row.count():
+            item = self._row.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._boxes = []
+
+        for i, step in enumerate(steps):
+            if i > 0:
+                self._row.addWidget(self._make_arrow())
+            box = QLabel(step)
+            box.setStyleSheet(_BOX_STYLE)
+            self._row.addWidget(box)
+            self._boxes.append(box)
+        self._row.addStretch()
+
+    @staticmethod
+    def _make_arrow() -> QLabel:
+        """Bigger and bolder than plain body text -- a step transition
+        should read clearly at a glance, not blend into the boxes on
+        either side of it."""
+        arrow = QLabel("→")
+        font = arrow.font()
+        font.setPointSize(font.pointSize() + 6)
+        font.setBold(True)
+        arrow.setFont(font)
+        return arrow
+
+    def step_labels(self) -> list[str]:
+        """Ordered step text, one per box -- for tests and anything
+        else that wants the steps back out without reaching into layout
+        internals."""
+        return [box.text() for box in self._boxes]
 
 
 class HeaderBar(QWidget):
@@ -25,15 +88,24 @@ class HeaderBar(QWidget):
 
         top_row = QHBoxLayout()
         self.data_label = QLabel("No data loaded.")
-        self.stage_label = QLabel("")
         top_row.addWidget(self.data_label, 0, Qt.AlignmentFlag.AlignVCenter)
         top_row.addStretch()
-        top_row.addWidget(self.stage_label, 0, Qt.AlignmentFlag.AlignVCenter)
-        top_row.addWidget(self._make_logo_label())
+
+        title_label = QLabel("ORBIT GUI")
+        title_font = title_label.font()
+        title_font.setBold(True)
+        title_font.setPointSize(title_font.pointSize() + 2)
+        title_label.setFont(title_font)
+        top_row.addWidget(title_label, 0, Qt.AlignmentFlag.AlignVCenter)
         outer.addLayout(top_row)
 
-        self.pipeline_label = QLabel("")
-        outer.addWidget(self.pipeline_label)
+        pipeline_row = QHBoxLayout()
+        pipeline_row.addWidget(QLabel("Current pipeline:"), 0, Qt.AlignmentFlag.AlignVCenter)
+        self.pipeline_diagram = _PipelineDiagram()
+        pipeline_row.addWidget(self.pipeline_diagram, 0, Qt.AlignmentFlag.AlignVCenter)
+        pipeline_row.addStretch()
+        pipeline_row.addWidget(self._make_logo_label(), 0, Qt.AlignmentFlag.AlignVCenter)
+        outer.addLayout(pipeline_row)
 
     def _make_logo_label(self) -> QLabel:
         logo_label = QLabel()
@@ -44,8 +116,5 @@ class HeaderBar(QWidget):
     def set_data_info(self, summary: str | None) -> None:
         self.data_label.setText(summary or "No data loaded.")
 
-    def set_active_stage(self, name: str) -> None:
-        self.stage_label.setText(f"Stage: {name}")
-
     def set_pipeline(self, steps: list[str]) -> None:
-        self.pipeline_label.setText("Pipeline: " + " > ".join(steps) if steps else "")
+        self.pipeline_diagram.set_steps(steps)

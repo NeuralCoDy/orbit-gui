@@ -15,9 +15,12 @@ from scipy.stats import chi2
 from . import _native
 
 
-def _default_max_lag(n_frames: int) -> int:
+def default_max_lag(n_frames: int) -> int:
     """Standard rule of thumb for the largest lag to test (``10*log10(T)``,
-    capped at ``T-1`` so every lag has at least one valid pair)."""
+    capped at ``T-1`` so every lag has at least one valid pair). Public
+    since callers choosing their own ``n_exclude`` (e.g. denoising_tab.py's
+    per-algorithm residual-whiteness check) need to know the ceiling it
+    has to stay under."""
     return max(1, min(int(10 * np.log10(n_frames)), n_frames - 1))
 
 
@@ -30,7 +33,7 @@ def ljung_box_test_movie(movie: np.ndarray, n_exclude: int = 0) -> tuple[np.ndar
     that p-value.
 
     The largest lag tested is chosen automatically from the trace
-    length (see _default_max_lag). A pixel with a perfectly constant
+    length (see default_max_lag). A pixel with a perfectly constant
     trace (zero variance) has no autocorrelation to test and always
     passes (alpha=1.0).
 
@@ -41,7 +44,7 @@ def ljung_box_test_movie(movie: np.ndarray, n_exclude: int = 0) -> tuple[np.ndar
     numpy; the chi-squared p-value step below is cheap regardless and
     stays in Python either way."""
     height, width, n_frames = movie.shape
-    max_lag = _default_max_lag(n_frames)
+    max_lag = default_max_lag(n_frames)
     if n_exclude >= max_lag:
         raise ValueError(f"n_exclude ({n_exclude}) leaves no lags to test (max_lag={max_lag})")
 

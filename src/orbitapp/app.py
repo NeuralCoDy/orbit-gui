@@ -99,9 +99,6 @@ class MainWindow(QMainWindow):
 
         self.save_tab.session_loaded.connect(self._on_session_loaded)
 
-        self.tabs.currentChanged.connect(self._on_tab_changed)
-        self._on_tab_changed(self.tabs.currentIndex())
-
     def _on_data_loaded(self) -> None:
         movie = self.state.original_data
         path = self.state.data_path
@@ -114,9 +111,6 @@ class MainWindow(QMainWindow):
         orbitapp.widgets.CommitControls) -- reflect the updated pipeline
         breadcrumb."""
         self.header.set_pipeline(self.state.pipeline)
-
-    def _on_tab_changed(self, index: int) -> None:
-        self.header.set_active_stage(self.tabs.tabText(index))
 
     def _on_session_loaded(self, session: dict) -> None:
         """SaveTab only reads/writes files -- reconstructing AppState and

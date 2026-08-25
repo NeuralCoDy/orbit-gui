@@ -7,6 +7,13 @@ preserving spatially-coherent signal), and how many pixels' residual
 fails a Ljung-Box whiteness test (evidence real signal, not just noise,
 was removed there) are shown alongside the images.
 
+The Ljung-Box check excludes a per-algorithm number of the residual's
+own smallest lags before testing it -- see _ljung_box_n_exclude -- since
+the residual of any temporal smoothing filter has some autocorrelation
+inherent to the filter's own reach even for pure noise input, which
+would otherwise swamp the metric with false positives unrelated to
+whether real signal was actually removed.
+
 Same Apply-produces-a-candidate / Commit-makes-it-active pattern as
 every StageTab -- see that module's docstring.
 """
@@ -26,6 +33,7 @@ from orbit.denoising import (
     residual_autocorrelation_failures,
     residual_energy_fraction,
 )
+from orbit.ljung_box import default_max_lag
 from orbit.pca_denoise import pca_denoise
 from orbit.projections import local_correlation_projection
 from orbit.qc_traces import qc_trace_samples
@@ -81,12 +89,53 @@ _PIPELINE_LABELS = {
 }
 
 
+def _ljung_box_n_exclude(algorithm: str, kwargs: dict) -> int:
+    """How many of the residual's own smallest lags to exclude before
+    testing it for whiteness. The residual of ANY temporal smoothing
+    filter has autocorrelation inherent to the filter's own reach, even
+    for pure noise input with no real signal in it at all -- confirmed
+    empirically: Gaussian temporal smoothing's residual on pure noise
+    failed the whiteness test at 100% of pixels with no exclusion.
+    Without this, the metric mostly measures "did this algorithm smooth
+    over time at all", not "did it remove real signal".
+
+    Excluding roughly the filter's own reach substantially reduces that
+    false-positive rate (verified empirically for every case below), but
+    for gaussian/median it doesn't fully reach the ~5% textbook
+    baseline no matter how far out the exclusion goes -- rank-based
+    (median) and smoothing (gaussian) filters both leave a long,
+    slowly-decaying tail of real (not spurious) residual correlation
+    that a single fixed cutoff can't fully absorb, and pushing the
+    cutoff further eventually just reduces the test's own power (fewer
+    lags left to sum over). Treat this metric as comparative ("did this
+    run look worse than that one") rather than a calibrated p-value for
+    those two. _temporal_margin's own value (chunked Commit's boundary
+    margin) is reused for gaussian, since going further didn't help
+    much there (confirmed); median needed its own larger value
+    (_temporal_margin's time_window//2 barely moved the failure rate at
+    all). wavelet_time has no fixed window the same way, so this uses a
+    cruder decomposition-level-based estimate (2**level). pca and
+    wavelet_space need no exclusion -- confirmed empirically already at
+    the ~5% baseline with none, since neither leaves the same kind of
+    smoothing "leftover" in its residual."""
+    if algorithm == "gaussian":
+        return DenoisingTab._temporal_margin(algorithm, kwargs)
+    if algorithm == "median":
+        return kwargs["time_window"]
+    if algorithm == "wavelet_time":
+        return 2 ** kwargs["level"]
+    return 0
+
+
 def _run_and_assess(movie: np.ndarray, algorithm: str, **kwargs) -> dict:
     """Runs off the GUI thread."""
     denoised = _DENOISE_FUNCS[algorithm](movie, **kwargs)
-    ljung_box_failed, ljung_box_total = residual_autocorrelation_failures(movie, denoised)
+    residual = movie.astype(np.float64) - denoised.astype(np.float64)
+    n_exclude = min(_ljung_box_n_exclude(algorithm, kwargs), default_max_lag(movie.shape[-1]) - 1)
+    ljung_box_failed, ljung_box_total = residual_autocorrelation_failures(movie, denoised, n_exclude=n_exclude)
     return {
         "denoised": denoised,
+        "residual": residual,
         "residual_energy_fraction": residual_energy_fraction(movie, denoised),
         "corr_before": float(local_correlation_projection(movie).mean()),
         "corr_after": float(local_correlation_projection(denoised).mean()),
@@ -158,6 +207,7 @@ class DenoisingTab(StageTab):
     def _build_metrics(self) -> None:
         self.metrics_label = QLabel("Run denoising to see quality metrics.")
         self.panel.add_metric_widget(self.metrics_label)
+        self.panel.add_extra_movie_button("after", "residual", "Play Residual Movie")
 
         self._location_markers = add_location_markers(self.panel.before_view)
         self.trace_grid = QCPlotGrid("Example signal pixels", "Example noise pixels", xlabel="frame", ylabel="intensity")
@@ -303,6 +353,7 @@ class DenoisingTab(StageTab):
         self.panel.before_view.setImage(preview_slice(self._input_movie).mean(axis=2))
         self.panel.after_view.setImage(result["denoised"].mean(axis=2))
         self.panel.set_after_movie(result["denoised"])
+        self.panel.set_movie("residual", result["residual"])
 
         ljung_box_pct = 100 * result["ljung_box_failed"] / result["ljung_box_total"] if result["ljung_box_total"] else 0.0
         self.metrics_label.setText(

@@ -7,7 +7,11 @@ Each image also gets a "Play Movie" button (alongside pg.ImageView's own
 ROI/Menu buttons) that pops up the full (H, W, T) movie behind that
 projection in a MovieSliderWidget -- set via set_before_movie/
 set_after_movie, since the panel itself only ever displays a single 2D
-projection (e.g. a mean image), not the movie.
+projection (e.g. a mean image), not the movie. add_extra_movie_button
+adds another such button/movie slot, placed next to (not below)
+``column``'s existing Play Movie button, each splitting the row's width
+evenly -- for a stage with a movie worth previewing besides its own
+before/after image (e.g. Denoising's residual).
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ class StagePanel(QWidget):
         self._movies: dict[str, np.ndarray | None] = {"before": None, "after": None}
         self._players: dict[str, MovieSliderWidget | None] = {"before": None, "after": None}
         self._titles = {"before": before_title, "after": after_title}
+        self._button_rows: dict[str, QHBoxLayout] = {}
 
         layout = QVBoxLayout(self)
 
@@ -37,9 +42,12 @@ class StagePanel(QWidget):
             col = QVBoxLayout()
             col.addWidget(QLabel(title))
             col.addWidget(view)
+            button_row = QHBoxLayout()
             play_btn = QPushButton("Play Movie")
             play_btn.clicked.connect(lambda _checked=False, key=key: self._play_movie(key))
-            col.addWidget(play_btn)
+            button_row.addWidget(play_btn, 1)
+            col.addLayout(button_row)
+            self._button_rows[key] = button_row
             images_row.addLayout(col)
         images_container = QWidget()
         images_container.setLayout(images_row)
@@ -54,11 +62,28 @@ class StagePanel(QWidget):
         """Add one metric/plot widget to the row below the images."""
         self.metrics_row.addWidget(widget)
 
+    def add_extra_movie_button(self, column: str, key: str, label: str) -> None:
+        """Adds another independently-playable movie slot, with its own
+        button placed next to ``column``'s ("before" or "after")
+        existing Play Movie button (each splits the row's width evenly)
+        -- for a stage with a movie worth previewing besides its own
+        before/after image. Populate it via set_movie(key, ...); title
+        bar of its popout is just ``label``."""
+        self._movies[key] = None
+        self._players[key] = None
+        self._titles[key] = label
+        play_btn = QPushButton(label)
+        play_btn.clicked.connect(lambda _checked=False, key=key: self._play_movie(key))
+        self._button_rows[column].addWidget(play_btn, 1)
+
+    def set_movie(self, key: str, movie: np.ndarray | None) -> None:
+        self._movies[key] = movie
+
     def set_before_movie(self, movie: np.ndarray | None) -> None:
-        self._movies["before"] = movie
+        self.set_movie("before", movie)
 
     def set_after_movie(self, movie: np.ndarray | None) -> None:
-        self._movies["after"] = movie
+        self.set_movie("after", movie)
 
     def _play_movie(self, key: str) -> None:
         movie = self._movies[key]

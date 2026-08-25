@@ -200,3 +200,63 @@ def test_ljung_box_metric_appears_after_apply():
     metrics = tab._extract_metrics(tab._pending_result)
     assert 0 <= metrics["ljung_box_failed"] <= metrics["ljung_box_total"] == 100
     assert "Ljung-Box" in tab.metrics_label.text()
+
+
+def test_residual_movie_is_playable_after_apply():
+    rng = np.random.default_rng(0)
+    movie = rng.standard_normal((10, 10, 100)).astype(np.float32)
+    state = AppState()
+    state.load("movie.npy", movie)
+    tab = DenoisingTab(state)
+    tab.on_data_loaded()
+
+    tab.method_combo.setCurrentText("Gaussian Filter")
+    tab.gaussian_spatial_spin.setValue(1.5)
+    tab._apply()
+    _wait(tab)
+
+    denoised = tab._pending_result["denoised"]
+    expected_residual = movie.astype(np.float64) - denoised.astype(np.float64)
+    np.testing.assert_allclose(tab.panel._movies["residual"], expected_residual)
+
+    tab.panel._play_movie("residual")
+    assert tab.panel._players["residual"] is not None
+    assert tab.panel._players["residual"].windowTitle() == "Movie Player - Play Residual Movie"
+
+
+def test_ljung_box_n_exclude_matches_each_algorithms_own_reach():
+    from orbitapp.tabs.denoising_tab import _ljung_box_n_exclude
+
+    assert _ljung_box_n_exclude("gaussian", {"temporal_sigma": 2.0}) == 8  # ceil(4*2.0), same as _temporal_margin
+    assert _ljung_box_n_exclude("gaussian", {"temporal_sigma": 0.0}) == 0  # spatial-only: no temporal reach at all
+    assert _ljung_box_n_exclude("median", {"time_window": 5}) == 5
+    assert _ljung_box_n_exclude("wavelet_time", {"level": 4}) == 16  # 2**4
+    assert _ljung_box_n_exclude("wavelet_space", {}) == 0
+    assert _ljung_box_n_exclude("pca", {}) == 0
+
+
+def test_ljung_box_metric_substantially_improves_on_pure_noise_with_temporal_smoothing():
+    # Without excluding the smoothing filter's own reach, the residual
+    # of essentially ANY temporal filter fails the whiteness test almost
+    # everywhere even for pure noise input with no real signal removed
+    # -- this pins that the per-algorithm exclusion (_ljung_box_n_exclude)
+    # brings that down substantially, not that it's eliminated (some
+    # residual bias is inherent to smoothing/rank filters -- see that
+    # function's own docstring).
+    rng = np.random.default_rng(0)
+    height, width, n_frames = 20, 20, 500
+    movie = rng.standard_normal((height, width, n_frames)).astype(np.float32)
+    state = AppState()
+    state.load("movie.npy", movie)
+    tab = DenoisingTab(state)
+    tab.on_data_loaded()
+
+    tab.method_combo.setCurrentText("Gaussian Filter")
+    tab.gaussian_spatial_spin.setValue(0.0)
+    tab.gaussian_temporal_spin.setValue(2.0)
+    tab._apply()
+    _wait(tab)
+
+    metrics = tab._extract_metrics(tab._pending_result)
+    fail_fraction = metrics["ljung_box_failed"] / metrics["ljung_box_total"]
+    assert fail_fraction < 0.5  # far below what n_exclude=0 gives here (measured ~100%)
