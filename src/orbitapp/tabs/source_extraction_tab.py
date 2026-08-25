@@ -327,6 +327,15 @@ class SourceExtractionTab(QWidget):
             self.status_label.setText("No data loaded.")
             return
         self.status_label.setText(f"Ready. shape={movie.shape}")
+        if self.state.volumetric:
+            # local_correlation_projection assumes a 3D (H, W, T) movie --
+            # Source Extraction doesn't have a volumetric path yet (only
+            # Motion Correction does so far), so skip it rather than let
+            # it fail on the 4D array and pop an error dialog the instant
+            # volumetric data loads, before the user has even navigated
+            # here.
+            self._corr_image = None
+            return
         # preview_slice bounds this to the first 5000 frames for a
         # memmap movie -- local_correlation_projection materializes its
         # whole input, which would otherwise force a full read of an

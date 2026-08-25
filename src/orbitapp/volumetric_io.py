@@ -7,12 +7,20 @@ case, orbitapp.io.is_memmap to detect it) rather than duplicating them,
 but is otherwise independent: nothing here is imported by, or changes
 the behavior of, the existing 2D pipeline.
 
-Assumes the source is a single-HDU 4D FITS file already shaped
-(T, L, W, D) -- astropy's own read/write already undoes FITS's
-axis-order-reversed-vs-numpy convention (confirmed empirically:
-round-tripping a (T, L, W, D) array through fits.PrimaryHDU/fits.open
-gives back that exact shape, not reversed), so no manual axis handling
-is needed here.
+Two source formats, both producing a (T, L, W, D) array:
+
+load_volumetric_movie -- a single 4D FITS file already shaped that way.
+Astropy's own read/write already undoes FITS's axis-order-reversed-vs-
+numpy convention (confirmed empirically: round-tripping a (T, L, W, D)
+array through fits.PrimaryHDU/fits.open gives back that exact shape,
+not reversed), so no manual axis handling is needed here.
+
+load_volumetric_tiff_folder -- a folder of TIFF files, for data that
+isn't already packaged as one 4D FITS file. A folder alone is
+ambiguous about where one volume ends and the next begins (unlike a
+single FITS file's own header), so the caller must resolve that first
+-- see the ``mode`` argument (orbitapp.widgets.volumetric_load_dialog
+is the popup that asks the user).
 """
 
 from __future__ import annotations
@@ -24,6 +32,22 @@ import numpy as np
 from astropy.io import fits
 
 from .fits_io import open_fits_memmap
+from .io import is_memmap
+
+ONE_VOLUME_PER_STACK = "one_volume_per_stack"
+INTERLEAVED = "interleaved"
+
+
+def preview_slice_volumetric(movie: np.ndarray, max_frames: int = 5000) -> np.ndarray:
+    """The first ``max_frames`` timepoints of a (T, L, W, D) ``movie`` --
+    same purpose as orbitapp.io.preview_slice (a cheap memmap view, no
+    copy, when ``movie`` is disk-backed and longer than that), but capped
+    on axis 0 rather than axis -1 -- volumetric movies put time first,
+    not last, so reusing preview_slice itself here would cap the wrong
+    axis (depth, not time)."""
+    if is_memmap(movie) and movie.shape[0] > max_frames:
+        return movie[:max_frames]
+    return movie
 
 
 def load_volumetric_movie(path: str | Path, mmap: bool = False) -> np.ndarray:
@@ -60,3 +84,59 @@ def load_volumetric_movie(path: str | Path, mmap: bool = False) -> np.ndarray:
 def _load_full(path: Path) -> np.ndarray:
     with fits.open(path) as hdul:
         return np.ascontiguousarray(hdul[0].data)
+
+
+def load_volumetric_tiff_folder(path: str | Path, mode: str, depth: int | None = None) -> np.ndarray:
+    """Loads every TIFF file in ``path`` (sorted by name) as a (T, L, W,
+    D) volumetric movie. ``mode`` resolves the file-vs-volume ambiguity
+    a folder has that a single 4D FITS file doesn't:
+
+    ``ONE_VOLUME_PER_STACK``: each file IS one full volume at one time
+    point -- T is the number of files, and (L, W, D) come directly from
+    each file's own multi-page stack shape (every file must share the
+    same shape; a single-page file is treated as a 1-slice volume).
+
+    ``INTERLEAVED``: every page across every file, in file-then-page
+    order, is one continuous stream of 2D slices -- every ``depth``
+    consecutive slices become one volume, so ``depth`` is required and
+    the total slice count must be an exact multiple of it.
+    """
+    import tifffile
+
+    path = Path(path)
+    files = sorted(path.glob("*.tif")) + sorted(path.glob("*.tiff"))
+    if not files:
+        raise ValueError(f"No .tif/.tiff files found in {path}")
+
+    stacks = []
+    for f in files:
+        stack = tifffile.imread(f)
+        if stack.ndim == 2:
+            stack = stack[None, ...]  # a single-page file is a 1-slice stack
+        elif stack.ndim != 3:
+            raise ValueError(f"Expected a 2D or 3D (page, H, W) TIFF stack, got shape {stack.shape} from {f}")
+        stacks.append(stack)  # each (n_pages, L, W)
+
+    if mode == ONE_VOLUME_PER_STACK:
+        shapes = {s.shape for s in stacks}
+        if len(shapes) > 1:
+            raise ValueError(
+                f"One volume per TIFF stack requires every file to share the same shape, got: "
+                f"{ {str(f.name): s.shape for f, s in zip(files, stacks)} }"
+            )
+        return np.stack([np.moveaxis(s, 0, -1) for s in stacks], axis=0)  # (T, L, W, D)
+
+    if mode == INTERLEAVED:
+        if not depth or depth < 1:
+            raise ValueError("depth (slices per volume) is required for interleaved mode")
+        flat = np.concatenate(stacks, axis=0)  # (total_slices, L, W)
+        total_slices = flat.shape[0]
+        if total_slices % depth != 0:
+            raise ValueError(
+                f"Total slice count ({total_slices}) across all files isn't an exact multiple of "
+                f"depth ({depth})"
+            )
+        volumes = flat.reshape(total_slices // depth, depth, *flat.shape[1:])  # (T, D, L, W)
+        return np.moveaxis(volumes, 1, -1)  # (T, L, W, D)
+
+    raise ValueError(f"Unknown mode: {mode!r} (expected {ONE_VOLUME_PER_STACK!r} or {INTERLEAVED!r})")

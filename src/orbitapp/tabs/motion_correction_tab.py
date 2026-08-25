@@ -15,9 +15,11 @@ from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget
 
+from orbit._volumetric import depth_project
 from orbit.motion_correction import motion_correct, rigid_motion_correct, patch_motion_correct
+from orbit.motion_correction_3d import rigid_motion_correct_3d
 from orbit.motion_metrics import (
     enhanced_correlation_coefficient,
     mean_correlation_to_reference,
@@ -26,9 +28,10 @@ from orbit.motion_metrics import (
 )
 
 from ..fits_io import create_fits_memmap
-from ..io import preview_slice
+from ..io import is_memmap, preview_slice
 from ..state import AppState
-from ..widgets import ImageSlideshow, ParametersDialog, make_spinbox
+from ..volumetric_io import preview_slice_volumetric
+from ..widgets import ImageSlideshow, ParametersDialog, confirm_recompute, make_spinbox
 from ..workers import run_worker
 from .stage_tab import StageTab
 
@@ -60,6 +63,35 @@ def _run_and_assess(movie: np.ndarray, method: str, n_components: int, **kwargs)
     }
 
 
+def _run_and_assess_3d(movie: np.ndarray, n_components: int, **kwargs) -> dict:
+    """Volumetric (T, L, W, D) counterpart of _run_and_assess -- runs the
+    3D rigid registration, then depth-projects both the input and the
+    registered volume to (L, W, T) so every 2D display widget and
+    orbit.motion_metrics function below can be reused unmodified rather
+    than duplicated in 3D (see orbit._volumetric.depth_project). ECC
+    compares the raw (L, W, D) templates directly instead -- it's just a
+    flattened Pearson correlation, already dimension-agnostic."""
+    registered, shifts, template, initial_template = rigid_motion_correct_3d(movie, **kwargs)
+    projected_before = depth_project(movie)
+    projected_after = depth_project(registered)
+    sv_before, _pc_before = spatiotemporal_svd(projected_before, n_components=n_components)
+    sv_after, pc_after = spatiotemporal_svd(projected_after, n_components=n_components)
+    return {
+        "registered": projected_after,  # (L, W, T) -- for display/metrics only
+        "registered_3d": registered,  # (T, L, W, D) -- the real array, for Commit
+        "shifts": shifts,
+        "template": template,
+        "initial_template": initial_template,
+        "mmd": mean_max_intensity_difference(projected_before, projected_after),
+        "mcm_before": mean_correlation_to_reference(projected_before),
+        "mcm_after": mean_correlation_to_reference(projected_after),
+        "ecc": enhanced_correlation_coefficient(initial_template, template),
+        "sv_before": sv_before,
+        "sv_after": sv_after,
+        "pc_after": pc_after,
+    }
+
+
 class MotionCorrectionTab(StageTab):
     _stage_name = "Motion correction"
     _result_key = "registered"
@@ -67,6 +99,7 @@ class MotionCorrectionTab(StageTab):
 
     def __init__(self, state: AppState, parent=None) -> None:
         super().__init__(state, apply_label="Apply Motion Correction", parent=parent)
+        self.on_modality_changed()  # reflects state.volumetric's initial value, if already set
 
     def _build_controls_row(self) -> QHBoxLayout:
         # All per-algorithm parameters live in the ParametersDialog popup
@@ -194,6 +227,8 @@ class MotionCorrectionTab(StageTab):
         )
 
     def _chunked_commit(self, source: np.ndarray, output_path: Path) -> np.ndarray:
+        if self.state.volumetric:
+            return self._chunked_commit_volumetric(source, output_path)
         method, kwargs = self._method_and_kwargs(init_batch=min(source.shape[-1], 5000))
         if method == "patchwarp":
             raise NotImplementedError(
@@ -208,12 +243,16 @@ class MotionCorrectionTab(StageTab):
         return output
 
     def _render_result(self, result: dict) -> None:
-        # preview_slice bounds this to the same (<=5000-frame) preview
-        # Apply actually ran against -- self._input_movie can be a much
-        # longer memmap movie now that Commit re-runs against the whole
-        # thing, and a full .mean(axis=2) over that would force a full
-        # read just to draw the "before" thumbnail.
-        self.panel.before_view.setImage(preview_slice(self._input_movie).mean(axis=2))
+        # preview_slice/preview_slice_volumetric bound this to the same
+        # (<=5000-frame) preview Apply actually ran against -- self._input_movie
+        # can be a much longer memmap movie now that Commit re-runs against the
+        # whole thing, and a full mean over that would force a full read just
+        # to draw the "before" thumbnail.
+        if self.state.volumetric:
+            before = depth_project(preview_slice_volumetric(self._input_movie))
+        else:
+            before = preview_slice(self._input_movie)
+        self.panel.before_view.setImage(before.mean(axis=2))
         self.panel.after_view.setImage(result["registered"].mean(axis=2))
         self.panel.set_after_movie(result["registered"])
 
@@ -232,3 +271,106 @@ class MotionCorrectionTab(StageTab):
         self.sv_plot.plot(result["sv_after"] / norm, pen="g", name="After")
 
         self.pc_slideshow.set_stack(result["pc_after"])
+
+    # -- Volumetric (state.volumetric) path -----------------------------
+    #
+    # A totally separate branch through each entry point below -- same
+    # pattern LoadTab._browse_folder established for the volumetric
+    # loader: check self.state.volumetric first, fall through to the
+    # unmodified 2D behavior above when it's off. Only Rigid has a 3D
+    # implementation (orbit.motion_correction_3d.rigid_motion_correct_3d),
+    # so the method combo is restricted to it whenever volumetric data is
+    # in play (see on_modality_changed). Registration always runs against
+    # the true (T, L, W, D) volume; depth_project (see _run_and_assess_3d)
+    # is only ever used to feed a display-friendly (L, W, T) projection
+    # into the existing 2D panel/metrics widgets above, unmodified.
+
+    def on_modality_changed(self) -> None:
+        """Reacts to the Load tab's Volumetric toggle (wired in app.py) --
+        disables Patch-based/PatchWarp (no 3D implementation yet) and
+        forces the combo onto Rigid whenever volumetric data is in play."""
+        volumetric = self.state.volumetric
+        model = self.method_combo.model()
+        for i in (1, 2):  # "Patch-based (non-rigid)", "PatchWarp (piecewise-affine)"
+            item = model.item(i)
+            item.setEnabled(not volumetric)
+            item.setToolTip("Not yet available for volumetric data." if volumetric else "")
+        if volumetric and self.method_combo.currentIndex() != 0:
+            self.method_combo.setCurrentIndex(0)
+
+    def on_data_loaded(self) -> None:
+        if self.state.volumetric:
+            self._on_volumetric_data_loaded()
+            return
+        super().on_data_loaded()
+
+    def _on_volumetric_data_loaded(self) -> None:
+        movie = self.state.active_data()
+        self.commit_controls.set_apply_enabled(movie is not None)
+        self.commit_controls.set_commit_enabled(False)
+        self._pending_result = None
+        self._pending_step_label = None
+        self._last_run = None
+        self._on_data_reset()
+        if movie is not None:
+            projected = depth_project(preview_slice_volumetric(movie))
+            self.panel.before_view.setImage(projected.mean(axis=2))
+            self.panel.set_before_movie(projected)
+            self.status_label.setText(f"Ready. shape={movie.shape} (volumetric)")
+
+    def _apply(self) -> None:
+        if self.state.volumetric:
+            self._apply_volumetric()
+            return
+        super()._apply()
+
+    def _apply_volumetric(self) -> None:
+        movie = self.state.active_data()
+        if movie is None:
+            QMessageBox.warning(self, "No data", "Load data on the Load tab first.")
+            return
+
+        params = self._current_fingerprint()
+        fingerprint = (id(movie), tuple(sorted(params.items())))
+        if fingerprint == self._last_run:
+            message = f"{self._stage_name} was already run with these exact parameters on this data."
+            if not confirm_recompute(self, message):
+                return
+
+        self._pending_fingerprint = fingerprint
+        self._pending_params = params
+        self._input_movie = movie
+        self.commit_controls.set_apply_enabled(False)
+        self.commit_controls.set_commit_enabled(False)
+        self._start_worker_volumetric(preview_slice_volumetric(movie))
+
+    def _start_worker_volumetric(self, movie: np.ndarray) -> None:
+        self._pending_step_label = "Rigid (3D)"
+        self.worker = run_worker(
+            self.busy_bar, "Running 3D motion correction and metrics (this can take a while)...",
+            _run_and_assess_3d, movie, self.pc_count_spin.value(),
+            max_shift=self.max_shift_spin.value(), upsample_factor=self.upsample_spin.value(),
+            n_iter=self.n_iter_spin.value(), init_batch=movie.shape[0],
+            on_success=self._on_finished, on_failure=self._on_failed,
+        )
+
+    def _commit(self) -> None:
+        if self._pending_result is None:
+            return
+        if is_memmap(self._input_movie):
+            self._start_chunked_commit()
+            return
+        if self.state.volumetric:
+            self._finish_commit(self._pending_result["registered_3d"])
+            return
+        self._finish_commit(self._pending_result[self._result_key])
+
+    def _chunked_commit_volumetric(self, source: np.ndarray, output_path: Path) -> np.ndarray:
+        output = create_fits_memmap(output_path, source.shape, np.float32)
+        rigid_motion_correct_3d(
+            source, output=output, bin_width=self._chunk_frames,
+            max_shift=self.max_shift_spin.value(), upsample_factor=self.upsample_spin.value(),
+            n_iter=self.n_iter_spin.value(), init_batch=min(source.shape[0], 5000),
+        )
+        output.flush()
+        return output

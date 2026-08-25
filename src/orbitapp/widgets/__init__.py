@@ -11,6 +11,7 @@ from .roi_overlay import render_roi_overlay
 from .roi_review_panel import ROIReviewPanel
 from .spinbox import make_spinbox
 from .stage_panel import StagePanel
+from .volumetric_load_dialog import VolumetricLoadDialog
 
 __all__ = [
     "HeaderBar",
@@ -30,4 +31,5 @@ __all__ = [
     "pixels_to_data_pos",
     "show_movie_popout",
     "confirm_recompute",
+    "VolumetricLoadDialog",
 ]

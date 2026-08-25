@@ -17,6 +17,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QDialog,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -30,7 +31,8 @@ from PySide6.QtWidgets import (
 from .. import io as orbitapp_io
 from ..format import format_movie_summary
 from ..state import AppState
-from ..widgets import BusyBar, confirm_recompute, show_movie_popout
+from ..volumetric_io import load_volumetric_tiff_folder
+from ..widgets import BusyBar, VolumetricLoadDialog, confirm_recompute, show_movie_popout
 from ..workers import FunctionWorker, run_worker
 
 
@@ -112,7 +114,11 @@ class LoadTab(QWidget):
 
     def _browse_folder(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Select folder of TIFF frames")
-        if path:
+        if not path:
+            return
+        if self.state.volumetric:
+            self._load_volumetric_folder(path)
+        else:
             self._load(path)
 
     def _load(self, path: str) -> None:
@@ -176,6 +182,45 @@ class LoadTab(QWidget):
         for name, check in self._modality_checks.items():
             setattr(self.state, name, check.isChecked())
         self.modality_changed.emit()
+
+    def _load_volumetric_folder(self, path: str) -> None:
+        """A totally separate load path from _load/_begin_load/_on_loaded
+        above -- deliberately not routed through any of them, since
+        those assume a (H, W, T) movie throughout (format_movie_summary,
+        preview_slice, and MovieSliderWidget.show_movie would all break
+        or silently misbehave on a (T, L, W, D) volumetric array). Only
+        reachable when self.state.volumetric is on (see _browse_folder);
+        the existing folder-load path is completely unaffected."""
+        dialog = VolumetricLoadDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        mode, depth = dialog.mode(), dialog.depth()
+
+        if self.state.data_path == path and not confirm_recompute(self, f"'{path}' is already loaded."):
+            return
+        self._pending_path = path
+        for btn in self._browse_buttons:
+            btn.setEnabled(False)
+        self.worker = run_worker(
+            self.busy_bar, f"Loading volumetric data from {path}...",
+            load_volumetric_tiff_folder, path, mode, depth,
+            on_success=self._on_volumetric_loaded, on_failure=self._on_failed,
+        )
+
+    def _on_volumetric_loaded(self, movie: np.ndarray) -> None:
+        path = self._pending_path
+        self.state.load(path, movie)
+        n_frames, length, width, depth = movie.shape
+        self.info_label.setText(
+            f"Loaded volumetric folder: {path}\n"
+            f"Volume size {length} x {width} x {depth} for {n_frames} time-steps\n"
+            "(no volumetric preview yet)"
+        )
+        self.busy_bar.stop(f"Loaded {path}.")
+        for btn in self._browse_buttons:
+            btn.setEnabled(True)
+        self.view_movie_btn.setEnabled(False)  # no volumetric viewer yet -- this app's own 2D one can't show it
+        self.data_loaded.emit()
 
     def _on_failed(self, message: str) -> None:
         self.busy_bar.stop("Load failed.")

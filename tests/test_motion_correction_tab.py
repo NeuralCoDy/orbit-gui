@@ -135,3 +135,108 @@ def test_non_memmap_movie_commit_is_unaffected_direct_promotion(tmp_path):
 
     assert not is_memmap(state.active_data())
     assert state.active_data().shape == movie.shape
+
+
+# -- Volumetric (state.volumetric) path ---------------------------------
+
+
+def _volumetric_movie(shape=(6, 10, 10, 5), seed=0) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    return gaussian_filter(rng.standard_normal(shape), (0, 2, 2, 0)).astype(np.float32) * 10 + 100
+
+
+def _memmapped_volumetric_movie(tmp_path, shape=(20, 8, 8, 4), seed=0):
+    fits = pytest.importorskip("astropy.io.fits")
+    from orbitapp.volumetric_io import load_volumetric_movie
+
+    movie = _volumetric_movie(shape, seed)
+    path = tmp_path / "movie.fits"
+    fits.PrimaryHDU(data=movie).writeto(path, overwrite=True)
+    return str(path), load_volumetric_movie(path, mmap=True)
+
+
+def test_on_modality_changed_restricts_method_combo_to_rigid_when_volumetric():
+    state = AppState()
+    tab = MotionCorrectionTab(state)
+    tab.method_combo.setCurrentText("Patch-based (non-rigid)")
+
+    state.volumetric = True
+    tab.on_modality_changed()
+
+    assert tab.method_combo.currentText() == "Rigid"
+    model = tab.method_combo.model()
+    assert not model.item(1).isEnabled()
+    assert not model.item(2).isEnabled()
+
+    state.volumetric = False
+    tab.on_modality_changed()
+    assert model.item(1).isEnabled()
+    assert model.item(2).isEnabled()
+
+
+def test_volumetric_apply_and_commit_produces_a_true_4d_array(tmp_path):
+    pytest.importorskip("astropy")
+    state = AppState()
+    state.volumetric = True
+    movie = _volumetric_movie()
+    state.load(str(tmp_path / "movie.fits"), movie)
+    tab = MotionCorrectionTab(state)
+    tab.on_data_loaded()
+
+    tab.max_shift_spin.setValue(3.0)
+    tab.upsample_spin.setValue(10)
+    tab._apply()
+    _wait(tab)
+    assert tab.commit_controls.commit_btn.isEnabled()
+
+    tab._commit()
+    _wait(tab)
+
+    committed = state.active_data()
+    assert not is_memmap(committed)
+    assert committed.shape == movie.shape  # true (T, L, W, D), not the depth-projected display movie
+    assert np.all(np.isfinite(committed))
+    assert state.pipeline == ["Load", "Rigid (3D)"]
+
+
+def test_volumetric_commit_of_a_memmap_movie_produces_a_4d_fits_memmap(tmp_path):
+    path, movie = _memmapped_volumetric_movie(tmp_path)
+    state = AppState()
+    state.volumetric = True
+    state.load(path, movie)
+    tab = MotionCorrectionTab(state)
+    tab.on_data_loaded()
+
+    tab.max_shift_spin.setValue(3.0)
+    tab.upsample_spin.setValue(10)
+    tab._chunk_frames = 6  # small, so a 20-timepoint movie spans multiple chunks
+    tab._apply()
+    _wait(tab)
+
+    tab._commit()
+    _wait(tab)
+
+    committed = state.active_data()
+    assert is_memmap(committed)
+    assert committed.shape == movie.shape  # the WHOLE volumetric movie, not just the preview
+    assert np.all(np.isfinite(np.asarray(committed)))
+
+
+def test_turning_volumetric_off_leaves_the_2d_path_unaffected(tmp_path):
+    # A regression check for the core constraint this whole feature was
+    # built under: with the toggle off, Apply/Commit behave exactly as
+    # they did before any volumetric code existed.
+    state = AppState()
+    movie = gaussian_filter(np.random.default_rng(2).standard_normal((10, 10, 12)), (1, 1, 0))
+    state.load("movie.tif", movie)
+    tab = MotionCorrectionTab(state)
+    tab.on_data_loaded()
+
+    tab.method_combo.setCurrentText("Rigid")
+    tab._apply()
+    _wait(tab)
+    tab._commit()
+
+    assert not is_memmap(state.active_data())
+    assert state.active_data().shape == movie.shape
+    assert state.pipeline == ["Load", "Rigid"]

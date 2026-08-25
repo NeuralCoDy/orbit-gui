@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import sys
 import time
+from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QSplashScreen, QTabWidget, QVBoxLayout, QWidget
 
@@ -102,13 +103,24 @@ class MainWindow(QMainWindow):
         self.source_extraction_tab.data_changed.connect(self.roi_validation_tab.on_data_loaded)
 
         self.load_tab.modality_changed.connect(self._on_modality_changed)
+        self.load_tab.modality_changed.connect(self.motion_correction_tab.on_modality_changed)
 
         self.save_tab.session_loaded.connect(self._on_session_loaded)
 
     def _on_data_loaded(self) -> None:
         movie = self.state.original_data
         path = self.state.data_path
-        summary = None if movie is None or path is None else format_header_summary(path, movie)
+        if movie is None or path is None:
+            summary = None
+        elif self.state.volumetric:
+            # format_header_summary hard-assumes a 3D (H, W, T) movie
+            # (height, width, n_frames = movie.shape) -- a volumetric
+            # (T, L, W, D) movie needs its own one-liner rather than a
+            # change to that shared, 2D-only helper.
+            n_frames, length, width, depth = movie.shape
+            summary = f"{Path(path).name}  --  {length} x {width} x {depth}, {n_frames} time-steps"
+        else:
+            summary = format_header_summary(path, movie)
         self.header.set_data_info(summary)
         self.header.set_pipeline(self.state.pipeline, self.state.modality_modifiers())
 

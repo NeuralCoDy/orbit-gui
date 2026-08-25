@@ -3,7 +3,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QDialog  # noqa: E402
 
 from orbitapp.io import is_memmap  # noqa: E402
 from orbitapp.state import AppState  # noqa: E402
@@ -13,6 +13,13 @@ from orbitapp.tabs.load_tab import LoadTab  # noqa: E402
 @pytest.fixture(scope="module", autouse=True)
 def qapp():
     return QApplication.instance() or QApplication([])
+
+
+def _wait(tab):
+    if tab.worker is not None:
+        tab.worker.wait(15000)
+    for _ in range(50):
+        QApplication.processEvents()
 
 
 def test_view_movie_button_disabled_until_data_loaded():
@@ -177,3 +184,99 @@ def test_loading_a_different_path_does_not_prompt(tmp_path, monkeypatch):
 
     assert prompted == []
     assert len(calls) == 1
+
+
+def test_browse_folder_uses_the_regular_path_when_volumetric_is_off(tmp_path, monkeypatch):
+    state = AppState()
+    tab = LoadTab(state)
+    monkeypatch.setattr("orbitapp.tabs.load_tab.QFileDialog.getExistingDirectory", lambda *a, **k: str(tmp_path))
+    calls = []
+    monkeypatch.setattr(tab, "_load", lambda path: calls.append(("regular", path)))
+    monkeypatch.setattr(tab, "_load_volumetric_folder", lambda path: calls.append(("volumetric", path)))
+
+    tab._browse_folder()
+
+    assert calls == [("regular", str(tmp_path))]
+
+
+def test_browse_folder_uses_the_volumetric_path_when_volumetric_is_on(tmp_path, monkeypatch):
+    state = AppState()
+    tab = LoadTab(state)
+    tab._modality_checks["volumetric"].setChecked(True)
+    monkeypatch.setattr("orbitapp.tabs.load_tab.QFileDialog.getExistingDirectory", lambda *a, **k: str(tmp_path))
+    calls = []
+    monkeypatch.setattr(tab, "_load", lambda path: calls.append(("regular", path)))
+    monkeypatch.setattr(tab, "_load_volumetric_folder", lambda path: calls.append(("volumetric", path)))
+
+    tab._browse_folder()
+
+    assert calls == [("volumetric", str(tmp_path))]
+
+
+def test_browse_folder_no_selection_does_nothing(monkeypatch):
+    state = AppState()
+    tab = LoadTab(state)
+    monkeypatch.setattr("orbitapp.tabs.load_tab.QFileDialog.getExistingDirectory", lambda *a, **k: "")
+    calls = []
+    monkeypatch.setattr(tab, "_load", lambda path: calls.append(path))
+    monkeypatch.setattr(tab, "_load_volumetric_folder", lambda path: calls.append(path))
+
+    tab._browse_folder()
+
+    assert calls == []
+
+
+def test_volumetric_folder_load_cancelled_dialog_does_nothing(tmp_path, monkeypatch):
+    state = AppState()
+    tab = LoadTab(state)
+    monkeypatch.setattr(
+        "orbitapp.tabs.load_tab.VolumetricLoadDialog.exec", lambda self: QDialog.DialogCode.Rejected
+    )
+
+    tab._load_volumetric_folder(str(tmp_path))
+
+    assert tab.worker is None
+    assert state.original_data is None
+
+
+def test_volumetric_folder_load_end_to_end(tmp_path, monkeypatch):
+    tifffile = pytest.importorskip("tifffile")
+    T, D, L, W = 2, 3, 4, 5
+    volumes = np.arange(T * D * L * W, dtype=np.float32).reshape(T, D, L, W)
+    for t in range(T):
+        tifffile.imwrite(tmp_path / f"vol_{t:03d}.tif", volumes[t])
+
+    state = AppState()
+    tab = LoadTab(state)
+    monkeypatch.setattr(
+        "orbitapp.tabs.load_tab.VolumetricLoadDialog.exec", lambda self: QDialog.DialogCode.Accepted
+    )
+    # default dialog selection is "one volume per stack" -- no need to touch mode/depth
+
+    loaded = []
+    tab.data_loaded.connect(lambda: loaded.append(1))
+
+    tab._load_volumetric_folder(str(tmp_path))
+    _wait(tab)
+
+    assert loaded == [1]
+    assert state.original_data.shape == (T, L, W, D)
+    assert not tab.view_movie_btn.isEnabled()  # no volumetric viewer yet
+    assert "volumetric" in tab.info_label.text().lower()
+
+
+def test_volumetric_folder_load_of_the_same_path_prompts_and_skips_if_declined(tmp_path, monkeypatch):
+    tifffile = pytest.importorskip("tifffile")
+    tifffile.imwrite(tmp_path / "vol_000.tif", np.zeros((3, 4, 5), dtype=np.float32))
+
+    state = AppState()
+    state.load(str(tmp_path), np.zeros((1, 4, 5, 3)))
+    tab = LoadTab(state)
+    monkeypatch.setattr(
+        "orbitapp.tabs.load_tab.VolumetricLoadDialog.exec", lambda self: QDialog.DialogCode.Accepted
+    )
+    monkeypatch.setattr("orbitapp.tabs.load_tab.confirm_recompute", lambda *a, **k: False)
+
+    tab._load_volumetric_folder(str(tmp_path))
+
+    assert tab.worker is None
