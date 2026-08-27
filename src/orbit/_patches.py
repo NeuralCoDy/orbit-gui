@@ -47,6 +47,27 @@ def make_patches_2d(
     return [(r0, r0 + patch_h, c0, c0 + patch_w) for r0 in row_starts for c0 in col_starts]
 
 
+def make_patches_3d(
+    length: int, width: int, depth: int, patch_size: tuple[int, int, int], overlap: int
+) -> list[tuple[int, int, int, int, int, int]]:
+    """(l0, l1, w0, w1, d0, d1) bounds of every patch tiling a true 3D
+    space (length, width, depth) -- the 3-spatial-axis analog of
+    make_patches_2d, for GraFT's volumetric patches (which need the
+    whole time series per patch, unlike make_blocks_3d below, which
+    tiles a 2D image *and* time for methods that also bound how many
+    frames one chunk covers)."""
+    patch_l, patch_w, patch_d = min(patch_size[0], length), min(patch_size[1], width), min(patch_size[2], depth)
+    l_starts = patch_bounds_1d(length, patch_l, overlap)
+    w_starts = patch_bounds_1d(width, patch_w, overlap)
+    d_starts = patch_bounds_1d(depth, patch_d, overlap)
+    return [
+        (l0, l0 + patch_l, w0, w0 + patch_w, d0, d0 + patch_d)
+        for l0 in l_starts
+        for w0 in w_starts
+        for d0 in d_starts
+    ]
+
+
 def make_blocks_3d(
     height: int,
     width: int,

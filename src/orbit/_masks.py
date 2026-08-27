@@ -36,7 +36,12 @@ def threshold_footprint(footprint: np.ndarray, quantile: float = 0.5) -> np.ndar
     component's support), then keeps only the connected component still
     covering the peak pixel -- CaImAn's own spatial post-processing
     cleanup, reused here for any method (CNMF, GraFT) whose raw spatial
-    output is a continuous-valued footprint rather than a clean mask."""
+    output is a continuous-valued footprint rather than a clean mask.
+
+    Works on a footprint of any dimensionality (2D for every image-space
+    method; 3D for GraFT's volumetric patches) -- the connectivity
+    structure is built to match ``footprint``'s own ndim (equal to
+    EIGHT_CONNECTED, i.e. identical behavior, when ndim == 2)."""
     if not footprint.any():
         return footprint
     nz = footprint[footprint > 0]
@@ -45,7 +50,7 @@ def threshold_footprint(footprint: np.ndarray, quantile: float = 0.5) -> np.ndar
     if not cleaned.any():
         return cleaned
     peak = np.unravel_index(np.argmax(footprint), footprint.shape)
-    labeled, _n = label(cleaned > 0, structure=EIGHT_CONNECTED)
+    labeled, _n = label(cleaned > 0, structure=np.ones((3,) * cleaned.ndim, dtype=bool))
     keep_label = labeled[peak]
     if keep_label == 0:
         return cleaned

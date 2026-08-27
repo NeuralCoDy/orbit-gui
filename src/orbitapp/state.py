@@ -46,6 +46,7 @@ class AppState:
     data_path: str | None = None
     original_data: np.ndarray | None = None  # (H, W, T), as loaded
     preprocessed_data: np.ndarray | None = None  # after the latest *committed* stage
+    mask: np.ndarray | None = None  # (H, W) bool, or (L, W, D) for volumetric -- set whenever Mask tab commits
     pipeline: list[str] = field(default_factory=list)  # committed stage names, e.g. ["Load", "Patch Warp"]
     rois: list[ROI] = field(default_factory=list)  # committed ROIs; accumulates across commits/methods
     steps: list[PipelineStep] = field(default_factory=list)  # parallel to pipeline, with params/metrics attached
@@ -82,6 +83,7 @@ class AppState:
         self.data_path = path
         self.original_data = movie
         self.preprocessed_data = None
+        self.mask = None
         self.pipeline = ["Load"]
         self.rois = []
         self.steps = [PipelineStep(stage="load", label="Load", params={"data_path": path})]

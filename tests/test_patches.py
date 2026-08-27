@@ -1,6 +1,6 @@
 import numpy as np
 
-from orbit._patches import make_blocks_3d, make_patches_2d, patch_bounds_1d
+from orbit._patches import make_blocks_3d, make_patches_2d, make_patches_3d, patch_bounds_1d
 
 
 def test_patch_bounds_1d_covers_frame_without_a_near_duplicate_final_patch():
@@ -47,3 +47,19 @@ def test_make_blocks_3d_collapses_to_one_block_when_movie_fits():
         spatial_overlap=30, temporal_overlap=500,
     )
     assert blocks == [(0, 50, 0, 50, 0, 100)]
+
+
+def test_make_patches_3d_bounds_tile_the_full_volume():
+    patches = make_patches_3d(length=60, width=50, depth=40, patch_size=(20, 20, 20), overlap=5)
+    covered = np.zeros((60, 50, 40), dtype=bool)
+    for l0, l1, w0, w1, d0, d1 in patches:
+        assert 0 <= l0 < l1 <= 60
+        assert 0 <= w0 < w1 <= 50
+        assert 0 <= d0 < d1 <= 40
+        covered[l0:l1, w0:w1, d0:d1] = True
+    assert covered.all()  # every voxel is inside at least one patch
+
+
+def test_make_patches_3d_collapses_to_one_patch_when_volume_fits():
+    patches = make_patches_3d(length=20, width=20, depth=20, patch_size=(50, 50, 50), overlap=4)
+    assert patches == [(0, 20, 0, 20, 0, 20)]

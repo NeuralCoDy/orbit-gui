@@ -32,6 +32,8 @@ overlap another's mask.
 
 from __future__ import annotations
 
+import functools
+
 import numpy as np
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
@@ -47,15 +49,23 @@ from PySide6.QtWidgets import (
 )
 
 from orbit._masks import masked_mean_trace
+from orbit._volumetric import depth_project
 from orbit.cnmf import CNMFResult, cnmf_source_extraction, patch_cnmf_source_extraction
 from orbit.neuropil import compute_neuropil_traces
 from orbit.projections import local_correlation_projection
 from orbit.roi_extraction_corr import find_seed_candidates, roi_from_seed
 from orbit.roi_extraction_graft import GraFTResult, graft_source_extraction, patch_graft_source_extraction
+from orbit.roi_extraction_graft_3d import (
+    GraFTResult3D,
+    _masked_mean_trace_3d,
+    graft_source_extraction_3d,
+    patch_graft_source_extraction_3d,
+)
 from orbit.roi_extraction_pca_ica import PCAICAResult, pca_ica_source_extraction
 
 from ..io import is_memmap, preview_slice
 from ..state import AppState, ROI
+from ..volumetric_io import preview_slice_volumetric
 from ..widgets import BusyBar, ParametersDialog, ROIReviewPanel, confirm_recompute, make_spinbox
 from ..workers import FunctionWorker, run_worker
 
@@ -92,6 +102,14 @@ def _reextract_traces(rois: list[ROI], movie: np.ndarray) -> list[ROI]:
     recomputed to the same value, since they're not preview-capped."""
     for roi in rois:
         roi.trace = masked_mean_trace(movie, roi.mask)
+    return rois
+
+
+def _reextract_traces_3d(rois: list[ROI], movie: np.ndarray) -> list[ROI]:
+    """Volumetric counterpart of _reextract_traces -- uses
+    _masked_mean_trace_3d (T-first, 3D-mask) instead of masked_mean_trace."""
+    for roi in rois:
+        roi.trace = _masked_mean_trace_3d(movie, roi.mask)
     return rois
 
 
@@ -251,6 +269,7 @@ class SourceExtractionTab(QWidget):
         layout.addWidget(self.review_panel)
 
         self._on_method_changed(self.method_combo.currentText())
+        self.on_modality_changed()  # reflects state.volumetric's initial value, if already set
 
     def _build_correlation_rows(self) -> QVBoxLayout:
         """Correlation-based click-to-add: always active, independent of
@@ -316,6 +335,28 @@ class SourceExtractionTab(QWidget):
         visible = _METHOD_KEYS[self.method_combo.currentText()] == method and patch_check.isChecked()
         self.params_dialog.set_group_visible(group, visible)
 
+    def on_modality_changed(self) -> None:
+        """Reacts to the Load tab's Volumetric toggle (wired in app.py) --
+        only GraFT has a 3D implementation, so every other batch method
+        is disabled and the combo forced onto GraFT. Correlation-based
+        click-to-add is always-active infrastructure, not gated by the
+        Method combo, so it's disabled directly here too -- clicking a
+        2D FOV image has no volumetric equivalent yet (self._corr_image
+        also stays None for volumetric, see on_data_loaded, so
+        auto-seeding would otherwise just show a confusing "no data"
+        warning instead of being visibly unavailable)."""
+        volumetric = self.state.volumetric
+        model = self.method_combo.model()
+        for i, (_label, key) in enumerate(_METHODS):
+            if key == "graft":
+                continue
+            item = model.item(i)
+            item.setEnabled(not volumetric)
+            item.setToolTip("Not yet available for volumetric data." if volumetric else "")
+        if volumetric and _METHOD_KEYS[self.method_combo.currentText()] != "graft":
+            self.method_combo.setCurrentText("GraFT")
+        self.auto_seed_btn.setEnabled(not volumetric)
+
     def on_data_loaded(self) -> None:
         movie = self.state.active_data()
         self._candidates = []
@@ -329,12 +370,14 @@ class SourceExtractionTab(QWidget):
         self.status_label.setText(f"Ready. shape={movie.shape}")
         if self.state.volumetric:
             # local_correlation_projection assumes a 3D (H, W, T) movie --
-            # Source Extraction doesn't have a volumetric path yet (only
-            # Motion Correction does so far), so skip it rather than let
-            # it fail on the 4D array and pop an error dialog the instant
-            # volumetric data loads, before the user has even navigated
-            # here.
+            # only GraFT has a volumetric implementation (see
+            # on_modality_changed), so correlation-based click-to-add
+            # stays inert here (self._corr_image stays None). The FOV
+            # background still gets a depth-projected preview, same
+            # display-only technique as Motion Correction/Denoising.
             self._corr_image = None
+            projected = depth_project(preview_slice_volumetric(movie))
+            self.review_panel.set_base_image(projected.mean(axis=2))
             return
         # preview_slice bounds this to the first 5000 frames for a
         # memmap movie -- local_correlation_projection materializes its
@@ -572,6 +615,9 @@ class SourceExtractionTab(QWidget):
         }
 
     def _on_run_graft_clicked(self) -> None:
+        if self.state.volumetric:
+            self._on_run_graft_clicked_volumetric()
+            return
         movie = self.state.active_data()
         memmap_input = movie is not None and is_memmap(movie)
         if self._refuse_if_memmap_without_patch(memmap_input, self.graft_patch_check, "GraFT"):
@@ -602,7 +648,56 @@ class SourceExtractionTab(QWidget):
             worker_movie=worker_movie, **self._pending_batch_params,
         )
 
-    def _on_graft_finished(self, result: GraFTResult) -> None:
+    def _on_run_graft_clicked_volumetric(self) -> None:
+        # Must be a real, restricting mask -- not given, not empty, and
+        # not all-True (an explicit Clear Mask, or an auto-threshold that
+        # happened to keep everything, doesn't reduce the voxel count).
+        # Mirrors orbit.roi_extraction_graft_3d._require_mask's own check,
+        # just checked proactively here so a worker never even starts.
+        mask = self.state.mask
+        if mask is None or not mask.any() or mask.all():
+            QMessageBox.warning(
+                self, "Mask required",
+                "GraFT on volumetric data requires a real, restricting mask -- run Mask tab "
+                "(Auto-threshold) first; an empty or all-kept (Clear Mask) mask isn't enough.",
+            )
+            return
+        movie = self.state.active_data()
+        memmap_input = movie is not None and is_memmap(movie)
+        if self._refuse_if_memmap_without_patch(memmap_input, self.graft_patch_check, "GraFT"):
+            return
+        worker_movie = preview_slice_volumetric(movie) if memmap_input else None
+
+        # mask is bound into the callable itself (functools.partial) rather
+        # than passed as a kwarg -- _run_batch_method's "already ran with
+        # these exact params" fingerprint sorts+compares kwargs, and a raw
+        # boolean array in that comparison would raise (ambiguous truth
+        # value of an array) the moment two runs' masks were compared for
+        # equality. self._pending_batch_params (used for each ROI's own
+        # recorded provenance) stays JSON-serializable scalars/tuples only,
+        # same convention as the 2D path above.
+        if self.graft_patch_check.isChecked():
+            patch = self.graft_patch_size_spin.value()
+            overlap = self.graft_patch_overlap_spin.value()
+            self._pending_batch_params = dict(
+                patch_size=(patch, patch, patch), overlap=overlap,
+                n_dict_per_patch=self.graft_n_dict_per_patch_spin.value(), **self._graft_shared_params(),
+            )
+            fn = functools.partial(patch_graft_source_extraction_3d, mask=self.state.mask)
+            self._run_batch_method(
+                "Running patch-based GraFT (this can take a while)...", fn,
+                self._on_graft_finished, worker_movie=worker_movie, **self._pending_batch_params,
+            )
+            return
+
+        self._pending_batch_params = dict(n_dict=self.graft_n_dict_spin.value(), **self._graft_shared_params())
+        fn = functools.partial(graft_source_extraction_3d, mask=self.state.mask)
+        self._run_batch_method(
+            "Running GraFT (this can take a while)...", fn, self._on_graft_finished,
+            worker_movie=worker_movie, **self._pending_batch_params,
+        )
+
+    def _on_graft_finished(self, result: GraFTResult | GraFTResult3D) -> None:
         rois = self._make_rois(result.masks, result.traces, "graft", params=self._pending_batch_params)
         self._add_candidates(rois)
 
@@ -650,9 +745,14 @@ class SourceExtractionTab(QWidget):
     def _sync_candidates(self, status_message: str | None = None) -> None:
         """Recomputes neuropil for the whole current set (any add/delete
         can change every other ROI's ring) and refreshes the review panel
-        -- shared by every path that mutates self._candidates."""
+        -- shared by every path that mutates self._candidates.
+        compute_neuropil_traces is 2D-dilation-based (orbit.neuropil) --
+        skipped for volumetric ROIs (ROI.neuropil_trace just stays None
+        there); ROIReviewPanel itself needs no such guard, since it only
+        ever computes its own display-only ring from a depth-projected
+        2D silhouette (see roi_review_panel.py's _project_mask_2d)."""
         movie = self.state.active_data()
-        if movie is not None:
+        if movie is not None and not self.state.volumetric:
             compute_neuropil_traces(movie, self._candidates)
         self.review_panel.set_candidates(self._candidates)
         if status_message is not None:
@@ -676,9 +776,10 @@ class SourceExtractionTab(QWidget):
         movie = self.state.active_data()
         if movie is not None and is_memmap(movie):
             self.commit_btn.setEnabled(False)
+            reextract_fn = _reextract_traces_3d if self.state.volumetric else _reextract_traces
             self.worker = run_worker(
                 self.busy_bar, "Re-extracting ROI traces from the full movie before committing...",
-                _reextract_traces, accepted, movie,
+                reextract_fn, accepted, movie,
                 on_success=self._on_traces_reextracted, on_failure=self._on_failed,
             )
             return

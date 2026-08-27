@@ -28,3 +28,12 @@ def apply_mask(movie: np.ndarray, mask: np.ndarray) -> np.ndarray:
     """Zeroes every pixel outside ``mask`` (H, W) across the whole
     (H, W, T) movie."""
     return movie * mask[:, :, None]
+
+
+def apply_mask_3d(movie: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Zeroes every voxel outside ``mask`` (L, W, D) across the whole
+    (T, L, W, D) volumetric movie -- T-first counterpart of apply_mask.
+    triangle_mask itself needs no such counterpart: threshold_triangle
+    has no shape assumptions, so it already works unchanged on a genuine
+    3D (L, W, D) projection."""
+    return movie * mask[None, :, :, :]

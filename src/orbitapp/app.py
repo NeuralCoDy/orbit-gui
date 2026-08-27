@@ -104,6 +104,8 @@ class MainWindow(QMainWindow):
 
         self.load_tab.modality_changed.connect(self._on_modality_changed)
         self.load_tab.modality_changed.connect(self.motion_correction_tab.on_modality_changed)
+        self.load_tab.modality_changed.connect(self.denoising_tab.on_modality_changed)
+        self.load_tab.modality_changed.connect(self.source_extraction_tab.on_modality_changed)
 
         self.save_tab.session_loaded.connect(self._on_session_loaded)
 

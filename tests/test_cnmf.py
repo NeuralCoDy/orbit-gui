@@ -34,6 +34,35 @@ def test_threshold_footprint_handles_all_zero_input():
     assert threshold_footprint(footprint).sum() == 0
 
 
+def test_threshold_footprint_3d_drops_low_weights_and_keeps_the_peak_component():
+    # A genuine 3D footprint (GraFT's volumetric patches) -- the same
+    # cleanup, but connectivity must be checked in 3D (26-connected),
+    # not by silently reusing the 2D 8-connected structure.
+    footprint = np.zeros((10, 10, 10))
+    footprint[3:6, 3:6, 3:6] = 1.0  # the "real" blob
+    footprint[8, 8, 8] = 0.01  # a disconnected, low-weight noise voxel elsewhere
+
+    cleaned = threshold_footprint(footprint, quantile=0.5)
+
+    assert cleaned[4, 4, 4] > 0  # peak survives
+    assert cleaned[8, 8, 8] == 0  # isolated low-weight noise voxel is gone
+
+
+def test_threshold_footprint_3d_only_keeps_the_component_touching_the_peak():
+    # Two separate same-weight blobs -- only the one containing the
+    # global peak pixel should survive, confirming 3D connectivity (not
+    # 2D connectivity applied slice-by-slice) decides what's "connected".
+    footprint = np.zeros((12, 12, 12))
+    footprint[1:4, 1:4, 1:4] = 1.0
+    footprint[7:10, 7:10, 7:10] = 1.0
+    footprint[2, 2, 2] = 5.0  # peak, inside the first blob
+
+    cleaned = threshold_footprint(footprint, quantile=0.0)
+
+    assert cleaned[2, 2, 2] > 0
+    assert np.all(cleaned[7:10, 7:10, 7:10] == 0)
+
+
 def test_update_spatial_components_shapes_and_nonnegative():
     movie = _synthetic_cell_movie()
     footprints = np.zeros((2, 30, 30))

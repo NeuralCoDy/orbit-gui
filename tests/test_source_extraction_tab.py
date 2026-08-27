@@ -778,3 +778,159 @@ def test_graft_rois_record_the_batch_parameters_used():
         assert roi.params == {
             "n_dict": 10, "lambda": 0.5, "lamForb": 0.2, "lamCorr": 0.1, "lamCont": 0.3, "learn_eps": 0.005,
         }
+
+
+# -- Volumetric (state.volumetric) path -----------------------------------
+
+
+def _synthetic_volumetric_movie(length=20, width=20, depth=10, n_frames=200, seed=0):
+    rng = np.random.default_rng(seed)
+    movie = rng.standard_normal((n_frames, length, width, depth)).astype(np.float64) * 0.1 + 1.0
+
+    blob1 = np.zeros((length, width, depth))
+    blob1[3:7, 3:7, 2:5] = 1.0
+    blob2 = np.zeros((length, width, depth))
+    blob2[12:16, 12:16, 5:8] = 1.0
+    act1 = np.clip(rng.standard_normal(n_frames), 0, None) * 3
+    act2 = np.clip(rng.standard_normal(n_frames), 0, None) * 3
+    for t in range(n_frames):
+        movie[t] += blob1 * act1[t] + blob2 * act2[t]
+
+    mask = np.zeros((length, width, depth), dtype=bool)
+    mask[0 : length // 2, 0 : width // 2, :] = True
+    mask[length // 2 :, width // 2 :, :] = True
+    return movie, mask
+
+
+def test_on_modality_changed_restricts_method_combo_to_graft_when_volumetric():
+    state = AppState()
+    tab = SourceExtractionTab(state)
+    tab.method_combo.setCurrentText("CNMF")
+
+    state.volumetric = True
+    tab.on_modality_changed()
+
+    assert tab.method_combo.currentText() == "GraFT"
+    model = tab.method_combo.model()
+    assert not model.item(0).isEnabled()  # PCA-ICA
+    assert not model.item(1).isEnabled()  # CNMF
+    assert model.item(2).isEnabled()  # GraFT
+    assert not tab.auto_seed_btn.isEnabled()
+
+    state.volumetric = False
+    tab.on_modality_changed()
+    assert model.item(0).isEnabled()
+    assert model.item(1).isEnabled()
+    assert tab.auto_seed_btn.isEnabled()
+
+
+def test_run_graft_volumetric_without_a_mask_warns_and_does_not_run(monkeypatch):
+    monkeypatch.setattr("orbitapp.tabs.source_extraction_tab.QMessageBox.warning", lambda *a, **k: None)
+    state = AppState()
+    state.volumetric = True
+    movie, _mask = _synthetic_volumetric_movie(n_frames=20)
+    state.load("movie.fits", movie)
+    tab = SourceExtractionTab(state)
+    tab.on_data_loaded()
+
+    assert state.mask is None
+    tab._on_run_graft_clicked()
+
+    assert tab._candidates == []
+
+
+def test_run_graft_volumetric_with_an_all_true_mask_warns_and_does_not_run(monkeypatch):
+    monkeypatch.setattr("orbitapp.tabs.source_extraction_tab.QMessageBox.warning", lambda *a, **k: None)
+    state = AppState()
+    state.volumetric = True
+    movie, mask = _synthetic_volumetric_movie(n_frames=20)
+    state.load("movie.fits", movie)
+    state.mask = np.ones_like(mask)  # an explicit Clear Mask -- doesn't restrict anything
+    tab = SourceExtractionTab(state)
+    tab.on_data_loaded()
+
+    tab._on_run_graft_clicked()
+
+    assert tab._candidates == []
+
+
+def test_run_graft_volumetric_produces_true_3d_rois_and_commits():
+    state = AppState()
+    state.volumetric = True
+    movie, mask = _synthetic_volumetric_movie()
+    state.load("movie.fits", movie)
+    state.mask = mask
+    tab = SourceExtractionTab(state)
+    tab.on_data_loaded()
+
+    tab.graft_n_dict_spin.setValue(6)
+    tab._on_run_graft_clicked()
+    _wait_for_worker(tab, timeout_ms=30000)
+
+    assert len(tab._candidates) > 0
+    assert all(roi.source_method == "graft" for roi in tab._candidates)
+    assert all(roi.mask.shape == mask.shape for roi in tab._candidates)  # true (L, W, D), not depth-projected
+    assert all(roi.neuropil_trace is None for roi in tab._candidates)  # neuropil skipped for volumetric
+
+    for roi in tab._candidates:
+        roi.status = "accepted"
+    tab._commit()
+
+    assert len(state.rois) > 0
+    assert all(roi.mask.ndim == 3 for roi in state.rois)
+
+
+def test_run_patch_graft_volumetric_produces_true_3d_rois():
+    state = AppState()
+    state.volumetric = True
+    movie, mask = _synthetic_volumetric_movie()
+    state.load("movie.fits", movie)
+    state.mask = mask
+    tab = SourceExtractionTab(state)
+    tab.on_data_loaded()
+
+    tab.graft_patch_check.setChecked(True)
+    tab.graft_patch_size_spin.setValue(12)
+    tab.graft_patch_overlap_spin.setValue(3)
+    tab.graft_n_dict_per_patch_spin.setValue(4)
+    tab._on_run_graft_clicked()
+    _wait_for_worker(tab, timeout_ms=30000)
+
+    assert len(tab._candidates) > 0
+    assert all(roi.source_method == "graft" for roi in tab._candidates)
+    assert all(roi.mask.shape == mask.shape for roi in tab._candidates)
+
+
+def test_review_panel_does_not_crash_on_3d_rois():
+    # ROIReviewPanel's rendering is inherently 2D -- confirms it depth-
+    # projects rather than erroring when fed a real 3D-masked ROI.
+    state = AppState()
+    state.volumetric = True
+    movie, mask = _synthetic_volumetric_movie()
+    state.load("movie.fits", movie)
+    state.mask = mask
+    tab = SourceExtractionTab(state)
+    tab.on_data_loaded()
+
+    tab.graft_n_dict_spin.setValue(6)
+    tab._on_run_graft_clicked()
+    _wait_for_worker(tab, timeout_ms=30000)
+
+    assert len(tab._candidates) > 0  # rendered via _sync_candidates -> review_panel.set_candidates without crashing
+
+
+def test_turning_volumetric_off_leaves_2d_source_extraction_unaffected():
+    state = AppState()
+    movie = _graft_friendly_movie()
+    state.load("movie.tif", movie)
+    tab = SourceExtractionTab(state)
+    tab.on_data_loaded()
+    _wait_for_worker(tab)
+
+    tab.method_combo.setCurrentIndex(tab.method_combo.findText("GraFT"))
+    tab._on_run_graft_clicked()
+    _wait_for_worker(tab, timeout_ms=30000)
+
+    assert len(tab._candidates) > 0
+    assert all(roi.source_method == "graft" for roi in tab._candidates)
+    assert all(roi.neuropil_trace is not None for roi in tab._candidates)

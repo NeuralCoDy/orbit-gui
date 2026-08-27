@@ -199,6 +199,75 @@ def test_patch_based_graft_runs_on_a_memmap_movie_and_commit_reextracts_traces_f
         np.testing.assert_allclose(roi.trace, expected_trace)
 
 
+def _memmapped_volumetric_movie(tmp_path, shape=(20, 8, 8, 4), seed=0):
+    fits = pytest.importorskip("astropy.io.fits")
+    from orbitapp.volumetric_io import load_volumetric_movie
+
+    rng = np.random.default_rng(seed)
+    movie = rng.standard_normal(shape).astype(np.float32) * 0.1 + 1.0
+    length, width, depth = shape[1:]
+    movie[:, 0 : length // 2, 0 : width // 2, :] += 3.0
+    movie[:, length // 2 :, width // 2 :, :] += 3.0
+    path = tmp_path / "movie.fits"
+    fits.PrimaryHDU(data=movie).writeto(path, overwrite=True)
+    return str(path), load_volumetric_movie(path, mmap=True)
+
+
+def test_whole_volume_graft_is_refused_for_a_memmap_movie_without_patch_based_checked(tmp_path, monkeypatch):
+    warned = []
+    monkeypatch.setattr(
+        "orbitapp.tabs.source_extraction_tab.QMessageBox.warning", lambda *a, **k: warned.append(1)
+    )
+    path, movie = _memmapped_volumetric_movie(tmp_path)
+    state = AppState()
+    state.volumetric = True
+    state.load(path, movie)
+    state.mask = np.zeros(movie.shape[1:], dtype=bool)
+    state.mask[0:4, 0:4, :] = True
+    tab = SourceExtractionTab(state)
+    tab.on_data_loaded()
+
+    assert not tab.graft_patch_check.isChecked()
+    tab._on_run_graft_clicked()
+
+    assert warned == [1]
+    assert tab._candidates == []
+
+
+def test_patch_based_graft_volumetric_runs_on_a_memmap_movie_and_commit_reextracts_traces(tmp_path):
+    from orbit.roi_extraction_graft_3d import _masked_mean_trace_3d
+
+    path, movie = _memmapped_volumetric_movie(tmp_path)
+    state = AppState()
+    state.volumetric = True
+    state.load(path, movie)
+    mask = np.zeros(movie.shape[1:], dtype=bool)
+    mask[0:4, 0:4, :] = True
+    mask[4:8, 4:8, :] = True
+    state.mask = mask
+    tab = SourceExtractionTab(state)
+    tab.on_data_loaded()
+
+    tab.graft_patch_check.setChecked(True)
+    tab.graft_patch_size_spin.setValue(4)
+    tab.graft_patch_overlap_spin.setValue(1)
+    tab.graft_n_dict_per_patch_spin.setValue(3)
+    tab._on_run_graft_clicked()
+    _wait(tab, timeout_ms=30000)
+
+    assert len(tab._candidates) > 0
+    for roi in tab._candidates:
+        roi.status = "accepted"
+
+    tab._commit()
+    _wait(tab)
+
+    assert len(state.rois) > 0
+    for roi in state.rois:
+        expected_trace = _masked_mean_trace_3d(np.asarray(movie), roi.mask)
+        np.testing.assert_allclose(roi.trace, expected_trace)
+
+
 def test_non_memmap_movie_commit_skips_the_reextraction_worker(tmp_path):
     rng = np.random.default_rng(2)
     movie = rng.standard_normal((30, 30, 60)).astype(np.float64) * 0.1 + 5.0

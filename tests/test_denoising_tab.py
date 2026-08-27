@@ -260,3 +260,116 @@ def test_ljung_box_metric_substantially_improves_on_pure_noise_with_temporal_smo
     metrics = tab._extract_metrics(tab._pending_result)
     fail_fraction = metrics["ljung_box_failed"] / metrics["ljung_box_total"]
     assert fail_fraction < 0.5  # far below what n_exclude=0 gives here (measured ~100%)
+
+
+# -- Volumetric (state.volumetric) path ----------------------------------
+
+
+def _volumetric_movie(shape=(6, 10, 10, 5), seed=0) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    return rng.standard_normal(shape).astype(np.float32) * 3 + 50
+
+
+def _memmapped_volumetric_movie(tmp_path, shape=(20, 8, 8, 4), seed=0):
+    fits = pytest.importorskip("astropy.io.fits")
+    from orbitapp.volumetric_io import load_volumetric_movie
+
+    movie = _volumetric_movie(shape, seed)
+    path = tmp_path / "movie.fits"
+    fits.PrimaryHDU(data=movie).writeto(path, overwrite=True)
+    return str(path), load_volumetric_movie(path, mmap=True)
+
+
+def test_on_modality_changed_restricts_method_combo_to_gaussian_or_median_when_volumetric():
+    state = AppState()
+    tab = DenoisingTab(state)
+    tab.method_combo.setCurrentText("PCA Denoising")
+
+    state.volumetric = True
+    tab.on_modality_changed()
+
+    assert tab.method_combo.currentText() == "Gaussian Filter"
+    model = tab.method_combo.model()
+    assert not model.item(0).isEnabled()  # Wavelet - Temporal
+    assert not model.item(1).isEnabled()  # Wavelet - Spatial
+    assert model.item(2).isEnabled()  # Gaussian
+    assert model.item(3).isEnabled()  # Median
+    assert not model.item(4).isEnabled()  # PCA
+
+    # Median stays selected across the toggle -- it already has a 3D implementation.
+    tab.method_combo.setCurrentText("Median Filter")
+    state.volumetric = False
+    tab.on_modality_changed()
+    assert tab.method_combo.currentText() == "Median Filter"
+    assert model.item(0).isEnabled()
+    assert model.item(4).isEnabled()
+
+
+def test_volumetric_gaussian_apply_and_commit_produces_a_true_4d_array(tmp_path):
+    pytest.importorskip("astropy")
+    state = AppState()
+    state.volumetric = True
+    movie = _volumetric_movie()
+    state.load(str(tmp_path / "movie.fits"), movie)
+    tab = DenoisingTab(state)
+    tab.on_data_loaded()
+
+    tab.method_combo.setCurrentText("Gaussian Filter")
+    tab.gaussian_spatial_spin.setValue(1.0)
+    tab.gaussian_temporal_spin.setValue(0.5)
+    tab._apply()
+    _wait(tab)
+    assert tab.commit_controls.commit_btn.isEnabled()
+
+    tab._commit()
+    _wait(tab)
+
+    committed = state.active_data()
+    assert not is_memmap(committed)
+    assert committed.shape == movie.shape  # true (T, L, W, D), not the depth-projected display movie
+    assert np.all(np.isfinite(committed))
+    assert state.pipeline == ["Load", "Gaussian Denoising"]
+
+
+def test_volumetric_median_commit_of_a_memmap_movie_produces_a_4d_fits_memmap(tmp_path):
+    path, movie = _memmapped_volumetric_movie(tmp_path)
+    state = AppState()
+    state.volumetric = True
+    state.load(path, movie)
+    tab = DenoisingTab(state)
+    tab.on_data_loaded()
+
+    tab.method_combo.setCurrentText("Median Filter")
+    tab.median_space_spin.setValue(3)
+    tab.median_time_spin.setValue(3)
+    tab._chunk_frames = 6  # small, so a 20-timepoint movie spans multiple chunks
+    tab._apply()
+    _wait(tab)
+
+    tab._commit()
+    _wait(tab)
+
+    committed = state.active_data()
+    assert is_memmap(committed)
+    assert committed.shape == movie.shape  # the WHOLE volumetric movie, not just the preview
+    assert np.all(np.isfinite(np.asarray(committed)))
+
+
+def test_turning_volumetric_off_leaves_the_2d_denoising_path_unaffected():
+    # A regression check for the core constraint this whole feature was
+    # built under: with the toggle off, Apply/Commit behave exactly as
+    # they did before any volumetric code existed.
+    state = AppState()
+    movie = np.random.default_rng(2).standard_normal((10, 10, 12)).astype(np.float32)
+    state.load("movie.tif", movie)
+    tab = DenoisingTab(state)
+    tab.on_data_loaded()
+
+    tab.method_combo.setCurrentText("Gaussian Filter")
+    tab._apply()
+    _wait(tab)
+    tab._commit()
+
+    assert not is_memmap(state.active_data())
+    assert state.active_data().shape == movie.shape
+    assert state.pipeline == ["Load", "Gaussian Denoising"]

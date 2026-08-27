@@ -18,6 +18,8 @@ method's results reach this same collection.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Signal
@@ -47,6 +49,24 @@ _COLUMNS = ("ID", "Method", "Status", "Area (px)")
 _PREVIEW_RGBA = (0, 255, 0, 160)
 _SELECTED_ROI_RGBA = (0, 255, 255, 220)
 _NEUROPIL_RGBA = (255, 140, 0, 170)  # orange, either way
+
+
+def _project_mask_2d(mask: np.ndarray) -> np.ndarray:
+    """A 2D silhouette of a >2D boolean mask -- "any voxel present along
+    the trailing axes" (e.g. depth-collapsing a volumetric ROI's
+    (L, W, D) mask), unchanged for an already-2D mask. This panel's
+    rendering is inherently 2D (an image view); the projection is only
+    ever used to build a display image, never to mutate the ROI's own
+    mask, which stays the real (possibly 3D) array everywhere else."""
+    return mask if mask.ndim == 2 else mask.any(axis=tuple(range(2, mask.ndim)))
+
+
+def _for_display(roi: ROI) -> ROI:
+    """A throwaway display copy with a 2D mask -- safe to build fresh on
+    every render (unlike self._rois itself, which must stay the same
+    list/objects SourceExtractionTab's _candidates holds, so accept/
+    reject/delete keep working via that shared identity)."""
+    return roi if roi.mask.ndim == 2 else replace(roi, mask=_project_mask_2d(roi.mask))
 
 
 class ROIReviewPanel(QWidget):
@@ -185,7 +205,8 @@ class ROIReviewPanel(QWidget):
         if not self._rois:
             self._overlay_item.clear()
             return
-        overlay = render_roi_overlay(self._rois, self._rois[0].mask.shape)
+        display_rois = [_for_display(roi) for roi in self._rois]
+        overlay = render_roi_overlay(display_rois, display_rois[0].mask.shape)
         if overlay is None:
             self._overlay_item.clear()
         else:
@@ -196,13 +217,14 @@ class ROIReviewPanel(QWidget):
         pixels used for ``roi``'s neuropil trace (same exclusion rule as
         orbit.neuropil.compute_neuropil_traces -- every other known ROI's
         pixels removed) underneath the ROI's own mask."""
-        others = [r.mask for r in self._rois if r.id != roi.id]
+        others = [_project_mask_2d(r.mask) for r in self._rois if r.id != roi.id]
         exclusion = np.logical_or.reduce(others) if others else None
-        ring = neuropil_ring_mask(roi.mask, exclusion_mask=exclusion)
+        display_roi = _for_display(roi)
+        ring = neuropil_ring_mask(display_roi.mask, exclusion_mask=exclusion)
 
-        rgba = np.zeros((*roi.mask.shape, 4), dtype=np.uint8)
+        rgba = np.zeros((*display_roi.mask.shape, 4), dtype=np.uint8)
         rgba[ring] = _NEUROPIL_RGBA
-        rgba[roi.mask] = _PREVIEW_RGBA if roi.status == "preview" else _SELECTED_ROI_RGBA
+        rgba[display_roi.mask] = _PREVIEW_RGBA if display_roi.status == "preview" else _SELECTED_ROI_RGBA
         return rgba
 
     def _refresh_selected_view(self, roi: ROI | None) -> None:
@@ -227,8 +249,9 @@ class ROIReviewPanel(QWidget):
 
     def _find_roi_at_pixel(self, row: int, col: int) -> int | None:
         for i, roi in enumerate(self._rois):
-            h, w = roi.mask.shape
-            if 0 <= row < h and 0 <= col < w and roi.mask[row, col]:
+            mask = _project_mask_2d(roi.mask)
+            h, w = mask.shape
+            if 0 <= row < h and 0 <= col < w and mask[row, col]:
                 return i
         return None
 
