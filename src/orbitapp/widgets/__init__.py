@@ -5,6 +5,7 @@ from .header_bar import HeaderBar
 from .image_coords import pixel_to_data_pos, pixels_to_data_pos, scene_pos_to_pixel
 from .image_slideshow import ImageSlideshow
 from .movie_popout import show_movie_popout
+from .options_dialog import OptionsDialog
 from .parameters_dialog import ParametersDialog
 from .qc_panel import QCPlotGrid, add_location_markers, split_by_kind
 from .roi_overlay import render_roi_overlay
@@ -32,4 +33,5 @@ __all__ = [
     "show_movie_popout",
     "confirm_recompute",
     "VolumetricLoadDialog",
+    "OptionsDialog",
 ]

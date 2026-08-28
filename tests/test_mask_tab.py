@@ -5,7 +5,7 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from orbit.masking import apply_mask, apply_mask_3d, triangle_mask  # noqa: E402
+from orbit.masking import apply_mask, apply_mask_3d, compute_mask, triangle_mask  # noqa: E402
 from orbitapp.io import is_memmap, load_movie  # noqa: E402
 from orbitapp.state import AppState  # noqa: E402
 from orbitapp.tabs.mask_tab import MaskTab  # noqa: E402
@@ -53,6 +53,110 @@ def test_mask_tab_auto_threshold_apply_and_commit_on_a_non_memmap_movie():
     expected = apply_mask(movie, expected_mask)
     np.testing.assert_allclose(np.asarray(committed), expected)
     assert "Mask" in state.pipeline[-1]
+
+
+def test_mask_tab_method_combo_offers_every_method():
+    state = AppState()
+    tab = MaskTab(state)
+    items = [tab.method_combo.itemText(i) for i in range(tab.method_combo.count())]
+    assert items == ["Triangle (auto)", "Otsu (auto)", "Manual threshold", "Percentile"]
+
+
+def test_mask_tab_params_dialog_only_shows_the_selected_methods_group():
+    state = AppState()
+    tab = MaskTab(state)
+
+    tab.method_combo.setCurrentText("Triangle (auto)")
+    assert not tab.params_dialog.form.isRowVisible(tab.manual_threshold_spin)
+    assert not tab.params_dialog.form.isRowVisible(tab.percentile_spin)
+
+    tab.method_combo.setCurrentText("Manual threshold")
+    assert tab.params_dialog.form.isRowVisible(tab.manual_threshold_spin)
+    assert not tab.params_dialog.form.isRowVisible(tab.percentile_spin)
+
+    tab.method_combo.setCurrentText("Percentile")
+    assert not tab.params_dialog.form.isRowVisible(tab.manual_threshold_spin)
+    assert tab.params_dialog.form.isRowVisible(tab.percentile_spin)
+
+
+def test_mask_tab_manual_threshold_apply_and_commit():
+    movie = _bright_blob_movie()
+    state = AppState()
+    state.load("movie.npy", movie)
+    tab = MaskTab(state)
+    tab.on_data_loaded()
+
+    tab.method_combo.setCurrentText("Manual threshold")
+    tab.manual_threshold_spin.setValue(1.0)
+    tab._apply()
+    _wait(tab)
+    tab._commit()
+    _wait(tab)
+
+    projection = np.asarray(movie, dtype=np.float64).mean(axis=2)
+    expected_mask = compute_mask(projection, "manual", threshold=1.0)
+    expected = apply_mask(movie, expected_mask)
+    np.testing.assert_allclose(np.asarray(state.active_data()), expected)
+    np.testing.assert_array_equal(state.mask, expected_mask)
+
+
+def test_mask_tab_percentile_apply_and_commit():
+    movie = _bright_blob_movie()
+    state = AppState()
+    state.load("movie.npy", movie)
+    tab = MaskTab(state)
+    tab.on_data_loaded()
+
+    tab.method_combo.setCurrentText("Percentile")
+    tab.percentile_spin.setValue(15.0)
+    tab._apply()
+    _wait(tab)
+    tab._commit()
+    _wait(tab)
+
+    projection = np.asarray(movie, dtype=np.float64).mean(axis=2)
+    expected_mask = compute_mask(projection, "percentile", percentile=15.0)
+    expected = apply_mask(movie, expected_mask)
+    np.testing.assert_allclose(np.asarray(state.active_data()), expected)
+
+
+def test_mask_tab_otsu_apply_and_commit():
+    movie = _bright_blob_movie()
+    state = AppState()
+    state.load("movie.npy", movie)
+    tab = MaskTab(state)
+    tab.on_data_loaded()
+
+    tab.method_combo.setCurrentText("Otsu (auto)")
+    tab._apply()
+    _wait(tab)
+    tab._commit()
+    _wait(tab)
+
+    projection = np.asarray(movie, dtype=np.float64).mean(axis=2)
+    expected_mask = compute_mask(projection, "otsu")
+    expected = apply_mask(movie, expected_mask)
+    np.testing.assert_allclose(np.asarray(state.active_data()), expected)
+
+
+def test_mask_tab_restore_params_maps_legacy_auto_to_triangle():
+    state = AppState()
+    tab = MaskTab(state)
+    tab.method_combo.setCurrentText("Manual threshold")
+
+    tab.restore_params({"action": "auto"})
+
+    assert tab.method_combo.currentText() == "Triangle (auto)"
+
+
+def test_mask_tab_restore_params_restores_method_and_value():
+    state = AppState()
+    tab = MaskTab(state)
+
+    tab.restore_params({"action": "percentile", "percentile": 42.0})
+
+    assert tab.method_combo.currentText() == "Percentile"
+    assert tab.percentile_spin.value() == 42.0
 
 
 def test_mask_tab_clear_mask_is_a_no_op_and_commits_unchanged_movie():

@@ -1,6 +1,7 @@
 import numpy as np
+import pytest
 
-from orbit.masking import apply_mask, triangle_mask
+from orbit.masking import apply_mask, compute_mask, manual_mask, otsu_mask, percentile_mask, triangle_mask
 
 
 def _bright_blob_on_dim_background(height=40, width=40, seed=0):
@@ -40,3 +41,40 @@ def test_apply_mask_all_true_is_a_no_op():
     movie = rng.standard_normal((5, 5, 10))
     mask = np.ones((5, 5), dtype=bool)
     assert np.array_equal(apply_mask(movie, mask), movie)
+
+
+def test_otsu_mask_keeps_the_bright_blob_and_excludes_the_background():
+    proj = _bright_blob_on_dim_background()
+    mask = otsu_mask(proj)
+
+    assert mask.dtype == bool
+    assert mask[15, 15]
+    assert not mask[0, 0]
+
+
+def test_manual_mask_thresholds_at_the_given_value():
+    proj = np.array([[0.0, 1.0], [2.0, 3.0]])
+    mask = manual_mask(proj, threshold=1.5)
+    np.testing.assert_array_equal(mask, [[False, False], [True, True]])
+
+
+def test_percentile_mask_keeps_only_the_brightest_fraction():
+    proj = np.arange(100, dtype=float).reshape(10, 10)
+    mask = percentile_mask(proj, percentile=10)
+
+    assert mask.sum() == pytest.approx(10, abs=1)  # top 10% of 100 pixels
+    assert mask[9, 9]  # brightest corner (value 99)
+    assert not mask[0, 0]  # dimmest corner (value 0)
+
+
+def test_compute_mask_dispatches_by_method_name():
+    proj = _bright_blob_on_dim_background()
+    assert np.array_equal(compute_mask(proj, "triangle"), triangle_mask(proj))
+    assert np.array_equal(compute_mask(proj, "otsu"), otsu_mask(proj))
+    assert np.array_equal(compute_mask(proj, "manual", threshold=1.0), manual_mask(proj, 1.0))
+    assert np.array_equal(compute_mask(proj, "percentile", percentile=5), percentile_mask(proj, 5))
+
+
+def test_compute_mask_rejects_unknown_method():
+    with pytest.raises(ValueError, match="Unknown mask method"):
+        compute_mask(np.zeros((3, 3)), "bogus")

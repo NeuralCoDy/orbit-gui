@@ -74,9 +74,27 @@ QMenu, QComboBox QAbstractItemView {{
 """
 
 
+_base_font_point_size: int | None = None  # captured once in apply_dark_theme -- see set_font_size_delta
+
+
 def apply_dark_theme(app: QApplication) -> None:
     """Applies the dark theme app-wide -- call once, before any widgets
     (especially pyqtgraph ones) are constructed."""
+    global _base_font_point_size
+    _base_font_point_size = app.font().pointSize()
+    if _base_font_point_size <= 0:
+        _base_font_point_size = 10  # platform reports pixel size instead of point size -- a sane fallback
     app.setStyleSheet(_STYLESHEET)
     pg.setConfigOption("background", BACKGROUND)
     pg.setConfigOption("foreground", ACCENT)
+
+
+def set_font_size_delta(app: QApplication, delta: int) -> None:
+    """Sets the app-wide font size to the original base size (captured
+    once in apply_dark_theme) plus ``delta`` points -- always relative to
+    the true original, not cumulative across repeated calls, so moving
+    the Options panel's font-size control back and forth stays exact."""
+    base = _base_font_point_size if _base_font_point_size is not None else 10
+    font = app.font()
+    font.setPointSize(max(1, base + delta))
+    app.setFont(font)

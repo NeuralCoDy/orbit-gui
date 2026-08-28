@@ -18,7 +18,7 @@ class CommitControls(QWidget):
     apply_clicked = Signal()
     commit_clicked = Signal()
 
-    def __init__(self, apply_label: str, commit_label: str = "Commit to Active Dataset", parent=None) -> None:
+    def __init__(self, apply_label: str, commit_label: str = "Commit to Pipeline", parent=None) -> None:
         super().__init__(parent)
 
         layout = QHBoxLayout(self)

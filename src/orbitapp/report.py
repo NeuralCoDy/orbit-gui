@@ -134,12 +134,26 @@ _DENOISING_EQUATIONS = {
     ),
 }
 
+_TRIANGLE_EQUATION = (
+    r"The triangle method (Zack, Rogers \& Latt, 1977) thresholds the field of view's "
+    r"mean-intensity histogram by drawing a line from its peak bin to its farthest empty tail bin "
+    r"and choosing the threshold at the point of maximum perpendicular distance from that line to "
+    r"the histogram curve."
+)
+
 _MASK_EQUATIONS = {
-    "auto": (
-        r"The triangle method (Zack, Rogers \& Latt, 1977) thresholds the field of view's "
-        r"mean-intensity histogram by drawing a line from its peak bin to its farthest empty tail bin "
-        r"and choosing the threshold at the point of maximum perpendicular distance from that line to "
-        r"the histogram curve."
+    "triangle": _TRIANGLE_EQUATION,
+    "auto": _TRIANGLE_EQUATION,  # legacy saved-session value, from before multiple methods existed
+    "otsu": (
+        r"Otsu's method thresholds by maximizing the between-class intensity variance of the field of "
+        r"view's mean-intensity histogram, treating it as a mixture of two classes (foreground/"
+        r"background)."
+    ),
+    "manual": r"A user-supplied, fixed intensity threshold: pixels above \texttt{threshold} are kept.",
+    "percentile": (
+        r"Keeps the brightest \texttt{percentile} percent of pixels: the threshold is the "
+        r"$(100 - \texttt{percentile})$-th percentile of the field of view's mean-intensity "
+        r"distribution."
     ),
     "clear": r"An all-True (no-op) mask -- every pixel/voxel is kept.",
 }
@@ -253,7 +267,7 @@ def _section_motion_correction(step: PipelineStep) -> str:
 
 
 def _section_mask(step: PipelineStep) -> str:
-    action = step.params.get("action", "auto")
+    action = step.params.get("action", "triangle")
     return _section(step.label, _MASK_EQUATIONS.get(action, ""), step.params, step.metrics)
 
 

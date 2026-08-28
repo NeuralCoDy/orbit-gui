@@ -14,10 +14,11 @@ the same vertical level.
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from ..assets import LOGO_PATH, load_logo
-from ..theme import ACCENT, BACKGROUND
+from ..theme import ACCENT, BACKGROUND, set_font_size_delta
+from .options_dialog import OptionsDialog
 
 _LOGO_HEIGHT_PX = 60
 
@@ -91,8 +92,26 @@ class HeaderBar(QWidget):
         outer.setSpacing(2)
 
         top_row = QHBoxLayout()
+
+        # Report button + data-loaded status share the far-left column,
+        # button above status, so "Generate Report..." sits at the very
+        # top-left corner of the whole header.
+        left_col = QVBoxLayout()
+        left_col.setContentsMargins(0, 0, 0, 0)
+        left_col.setSpacing(0)
+
+        self.report_btn = QPushButton("Generate Report...")
+        self.report_btn.setToolTip(
+            "Writes a LaTeX report of the committed pipeline (steps, equations, parameters, "
+            "validation metrics) and compiles it to PDF."
+        )
+        self.report_btn.clicked.connect(self.generate_report_clicked)
+        left_col.addWidget(self.report_btn, 0, Qt.AlignmentFlag.AlignLeft)
+
         self.data_label = QLabel("No data loaded.")
-        top_row.addWidget(self.data_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        left_col.addWidget(self.data_label, 0, Qt.AlignmentFlag.AlignLeft)
+
+        top_row.addLayout(left_col)
         top_row.addStretch()
 
         title_label = QLabel("ORBIT GUI")
@@ -101,14 +120,6 @@ class HeaderBar(QWidget):
         title_font.setPointSize(title_font.pointSize() + 2)
         title_label.setFont(title_font)
         top_row.addWidget(title_label, 0, Qt.AlignmentFlag.AlignVCenter)
-
-        self.report_btn = QPushButton("Generate Report...")
-        self.report_btn.setToolTip(
-            "Writes a LaTeX report of the committed pipeline (steps, equations, parameters, "
-            "validation metrics) and compiles it to PDF."
-        )
-        self.report_btn.clicked.connect(self.generate_report_clicked)
-        top_row.addWidget(self.report_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         outer.addLayout(top_row)
 
         pipeline_row = QHBoxLayout()
@@ -117,6 +128,13 @@ class HeaderBar(QWidget):
         self.pipeline_diagram = _PipelineDiagram()
         pipeline_row.addWidget(self.pipeline_diagram, 0, Qt.AlignmentFlag.AlignVCenter)
         pipeline_row.addStretch()
+
+        self.options_btn = QPushButton("⚙")  # gear icon
+        self.options_btn.setToolTip("Options...")
+        self.options_btn.setFixedWidth(32)
+        self.options_btn.clicked.connect(self._on_options_clicked)
+        pipeline_row.addWidget(self.options_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+
         pipeline_row.addWidget(self._make_logo_label(), 0, Qt.AlignmentFlag.AlignVCenter)
         outer.addLayout(pipeline_row)
 
@@ -125,6 +143,16 @@ class HeaderBar(QWidget):
         if LOGO_PATH.exists():
             logo_label.setPixmap(load_logo(_LOGO_HEIGHT_PX))
         return logo_label
+
+    def _on_options_clicked(self) -> None:
+        dialog = OptionsDialog(self)
+        dialog.font_size_spin.valueChanged.connect(self._on_font_size_changed)
+        dialog.exec()
+
+    def _on_font_size_changed(self, delta: int) -> None:
+        app = QApplication.instance()
+        if app is not None:
+            set_font_size_delta(app, delta)
 
     def set_data_info(self, summary: str | None) -> None:
         self.data_label.setText(summary or "No data loaded.")
