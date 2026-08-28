@@ -123,3 +123,85 @@ def test_pipeline_only_load_restores_params_without_rois(tmp_path, monkeypatch):
 
     assert win2.motion_correction_tab.max_shift_spin.value() == 42.0
     assert win2.state.rois == []
+
+
+def test_generate_report_with_nothing_committed_shows_a_guard_dialog(monkeypatch):
+    informed = []
+    monkeypatch.setattr("orbitapp.app.QMessageBox.information", lambda *a, **k: informed.append(1))
+
+    win = MainWindow()
+    win._on_generate_report_clicked()
+
+    assert informed == [1]
+    assert win.report_worker is None
+
+
+def test_generate_report_happy_path_writes_a_pdf_and_shows_the_path(tmp_path, monkeypatch):
+    pytest.importorskip("shutil")
+    import shutil
+
+    if shutil.which("pdflatex") is None:
+        pytest.skip("pdflatex not on PATH")
+
+    movie_path = tmp_path / "movie.tif"
+    _write_synthetic_movie(movie_path)
+
+    win = MainWindow()
+    win.load_tab._load(str(movie_path))
+    _wait_for_worker(win.load_tab)
+
+    mc = win.motion_correction_tab
+    mc.on_data_loaded()
+    mc._apply()
+    _wait_for_worker(mc)
+    mc._commit()
+
+    report_path = tmp_path / "report.pdf"
+    monkeypatch.setattr(
+        "orbitapp.app.QFileDialog.getSaveFileName", lambda *a, **k: (str(report_path), "")
+    )
+    informed = []
+    monkeypatch.setattr("orbitapp.app.QMessageBox.information", lambda *a, **k: informed.append(1))
+
+    win._on_generate_report_clicked()
+    win.report_worker.wait(30000)
+    for _ in range(50):
+        QApplication.processEvents()
+
+    assert report_path.exists()
+    assert informed == [1]
+    assert win.header.report_btn.isEnabled()
+    assert win.header.report_btn.text() == "Generate Report..."
+
+
+def test_generate_report_failure_shows_critical_dialog_and_reenables_button(tmp_path, monkeypatch):
+    movie_path = tmp_path / "movie.tif"
+    _write_synthetic_movie(movie_path)
+
+    win = MainWindow()
+    win.load_tab._load(str(movie_path))
+    _wait_for_worker(win.load_tab)
+
+    mc = win.motion_correction_tab
+    mc.on_data_loaded()
+    mc._apply()
+    _wait_for_worker(mc)
+    mc._commit()
+
+    monkeypatch.setattr(
+        "orbitapp.app.QFileDialog.getSaveFileName", lambda *a, **k: (str(tmp_path / "report.pdf"), "")
+    )
+    monkeypatch.setattr(
+        "orbitapp.report.render_report", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
+    critical = []
+    monkeypatch.setattr("orbitapp.app.QMessageBox.critical", lambda *a, **k: critical.append(a[2] if len(a) > 2 else ""))
+
+    win._on_generate_report_clicked()
+    win.report_worker.wait(15000)
+    for _ in range(50):
+        QApplication.processEvents()
+
+    assert len(critical) == 1
+    assert "boom" in critical[0]
+    assert win.header.report_btn.isEnabled()

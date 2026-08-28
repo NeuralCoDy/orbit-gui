@@ -8,9 +8,19 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QSplashScreen, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QMainWindow,
+    QMessageBox,
+    QSplashScreen,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from . import io as orbitapp_io
+from . import report
 from .assets import LOGO_PATH, load_logo_on_black
 from .format import format_header_summary
 from .state import AppState
@@ -27,6 +37,7 @@ from .tabs import (
 )
 from .theme import apply_dark_theme
 from .widgets import HeaderBar
+from .workers import FunctionWorker
 
 _SPLASH_MIN_DISPLAY_S = 1.2
 _SPLASH_HEIGHT_PX = 420
@@ -108,6 +119,9 @@ class MainWindow(QMainWindow):
         self.load_tab.modality_changed.connect(self.source_extraction_tab.on_modality_changed)
 
         self.save_tab.session_loaded.connect(self._on_session_loaded)
+
+        self.header.generate_report_clicked.connect(self._on_generate_report_clicked)
+        self.report_worker: FunctionWorker | None = None
 
     def _on_data_loaded(self) -> None:
         movie = self.state.original_data
@@ -193,6 +207,37 @@ class MainWindow(QMainWindow):
         if output is not None and output["roi_validation_results"] is not None and self.state.rois:
             self.roi_validation_tab._on_load_rois_clicked()
             self.roi_validation_tab.import_results(output["roi_validation_results"])
+
+    def _on_generate_report_clicked(self) -> None:
+        if len(self.state.steps) <= 1:  # only "Load" -- nothing committed to report on
+            QMessageBox.information(
+                self, "Nothing to report", "Commit at least one pipeline stage before generating a report."
+            )
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Generate Report", "", "PDF files (*.pdf)")
+        if not path:
+            return
+
+        self.header.set_report_busy(True)
+        # A bare FunctionWorker rather than run_worker -- this compact
+        # header has no BusyBar of its own (see HeaderBar.set_report_busy).
+        self.report_worker = FunctionWorker(report.render_report, self.state, self.roi_validation_tab, Path(path))
+
+        def _joined(handler, arg):
+            self.report_worker.wait()  # see run_worker's own docstring for why this matters
+            handler(arg)
+
+        self.report_worker.finished_ok.connect(lambda pdf_path: _joined(self._on_report_finished, pdf_path))
+        self.report_worker.failed.connect(lambda message: _joined(self._on_report_failed, message))
+        self.report_worker.start()
+
+    def _on_report_finished(self, pdf_path: Path) -> None:
+        self.header.set_report_busy(False)
+        QMessageBox.information(self, "Report generated", f"Report saved to {pdf_path}")
+
+    def _on_report_failed(self, message: str) -> None:
+        self.header.set_report_busy(False)
+        QMessageBox.critical(self, "Report generation failed", message)
 
 
 def run() -> None:

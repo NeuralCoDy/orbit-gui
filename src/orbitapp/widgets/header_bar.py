@@ -13,8 +13,8 @@ the same vertical level.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from ..assets import LOGO_PATH, load_logo
 from ..theme import ACCENT, BACKGROUND
@@ -81,6 +81,8 @@ class _PipelineDiagram(QWidget):
 
 
 class HeaderBar(QWidget):
+    generate_report_clicked = Signal()
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
 
@@ -99,6 +101,14 @@ class HeaderBar(QWidget):
         title_font.setPointSize(title_font.pointSize() + 2)
         title_label.setFont(title_font)
         top_row.addWidget(title_label, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.report_btn = QPushButton("Generate Report...")
+        self.report_btn.setToolTip(
+            "Writes a LaTeX report of the committed pipeline (steps, equations, parameters, "
+            "validation metrics) and compiles it to PDF."
+        )
+        self.report_btn.clicked.connect(self.generate_report_clicked)
+        top_row.addWidget(self.report_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         outer.addLayout(top_row)
 
         pipeline_row = QHBoxLayout()
@@ -118,6 +128,13 @@ class HeaderBar(QWidget):
 
     def set_data_info(self, summary: str | None) -> None:
         self.data_label.setText(summary or "No data loaded.")
+
+    def set_report_busy(self, busy: bool) -> None:
+        """Disables and relabels the button while a report is being
+        generated -- the button's own state doubles as the busy
+        indicator, since this compact header has no BusyBar of its own."""
+        self.report_btn.setEnabled(not busy)
+        self.report_btn.setText("Generating..." if busy else "Generate Report...")
 
     def set_pipeline(self, steps: list[str], modifiers: list[str] | None = None) -> None:
         """``modifiers`` are the Load tab's active data-modality toggles
