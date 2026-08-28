@@ -30,6 +30,7 @@ from orbit.motion_metrics import (
 from ..fits_io import create_fits_memmap
 from ..io import is_memmap, preview_slice
 from ..state import AppState
+from ..theme import add_legend
 from ..volumetric_io import preview_slice_volumetric
 from ..widgets import ImageSlideshow, ParametersDialog, confirm_recompute, make_spinbox
 from ..workers import run_worker
@@ -145,7 +146,7 @@ class MotionCorrectionTab(StageTab):
         self.panel.add_metric_widget(self.metrics_label)
 
         self.sv_plot = pg.PlotWidget(title="Singular value spectrum (tighter after = better)")
-        self.sv_plot.addLegend()
+        add_legend(self.sv_plot)
         self.sv_plot.setLabel("bottom", "singular value number")
         self.sv_plot.setLabel("left", "normalized singular value")
         self.panel.add_metric_widget(self.sv_plot)
@@ -158,13 +159,31 @@ class MotionCorrectionTab(StageTab):
         self.panel.add_metric_widget(pc_container)
 
     def _current_fingerprint(self) -> dict:
-        return dict(
-            method=self.method_combo.currentText(), max_shift=self.max_shift_spin.value(),
-            upsample_factor=self.upsample_spin.value(), n_iter=self.n_iter_spin.value(),
-            grid_size=self.grid_size_spin.value(), patchwarp_grid=self.patchwarp_grid_spin.value(),
-            overlap_frac=self.overlap_frac_spin.value(), ecc_iterations=self.ecc_iterations_spin.value(),
-            pyramid_levels=self.pyramid_levels_spin.value(), n_components=self.pc_count_spin.value(),
+        """Only the fields the *selected* method actually uses -- e.g.
+        Rigid never touches patchwarp_grid/ecc_iterations/pyramid_levels,
+        so recording them (alongside every other method's own unused
+        fields) would misrepresent what this commit actually ran with,
+        both in a saved session and in the "Generate Report" PDF. Mirrors
+        _method_and_kwargs's own per-method branching, kept separate
+        from it since that one also needs init_batch/max_dev (derived,
+        not user-set) and algorithm-facing key names (rigid_max_shift)
+        rather than these widget-facing ones."""
+        method_text = self.method_combo.currentText()
+        params = dict(
+            method=method_text, max_shift=self.max_shift_spin.value(), n_iter=self.n_iter_spin.value(),
+            n_components=self.pc_count_spin.value(),
         )
+        if method_text.startswith("Rigid"):
+            params["upsample_factor"] = self.upsample_spin.value()
+        elif method_text.startswith("Patch-based"):
+            params["upsample_factor"] = self.upsample_spin.value()
+            params["grid_size"] = self.grid_size_spin.value()
+        else:  # PatchWarp
+            params["patchwarp_grid"] = self.patchwarp_grid_spin.value()
+            params["overlap_frac"] = self.overlap_frac_spin.value()
+            params["ecc_iterations"] = self.ecc_iterations_spin.value()
+            params["pyramid_levels"] = self.pyramid_levels_spin.value()
+        return params
 
     def restore_params(self, params: dict) -> None:
         if "method" in params:

@@ -89,10 +89,38 @@ QSlider::handle:horizontal {{
     border: 1px solid {ACCENT};
     border-radius: 7px;
 }}
+QCheckBox {{
+    spacing: 6px;
+}}
+QCheckBox::indicator {{
+    width: 14px;
+    height: 14px;
+    border: 1px solid {ACCENT};
+    border-radius: 2px;
+    background-color: {PANEL_BACKGROUND};
+}}
+QCheckBox::indicator:checked {{
+    background-color: {ACCENT};
+}}
+QCheckBox::indicator:disabled {{
+    border-color: {DISABLED};
+}}
 """
 
 
 _base_font_point_size: int | None = None  # captured once in apply_dark_theme -- see set_font_size_scale
+
+
+def add_legend(plot: pg.PlotWidget, **kwargs) -> pg.LegendItem:
+    """plot.addLegend() with this theme's own colors -- pyqtgraph's own
+    legend defaults (a near-black, low-contrast box) are easy to miss
+    against this app's black background otherwise. Every plot with more
+    than one named line should call this instead of addLegend() directly
+    (see qc_panel.py, motion_correction_tab.py, roi_review_panel.py,
+    normalization_tab.py)."""
+    return plot.addLegend(
+        labelTextColor=ACCENT, brush=pg.mkBrush(PANEL_BACKGROUND), pen=pg.mkPen(ACCENT), **kwargs
+    )
 
 
 def apply_dark_theme(app: QApplication) -> None:

@@ -264,16 +264,32 @@ class DenoisingTab(StageTab):
         self._location_markers.clear()
 
     def _current_fingerprint(self) -> dict:
-        return dict(
-            algorithm=self.method_combo.currentText(), wavelet=self.wavelet_combo.currentText(),
-            level=self.level_spin.value(), threshold_method=self.threshold_combo.currentText(),
-            spatial_sigma=self.gaussian_spatial_spin.value(), temporal_sigma=self.gaussian_temporal_spin.value(),
-            space_window=self.median_space_spin.value(), time_window=self.median_time_spin.value(),
-            pca_n_components=self.pca_n_components_spin.value(), pca_block_size=self.pca_block_size_spin.value(),
-            pca_block_frames=self.pca_block_frames_spin.value(),
-            pca_spatial_overlap=self.pca_spatial_overlap_spin.value(),
-            pca_temporal_overlap=self.pca_temporal_overlap_spin.value(),
-        )
+        """Only the fields the *selected* algorithm actually uses -- e.g.
+        Gaussian never touches wavelet/level/pca_block_size/etc., so
+        recording every algorithm's own unused fields alongside it would
+        misrepresent what this commit actually ran with, both in a saved
+        session and in the "Generate Report" PDF. Shared by both the 2D
+        and volumetric paths (only gaussian/median are selectable when
+        volumetric, so this same branching already covers that case)."""
+        algorithm = _ALGORITHM_KEYS[self.method_combo.currentText()]
+        params = dict(algorithm=self.method_combo.currentText())
+        if algorithm in ("wavelet_time", "wavelet_space"):
+            params["wavelet"] = self.wavelet_combo.currentText()
+            params["level"] = self.level_spin.value()
+            params["threshold_method"] = self.threshold_combo.currentText()
+        elif algorithm == "gaussian":
+            params["spatial_sigma"] = self.gaussian_spatial_spin.value()
+            params["temporal_sigma"] = self.gaussian_temporal_spin.value()
+        elif algorithm == "median":
+            params["space_window"] = self.median_space_spin.value()
+            params["time_window"] = self.median_time_spin.value()
+        else:  # pca
+            params["pca_n_components"] = self.pca_n_components_spin.value()
+            params["pca_block_size"] = self.pca_block_size_spin.value()
+            params["pca_block_frames"] = self.pca_block_frames_spin.value()
+            params["pca_spatial_overlap"] = self.pca_spatial_overlap_spin.value()
+            params["pca_temporal_overlap"] = self.pca_temporal_overlap_spin.value()
+        return params
 
     def restore_params(self, params: dict) -> None:
         if "algorithm" in params:

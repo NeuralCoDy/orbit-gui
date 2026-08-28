@@ -137,6 +137,51 @@ def test_non_memmap_movie_commit_is_unaffected_direct_promotion(tmp_path):
     assert state.active_data().shape == movie.shape
 
 
+def test_current_fingerprint_only_includes_rigid_relevant_params():
+    state = AppState()
+    tab = MotionCorrectionTab(state)
+    tab.method_combo.setCurrentText("Rigid")
+
+    params = tab._current_fingerprint()
+
+    assert set(params) == {"method", "max_shift", "n_iter", "n_components", "upsample_factor"}
+
+
+def test_current_fingerprint_only_includes_patch_based_relevant_params():
+    state = AppState()
+    tab = MotionCorrectionTab(state)
+    tab.method_combo.setCurrentText("Patch-based (non-rigid)")
+
+    params = tab._current_fingerprint()
+
+    assert set(params) == {"method", "max_shift", "n_iter", "n_components", "upsample_factor", "grid_size"}
+
+
+def test_current_fingerprint_only_includes_patchwarp_relevant_params():
+    state = AppState()
+    tab = MotionCorrectionTab(state)
+    tab.method_combo.setCurrentText("PatchWarp (piecewise-affine)")
+
+    params = tab._current_fingerprint()
+
+    assert set(params) == {
+        "method", "max_shift", "n_iter", "n_components",
+        "patchwarp_grid", "overlap_frac", "ecc_iterations", "pyramid_levels",
+    }
+
+
+def test_current_fingerprint_switching_methods_drops_the_other_methods_fields():
+    state = AppState()
+    tab = MotionCorrectionTab(state)
+    tab.method_combo.setCurrentText("PatchWarp (piecewise-affine)")
+    assert "patchwarp_grid" in tab._current_fingerprint()
+
+    tab.method_combo.setCurrentText("Rigid")
+
+    assert "patchwarp_grid" not in tab._current_fingerprint()
+    assert "grid_size" not in tab._current_fingerprint()
+
+
 # -- Volumetric (state.volumetric) path ---------------------------------
 
 

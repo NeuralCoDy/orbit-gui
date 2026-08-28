@@ -1,6 +1,7 @@
 import pytest
 
 pytest.importorskip("PySide6")
+pg = pytest.importorskip("pyqtgraph")
 
 from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
 
@@ -55,3 +56,23 @@ def test_set_font_size_scale_updates_already_constructed_widgets(qapp):
 
     assert label.font().pointSize() == base * 2
     theme.set_font_size_scale(qapp, 1.0)  # reset for other tests
+
+
+def test_apply_dark_theme_styles_checkbox_indicators_as_a_visible_blue_square():
+    # Regression guard: QCheckBox had no stylesheet rules at all, so its
+    # indicator box had no defined colors -- easy to miss against the
+    # black background.
+    assert "QCheckBox" in theme._STYLESHEET
+    assert "indicator" in theme._STYLESHEET
+    assert theme.ACCENT in theme._STYLESHEET
+
+
+def test_add_legend_uses_this_theme_s_colors_not_pyqtgraph_s_own_defaults(qapp):
+    # Regression guard: pyqtgraph's own default legend box/text colors
+    # have little contrast against this app's black background.
+    plot = pg.PlotWidget()
+    legend = theme.add_legend(plot)
+
+    assert legend.opts["labelTextColor"] == pg.mkColor(theme.ACCENT)
+    assert legend.opts["pen"] == pg.mkPen(theme.ACCENT)
+    assert legend.opts["brush"] == pg.mkBrush(theme.PANEL_BACKGROUND)

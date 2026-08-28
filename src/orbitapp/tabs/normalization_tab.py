@@ -60,8 +60,12 @@ def _plot_histogram(plot: pg.PlotWidget, hist: dict, color: str) -> None:
     edges = hist["edges"]
     centers = (edges[:-1] + edges[1:]) / 2
     plot.addItem(pg.BarGraphItem(x=centers, height=hist["counts"], width=(edges[1] - edges[0]) * 0.9, brush=color))
+    legend = plot.plotItem.legend  # from QCPlotGrid's own add_legend=True default -- see qc_panel.py
     for stat, style in _STAT_LINE_STYLES.items():
-        plot.addItem(pg.InfiniteLine(pos=hist[stat], angle=90, pen=pg.mkPen(color, style=style, width=1.5)))
+        line = pg.InfiniteLine(pos=hist[stat], angle=90, pen=pg.mkPen(color, style=style, width=1.5))
+        plot.addItem(line)
+        if legend is not None:
+            legend.addItem(line, stat)
 
 
 def _plot_histograms(plots: list[pg.PlotWidget], sample: dict) -> None:
@@ -119,7 +123,7 @@ class NormalizationTab(StageTab):
         self.hist_grid = QCPlotGrid(
             "Example signal pixels", "Example noise pixels",
             plots_per_sample=2, sub_labels=["Before", "After"],
-            xlabel="pixel value", ylabel="count", add_legend=False,
+            xlabel="pixel value", ylabel="count",
         )
         # Every "Before" plot shares one x-axis, every "After" plot shares
         # another -- directly comparable within a column (before/after can
@@ -136,11 +140,21 @@ class NormalizationTab(StageTab):
         self._location_markers.clear()
 
     def _current_fingerprint(self) -> dict:
-        return dict(
-            center=self.center_check.isChecked(), center_baseline=self.center_baseline_combo.currentText(),
-            pixel_center=self.pixel_center_check.isChecked(), normalize=self.normalize_check.isChecked(),
-            norm_baseline=self.norm_baseline_combo.currentText(), pixel_norm=self.pixel_norm_check.isChecked(),
-        )
+        """center_baseline/pixel_center only matter when center is on
+        (same for norm_baseline/pixel_norm and normalize) -- recording
+        them while that toggle is off would misrepresent what this
+        commit actually ran with, both in a saved session and in the
+        "Generate Report" PDF."""
+        center = self.center_check.isChecked()
+        normalize = self.normalize_check.isChecked()
+        params = dict(center=center, normalize=normalize)
+        if center:
+            params["center_baseline"] = self.center_baseline_combo.currentText()
+            params["pixel_center"] = self.pixel_center_check.isChecked()
+        if normalize:
+            params["norm_baseline"] = self.norm_baseline_combo.currentText()
+            params["pixel_norm"] = self.pixel_norm_check.isChecked()
+        return params
 
     def restore_params(self, params: dict) -> None:
         if "center" in params:

@@ -32,6 +32,43 @@ def _memmapped_movie(tmp_path, height=12, width=12, n_frames=47, seed=0):
     return path, load_movie(path, mmap=True)
 
 
+@pytest.mark.parametrize(
+    "method_label, expected_extra_keys",
+    [
+        ("Wavelet - Temporal (per pixel)", {"wavelet", "level", "threshold_method"}),
+        ("Wavelet - Spatial (per frame)", {"wavelet", "level", "threshold_method"}),
+        ("Gaussian Filter", {"spatial_sigma", "temporal_sigma"}),
+        ("Median Filter", {"space_window", "time_window"}),
+        ("PCA Denoising", {
+            "pca_n_components", "pca_block_size", "pca_block_frames",
+            "pca_spatial_overlap", "pca_temporal_overlap",
+        }),
+    ],
+)
+def test_current_fingerprint_only_includes_the_selected_algorithms_params(method_label, expected_extra_keys):
+    state = AppState()
+    tab = DenoisingTab(state)
+    tab.method_combo.setCurrentText(method_label)
+
+    params = tab._current_fingerprint()
+
+    assert set(params) == {"algorithm"} | expected_extra_keys
+
+
+def test_current_fingerprint_switching_algorithms_drops_the_other_algorithms_fields():
+    state = AppState()
+    tab = DenoisingTab(state)
+    tab.method_combo.setCurrentText("PCA Denoising")
+    assert "pca_n_components" in tab._current_fingerprint()
+
+    tab.method_combo.setCurrentText("Gaussian Filter")
+
+    params = tab._current_fingerprint()
+    assert "pca_n_components" not in params
+    assert "wavelet" not in params
+    assert set(params) == {"algorithm", "spatial_sigma", "temporal_sigma"}
+
+
 def test_gaussian_commit_of_memmap_movie_matches_whole_movie_result_exactly(tmp_path):
     path, movie = _memmapped_movie(tmp_path)
     state = AppState()

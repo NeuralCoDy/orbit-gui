@@ -12,6 +12,8 @@ from typing import Callable
 import pyqtgraph as pg
 from PySide6.QtWidgets import QGridLayout, QLabel, QWidget
 
+from ..theme import add_legend as style_legend
+
 
 def add_location_markers(image_view: pg.ImageView) -> pg.ScatterPlotItem:
     """Adds (and returns) a red-X scatter overlay to an ImageView --
@@ -70,7 +72,7 @@ class QCPlotGrid(QWidget):
         for _ in range(count):
             plot = pg.PlotWidget()
             if add_legend:
-                plot.addLegend()
+                style_legend(plot)
             if xlabel:
                 plot.setLabel("bottom", xlabel)
             if ylabel:

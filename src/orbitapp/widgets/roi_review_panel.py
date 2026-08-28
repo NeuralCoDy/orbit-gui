@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 from orbit.neuropil import neuropil_ring_mask
 
 from ..state import ROI
+from ..theme import add_legend
 from .image_coords import scene_pos_to_pixel
 from .roi_overlay import render_roi_overlay
 
@@ -145,7 +146,7 @@ class ROIReviewPanel(QWidget):
         table_col.addWidget(self.diff_plot, stretch=1)
 
         self.trace_plot = pg.PlotWidget()
-        self.trace_plot.addLegend()
+        add_legend(self.trace_plot)
         self.trace_plot.setLabel("bottom", "frame")
         self.trace_plot.setLabel("left", "intensity")
         table_col.addWidget(self.trace_plot, stretch=1)
