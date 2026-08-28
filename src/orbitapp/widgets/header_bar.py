@@ -14,10 +14,11 @@ the same vertical level.
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from ..assets import LOGO_PATH, load_logo
-from ..theme import ACCENT, BACKGROUND, set_font_size_delta
+from ..theme import ACCENT, BACKGROUND, set_font_size_scale
 from .options_dialog import OptionsDialog
 
 _LOGO_HEIGHT_PX = 60
@@ -86,6 +87,7 @@ class HeaderBar(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self._font_scale = 1.0  # 1.0 == the app's base text size -- see _on_font_scale_changed
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 4, 8, 4)
@@ -114,12 +116,9 @@ class HeaderBar(QWidget):
         top_row.addLayout(left_col)
         top_row.addStretch()
 
-        title_label = QLabel("ORBIT GUI")
-        title_font = title_label.font()
-        title_font.setBold(True)
-        title_font.setPointSize(title_font.pointSize() + 2)
-        title_label.setFont(title_font)
-        top_row.addWidget(title_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.title_label = QLabel("ORBIT GUI")
+        self._style_title_label()
+        top_row.addWidget(self.title_label, 0, Qt.AlignmentFlag.AlignVCenter)
         outer.addLayout(top_row)
 
         pipeline_row = QHBoxLayout()
@@ -144,15 +143,36 @@ class HeaderBar(QWidget):
             logo_label.setPixmap(load_logo(_LOGO_HEIGHT_PX))
         return logo_label
 
+    def _style_title_label(self) -> None:
+        """(Re-)derives the title's font from the app's current default
+        -- called both at construction and whenever the text-size slider
+        changes, since a widget's own explicit setFont() call (needed
+        here for the permanent bold/+2 bump) stops it from automatically
+        following later QApplication.setFont() changes."""
+        app = QApplication.instance()
+        base_font = app.font() if app is not None else self.title_label.font()
+        title_font = QFont(base_font)
+        title_font.setBold(True)
+        title_font.setPointSize(title_font.pointSize() + 2)
+        self.title_label.setFont(title_font)
+
     def _on_options_clicked(self) -> None:
-        dialog = OptionsDialog(self)
-        dialog.font_size_spin.valueChanged.connect(self._on_font_size_changed)
+        dialog = OptionsDialog(self, current_scale=self._font_scale)
+        dialog.font_scale_changed.connect(self._on_font_scale_changed)
         dialog.exec()
 
-    def _on_font_size_changed(self, delta: int) -> None:
+    def _on_font_scale_changed(self, scale: float) -> None:
+        self._font_scale = scale
         app = QApplication.instance()
-        if app is not None:
-            set_font_size_delta(app, delta)
+        if app is None:
+            return
+        set_font_size_scale(app, scale)
+        # The app-wide font change above doesn't reach widgets with their
+        # own explicit font (title, pipeline-diagram arrows) -- refresh
+        # those specifically so ALL text scales, not just the majority
+        # that inherits the app default automatically.
+        self._style_title_label()
+        self.pipeline_diagram.set_steps(self.pipeline_diagram.step_labels())
 
     def set_data_info(self, summary: str | None) -> None:
         self.data_label.setText(summary or "No data loaded.")

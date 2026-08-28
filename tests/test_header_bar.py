@@ -50,21 +50,58 @@ def test_options_button_opens_a_dialog_with_a_font_size_control(monkeypatch):
     opened = []
     monkeypatch.setattr(
         "orbitapp.widgets.header_bar.OptionsDialog.exec",
-        lambda self: opened.append(self.font_size_spin.value()),
+        lambda self: opened.append(self.font_size_slider.value()),
     )
 
     header.options_btn.click()
 
-    assert opened == [0]
+    assert opened == [100]  # the low end of the slider == the current default (1x)
 
 
-def test_changing_font_size_updates_the_app_font_via_theme(monkeypatch):
+def test_options_dialog_reopens_at_the_last_scale_the_user_set(monkeypatch):
+    header = HeaderBar()
+    header._font_scale = 1.4
+
+    opened = []
+    monkeypatch.setattr(
+        "orbitapp.widgets.header_bar.OptionsDialog.exec",
+        lambda self: opened.append(self.font_size_slider.value()),
+    )
+
+    header.options_btn.click()
+
+    assert opened == [140]
+
+
+def test_changing_font_scale_updates_the_app_font_via_theme(monkeypatch):
     calls = []
     monkeypatch.setattr(
-        "orbitapp.widgets.header_bar.set_font_size_delta", lambda app, delta: calls.append(delta)
+        "orbitapp.widgets.header_bar.set_font_size_scale", lambda app, scale: calls.append(scale)
     )
 
     header = HeaderBar()
-    header._on_font_size_changed(6)
+    header._on_font_scale_changed(1.6)
 
-    assert calls == [6]
+    assert calls == [1.6]
+    assert header._font_scale == 1.6
+
+
+def test_changing_font_scale_refreshes_the_title_and_pipeline_arrow_fonts(monkeypatch):
+    from PySide6.QtWidgets import QApplication
+
+    from orbitapp import theme
+
+    app = QApplication.instance()
+    theme.apply_dark_theme(app)
+
+    header = HeaderBar()
+    header.set_pipeline(["Load", "Rigid"])
+    before_title = header.title_label.font().pointSize()
+
+    header._on_font_scale_changed(2.0)
+
+    after_title = header.title_label.font().pointSize()
+    assert after_title > before_title
+    assert after_title == app.font().pointSize() + 2  # same fixed bump, over the new scaled base
+
+    header._on_font_scale_changed(1.0)  # reset for other tests

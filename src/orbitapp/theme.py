@@ -71,10 +71,28 @@ QMenu, QComboBox QAbstractItemView {{
     selection-background-color: {ACCENT};
     selection-color: {BACKGROUND};
 }}
+QSlider::groove:horizontal {{
+    height: 6px;
+    background-color: {PANEL_BACKGROUND};
+    border: 1px solid {ACCENT};
+    border-radius: 3px;
+}}
+QSlider::sub-page:horizontal {{
+    background-color: {ACCENT};
+    border: 1px solid {ACCENT};
+    border-radius: 3px;
+}}
+QSlider::handle:horizontal {{
+    width: 14px;
+    margin: -6px 0;
+    background-color: {ACCENT};
+    border: 1px solid {ACCENT};
+    border-radius: 7px;
+}}
 """
 
 
-_base_font_point_size: int | None = None  # captured once in apply_dark_theme -- see set_font_size_delta
+_base_font_point_size: int | None = None  # captured once in apply_dark_theme -- see set_font_size_scale
 
 
 def apply_dark_theme(app: QApplication) -> None:
@@ -89,12 +107,28 @@ def apply_dark_theme(app: QApplication) -> None:
     pg.setConfigOption("foreground", ACCENT)
 
 
-def set_font_size_delta(app: QApplication, delta: int) -> None:
-    """Sets the app-wide font size to the original base size (captured
-    once in apply_dark_theme) plus ``delta`` points -- always relative to
-    the true original, not cumulative across repeated calls, so moving
-    the Options panel's font-size control back and forth stays exact."""
+def set_font_size_scale(app: QApplication, scale: float) -> None:
+    """Sets the app-wide font size to ``scale`` times the original base
+    size (captured once in apply_dark_theme) -- always relative to the
+    true original, not cumulative across repeated calls, so moving the
+    Options panel's text-size slider back and forth stays exact.
+
+    QApplication.setFont() alone only changes the *default* font new
+    widgets pick up -- with this app's QSS stylesheet active, already-
+    constructed widgets don't reliably re-derive their own font from a
+    later app-level change (confirmed empirically: an existing QLabel's
+    font stayed put after setFont() while a freshly-created one picked up
+    the new size immediately). Explicitly re-applying to every live
+    widget makes an already-open GUI actually update, not just whatever
+    gets built after this call.
+
+    A few header elements (the title, pipeline-diagram arrows) have their
+    own explicit, deliberately-larger fonts and need their own refresh on
+    top of this -- see HeaderBar._on_font_scale_changed, which calls this
+    first and then re-derives those from the new base."""
     base = _base_font_point_size if _base_font_point_size is not None else 10
     font = app.font()
-    font.setPointSize(max(1, base + delta))
+    font.setPointSize(max(1, round(base * scale)))
     app.setFont(font)
+    for widget in app.allWidgets():
+        widget.setFont(font)
