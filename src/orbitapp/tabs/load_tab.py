@@ -35,6 +35,19 @@ from ..volumetric_io import load_volumetric_tiff_folder
 from ..widgets import BusyBar, VolumetricLoadDialog, confirm_recompute, show_movie_popout
 from ..workers import FunctionWorker, run_worker
 
+# (AppState field name, checkbox display label) -- field names must stay
+# valid Python identifiers (see AppState.modality_modifiers, which reads
+# them back via getattr), so the somatic toggles need an explicit label
+# here rather than the plain name.capitalize() every other toggle uses.
+_MODALITY_TOGGLES = (
+    ("dendrites", "Dendrites"),
+    ("axons", "Axons"),
+    ("widefield", "Widefield"),
+    ("volumetric", "Volumetric"),
+    ("somatic_1p", "1P-Somatic"),
+    ("somatic_2p", "2P-Somatic"),
+)
+
 
 class LoadTab(QWidget):
     data_loaded = Signal()
@@ -75,8 +88,8 @@ class LoadTab(QWidget):
         # modality_modifiers) -- a later, larger change will make these
         # actually affect processing.
         self._modality_checks: dict[str, QCheckBox] = {}
-        for name in ("dendrites", "axons", "widefield", "volumetric"):
-            check = QCheckBox(name.capitalize())
+        for name, label in _MODALITY_TOGGLES:
+            check = QCheckBox(label)
             check.toggled.connect(self._on_modality_toggled)
             sidebar_layout.addWidget(check)
             self._modality_checks[name] = check

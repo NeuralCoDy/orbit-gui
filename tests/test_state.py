@@ -52,6 +52,21 @@ def test_load_does_not_reset_modality_toggles():
     assert state.widefield
 
 
+def test_modality_modifiers_includes_somatic_1p_and_somatic_2p_in_fixed_order():
+    state = AppState()
+    state.somatic_2p = True
+    state.dendrites = True
+    state.somatic_1p = True
+    assert state.modality_modifiers() == ["dendrites", "somatic_1p", "somatic_2p"]
+
+
+def test_load_does_not_reset_somatic_toggles():
+    state = AppState()
+    state.somatic_1p = True
+    state.load("/some/movie.tif", np.zeros((4, 4, 5)))
+    assert state.somatic_1p
+
+
 def test_commit_updates_active_data_and_appends_pipeline_step():
     state = AppState()
     state.load("/some/movie.tif", np.zeros((4, 4, 5)))

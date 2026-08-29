@@ -30,6 +30,38 @@ def _wait_for_worker(tab, timeout_ms=10000):
         QApplication.processEvents()
 
 
+def _calcium_trace(n_frames, rng, rate=0.03, decay=0.9, amp=4.0):
+    # A smooth exponential-decay transient, not per-frame i.i.d. noise --
+    # CNMF-E's corr*PNR seeding needs actual temporal structure to read
+    # a "cell" as different from noise (unlike _synthetic_movie's plain
+    # per-frame-random bump, which CNMF's own intensity-peak seeding
+    # doesn't care about).
+    spikes = (rng.random(n_frames) < rate).astype(float) * rng.uniform(1, 2, n_frames)
+    trace = np.zeros(n_frames)
+    for t in range(1, n_frames):
+        trace[t] = decay * trace[t - 1] + spikes[t]
+    return amp * trace
+
+
+def _synthetic_1p_movie(height=40, width=40, n_frames=200, seed=0):
+    rng = np.random.default_rng(seed)
+    movie = rng.standard_normal((height, width, n_frames)).astype(np.float64) * 0.05 + 1.0
+    movie[8:13, 8:13, :] += _calcium_trace(n_frames, rng)
+    movie[28:33, 28:33, :] += _calcium_trace(n_frames, rng)
+    return np.clip(movie, 0, None)
+
+
+def _set_cnmf_e_params(tab, n_components=4):
+    tab.cnmf_e_n_components_spin.setValue(n_components)
+    tab.cnmf_e_search_radius_spin.setValue(8)
+    tab.cnmf_e_min_corr_spin.setValue(0.8)
+    tab.cnmf_e_min_pnr_spin.setValue(8.0)
+    tab.cnmf_e_ring_inner_radius_spin.setValue(6)
+    tab.cnmf_e_ring_outer_radius_spin.setValue(10)
+    tab.cnmf_e_ring_downsample_spin.setValue(2)
+    tab.cnmf_e_ring_max_fit_frames_spin.setValue(150)
+
+
 def test_on_data_loaded_computes_correlation_image_and_resets_candidates():
     state = AppState()
     state.load("movie.tif", _synthetic_movie())
@@ -48,7 +80,7 @@ def test_method_combo_only_offers_batch_algorithms():
     tab = SourceExtractionTab(state)
 
     labels = [tab.method_combo.itemText(i) for i in range(tab.method_combo.count())]
-    assert labels == ["PCA-ICA", "CNMF", "GraFT"]  # correlation click-to-add is not a Method option
+    assert labels == ["PCA-ICA", "CNMF", "CNMF-E", "GraFT"]  # correlation click-to-add is not a Method option
 
 
 def test_method_combo_switches_parameter_group_and_action_widget():
@@ -115,6 +147,139 @@ def test_cnmf_patch_rows_only_visible_for_cnmf_method_and_when_checked():
     assert not tab.params_dialog.form.isRowVisible(tab.cnmf_patch_size_spin)
     tab.method_combo.setCurrentIndex(tab.method_combo.findText("CNMF"))
     assert tab.params_dialog.form.isRowVisible(tab.cnmf_patch_size_spin)
+
+
+def test_method_combo_includes_cnmf_e():
+    state = AppState()
+    tab = SourceExtractionTab(state)
+
+    tab.method_combo.setCurrentIndex(tab.method_combo.findText("CNMF-E"))
+    assert not tab.params_dialog.form.isRowVisible(tab.cnmf_n_components_spin)
+    assert tab.params_dialog.form.isRowVisible(tab.cnmf_e_n_components_spin)
+
+
+def test_cnmf_e_patch_rows_only_visible_for_cnmf_e_method_and_when_checked():
+    state = AppState()
+    tab = SourceExtractionTab(state)
+
+    assert not tab.params_dialog.form.isRowVisible(tab.cnmf_e_patch_size_spin)
+
+    tab.method_combo.setCurrentIndex(tab.method_combo.findText("CNMF-E"))
+    assert tab.params_dialog.form.isRowVisible(tab.cnmf_e_patch_check)
+    assert not tab.params_dialog.form.isRowVisible(tab.cnmf_e_patch_size_spin)  # checkbox still unchecked
+
+    tab.cnmf_e_patch_check.setChecked(True)
+    assert tab.params_dialog.form.isRowVisible(tab.cnmf_e_patch_size_spin)
+    assert tab.params_dialog.form.isRowVisible(tab.cnmf_e_patch_overlap_spin)
+    assert tab.params_dialog.form.isRowVisible(tab.cnmf_e_components_per_patch_spin)
+
+    tab.method_combo.setCurrentIndex(tab.method_combo.findText("PCA-ICA"))
+    assert not tab.params_dialog.form.isRowVisible(tab.cnmf_e_patch_size_spin)
+    tab.method_combo.setCurrentIndex(tab.method_combo.findText("CNMF-E"))
+    assert tab.params_dialog.form.isRowVisible(tab.cnmf_e_patch_size_spin)
+
+
+def test_modality_warning_hidden_by_default():
+    state = AppState()
+    tab = SourceExtractionTab(state)
+    assert tab.modality_warning_label.isHidden()
+
+
+def test_modality_warning_for_cnmf_e_with_2p_somatic():
+    state = AppState()
+    tab = SourceExtractionTab(state)
+
+    state.somatic_2p = True
+    tab.method_combo.setCurrentText("CNMF-E")
+
+    assert not tab.modality_warning_label.isHidden()
+    assert "CNMF-E" in tab.modality_warning_label.text()
+    assert "1P" in tab.modality_warning_label.text()
+
+
+def test_modality_warning_absent_for_cnmf_e_with_1p_somatic():
+    # The correct pairing shouldn't warn.
+    state = AppState()
+    tab = SourceExtractionTab(state)
+
+    state.somatic_1p = True
+    tab.on_modality_changed()
+    tab.method_combo.setCurrentText("CNMF-E")
+
+    assert tab.modality_warning_label.isHidden()
+
+
+@pytest.mark.parametrize("method_label", ["CNMF", "PCA-ICA"])
+def test_modality_warning_for_cnmf_or_pca_ica_with_1p_somatic(method_label):
+    state = AppState()
+    tab = SourceExtractionTab(state)
+
+    state.somatic_1p = True
+    tab.on_modality_changed()  # simulates the Load tab checkbox toggle's signal chain
+    tab.method_combo.setCurrentText(method_label)
+    tab._update_modality_warning()  # setCurrentText is a no-op (and fires no signal) if already selected
+
+    assert not tab.modality_warning_label.isHidden()
+    assert method_label in tab.modality_warning_label.text()
+    assert "1P-Somatic" in tab.modality_warning_label.text()
+
+
+@pytest.mark.parametrize("method_label", ["PCA-ICA", "CNMF", "CNMF-E"])
+@pytest.mark.parametrize("modality_field", ["dendrites", "axons", "widefield"])
+def test_modality_warning_for_dendritic_axonal_widefield_with_non_graft_method(method_label, modality_field):
+    state = AppState()
+    tab = SourceExtractionTab(state)
+
+    setattr(state, modality_field, True)
+    tab.on_modality_changed()  # simulates the Load tab checkbox toggle's signal chain
+    tab.method_combo.setCurrentText(method_label)
+    tab._update_modality_warning()  # setCurrentText is a no-op (and fires no signal) if already selected
+
+    assert not tab.modality_warning_label.isHidden()
+    assert "GraFT" in tab.modality_warning_label.text()
+
+
+@pytest.mark.parametrize("modality_field", ["dendrites", "axons", "widefield"])
+def test_modality_warning_absent_for_graft_with_dendritic_axonal_widefield(modality_field):
+    state = AppState()
+    tab = SourceExtractionTab(state)
+
+    setattr(state, modality_field, True)
+    tab.on_modality_changed()
+    tab.method_combo.setCurrentText("GraFT")
+
+    assert tab.modality_warning_label.isHidden()
+
+
+def test_modality_warning_combines_multiple_applicable_messages():
+    state = AppState()
+    tab = SourceExtractionTab(state)
+
+    state.somatic_1p = True
+    state.dendrites = True
+    tab.on_modality_changed()
+    tab.method_combo.setCurrentText("CNMF")
+
+    text = tab.modality_warning_label.text()
+    assert "1P-Somatic" in text
+    assert "GraFT" in text
+
+
+def test_modality_warning_updates_live_when_load_tab_toggle_changes():
+    state = AppState()
+    tab = SourceExtractionTab(state)
+    tab.method_combo.setCurrentText("CNMF-E")
+    assert tab.modality_warning_label.isHidden()
+
+    state.somatic_2p = True
+    tab.on_modality_changed()
+
+    assert not tab.modality_warning_label.isHidden()
+
+    state.somatic_2p = False
+    tab.on_modality_changed()
+
+    assert tab.modality_warning_label.isHidden()
 
 
 def test_fov_view_panning_is_always_disabled():
@@ -474,6 +639,87 @@ def test_run_patch_cnmf_records_patch_params_on_each_roi():
         assert roi.params["n_components_per_patch"] == 2
 
 
+def test_run_cnmf_e_adds_candidates_from_both_synthetic_blobs():
+    state = AppState()
+    movie = _synthetic_1p_movie()
+    state.load("movie.tif", movie)
+    tab = SourceExtractionTab(state)
+    tab.on_data_loaded()
+    _wait_for_worker(tab)
+
+    tab.method_combo.setCurrentIndex(tab.method_combo.findText("CNMF-E"))
+    _set_cnmf_e_params(tab)
+    tab._on_run_cnmf_e_clicked()
+    _wait_for_worker(tab)
+
+    assert len(tab._candidates) > 0
+    assert all(roi.source_method == "cnmf_e" for roi in tab._candidates)
+    assert all(roi.status == "pending" for roi in tab._candidates)
+    assert all(roi.neuropil_trace is not None for roi in tab._candidates)
+    assert all(roi.spike_trace is not None for roi in tab._candidates)
+
+    centers = [np.argwhere(roi.mask).mean(axis=0) for roi in tab._candidates if roi.mask.any()]
+    near_a = any(np.hypot(*(c - (10, 10))) < 5 for c in centers)
+    near_b = any(np.hypot(*(c - (30, 30))) < 5 for c in centers)
+    assert near_a and near_b
+
+
+def test_run_patch_cnmf_e_adds_candidates_from_both_synthetic_blobs():
+    state = AppState()
+    movie = _synthetic_1p_movie()
+    state.load("movie.tif", movie)
+    tab = SourceExtractionTab(state)
+    tab.on_data_loaded()
+    _wait_for_worker(tab)
+
+    tab.method_combo.setCurrentIndex(tab.method_combo.findText("CNMF-E"))
+    _set_cnmf_e_params(tab)
+    tab.cnmf_e_patch_check.setChecked(True)
+    tab.cnmf_e_patch_size_spin.setValue(25)
+    tab.cnmf_e_patch_overlap_spin.setValue(12)
+    tab.cnmf_e_components_per_patch_spin.setValue(2)
+    tab._on_run_cnmf_e_clicked()
+    _wait_for_worker(tab)
+
+    assert len(tab._candidates) > 0
+    assert all(roi.source_method == "cnmf_e" for roi in tab._candidates)
+    assert all(roi.spike_trace is not None for roi in tab._candidates)
+
+
+def test_run_patch_cnmf_e_records_patch_params_on_each_roi():
+    state = AppState()
+    movie = _synthetic_1p_movie()
+    state.load("movie.tif", movie)
+    tab = SourceExtractionTab(state)
+    tab.on_data_loaded()
+    _wait_for_worker(tab)
+
+    tab.method_combo.setCurrentIndex(tab.method_combo.findText("CNMF-E"))
+    _set_cnmf_e_params(tab)
+    tab.cnmf_e_patch_check.setChecked(True)
+    tab.cnmf_e_patch_size_spin.setValue(25)
+    tab.cnmf_e_patch_overlap_spin.setValue(12)
+    tab.cnmf_e_components_per_patch_spin.setValue(2)
+    tab._on_run_cnmf_e_clicked()
+    _wait_for_worker(tab)
+
+    assert len(tab._candidates) > 0
+    for roi in tab._candidates:
+        assert roi.params["patch_size"] == (25, 25)
+        assert roi.params["overlap"] == 12
+        assert roi.params["n_components_per_patch"] == 2
+
+
+def test_run_cnmf_e_without_data_warns(monkeypatch):
+    monkeypatch.setattr("orbitapp.tabs.source_extraction_tab.QMessageBox.warning", lambda *a, **k: None)
+    state = AppState()
+    tab = SourceExtractionTab(state)
+
+    tab._on_run_cnmf_e_clicked()
+
+    assert tab._candidates == []
+
+
 def test_run_cnmf_without_data_warns(monkeypatch):
     monkeypatch.setattr("orbitapp.tabs.source_extraction_tab.QMessageBox.warning", lambda *a, **k: None)
     state = AppState()
@@ -814,7 +1060,8 @@ def test_on_modality_changed_restricts_method_combo_to_graft_when_volumetric():
     model = tab.method_combo.model()
     assert not model.item(0).isEnabled()  # PCA-ICA
     assert not model.item(1).isEnabled()  # CNMF
-    assert model.item(2).isEnabled()  # GraFT
+    assert not model.item(2).isEnabled()  # CNMF-E
+    assert model.item(3).isEnabled()  # GraFT
     assert not tab.auto_seed_btn.isEnabled()
 
     state.volumetric = False

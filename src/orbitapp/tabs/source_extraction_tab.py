@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
 from orbit._masks import masked_mean_trace
 from orbit._volumetric import depth_project
 from orbit.cnmf import CNMFResult, cnmf_source_extraction, patch_cnmf_source_extraction
+from orbit.cnmf_e import cnmf_e_source_extraction, patch_cnmf_e_source_extraction
 from orbit.neuropil import compute_neuropil_traces
 from orbit.projections import local_correlation_projection
 from orbit.roi_extraction_corr import find_seed_candidates, roi_from_seed
@@ -65,6 +66,7 @@ from orbit.roi_extraction_pca_ica import PCAICAResult, pca_ica_source_extraction
 
 from ..io import is_memmap, preview_slice
 from ..state import AppState, ROI
+from ..theme import WARNING
 from ..volumetric_io import preview_slice_volumetric
 from ..widgets import BusyBar, ParametersDialog, ROIReviewPanel, confirm_recompute, make_spinbox
 from ..workers import FunctionWorker, run_worker
@@ -72,11 +74,14 @@ from ..workers import FunctionWorker, run_worker
 _METHODS = (
     ("PCA-ICA", "pca_ica"),
     ("CNMF", "cnmf"),
+    ("CNMF-E", "cnmf_e"),
     ("GraFT", "graft"),
 )
 _METHOD_KEYS = dict(_METHODS)
 _METHOD_ORDER = [key for _label, key in _METHODS]
-_PIPELINE_LABELS = {"correlation": "Correlation ROIs", "pca_ica": "PCA-ICA", "cnmf": "CNMF", "graft": "GraFT"}
+_PIPELINE_LABELS = {
+    "correlation": "Correlation ROIs", "pca_ica": "PCA-ICA", "cnmf": "CNMF", "cnmf_e": "CNMF-E", "graft": "GraFT",
+}
 
 
 def _grow_seeds(movie: np.ndarray, seeds: list[tuple[int, int]], kwargs: dict) -> list[dict]:
@@ -174,6 +179,45 @@ class SourceExtractionTab(QWidget):
         self.cnmf_patch_overlap_spin = make_spinbox(0, 500, 20)
         self.cnmf_components_per_patch_spin = make_spinbox(1, 200, 10)
 
+        # CNMF-E (Zhou et al. 2018) -- for 1P/microendoscopic data: same
+        # alternating spatial/temporal update loop as CNMF above, but
+        # seeded at correlation x peak-to-noise-ratio peaks (min_corr/
+        # min_pnr) instead of plain intensity peaks, and with a per-pixel
+        # "ring model" background (ring_inner/outer_radius) instead of
+        # relying solely on a global low-rank background -- see
+        # orbit.cnmf_e's docstring. ring_downsample/ring_max_fit_frames
+        # trade the ring model's own fit speed against fidelity (see
+        # orbit.cnmf_e_background's docstring for the performance
+        # rationale) -- surfaced here since, unlike the other CNMF-E
+        # params, there's no single "obviously correct" default across
+        # every field-of-view size.
+        self.cnmf_e_n_components_spin = make_spinbox(1, 500, 30)
+        self.cnmf_e_search_radius_spin = make_spinbox(1, 200, 10, decimal=True)
+        self.cnmf_e_merge_thresh_spin = make_spinbox(0.0, 1.0, 0.8, step=0.05, decimal=True)
+        self.cnmf_e_min_corr_spin = make_spinbox(0.0, 1.0, 0.8, step=0.05, decimal=True)
+        self.cnmf_e_min_pnr_spin = make_spinbox(0.0, 100.0, 8.0, step=0.5, decimal=True)
+        self.cnmf_e_ring_inner_radius_spin = make_spinbox(1, 500, 20, decimal=True)
+        self.cnmf_e_ring_outer_radius_spin = make_spinbox(1, 500, 25, decimal=True)
+        self.cnmf_e_ring_downsample_spin = make_spinbox(1, 16, 4)
+        self.cnmf_e_ring_downsample_spin.setToolTip(
+            "How much to spatially shrink the field of view before fitting the ring background model -- "
+            "higher is much faster (grid size shrinks quadratically) but coarser. 4 is a reasonable default "
+            "at typical recording sizes."
+        )
+        self.cnmf_e_ring_max_fit_frames_spin = make_spinbox(10, 20000, 500)
+        self.cnmf_e_ring_max_fit_frames_spin.setToolTip(
+            "How many (evenly-spaced) frames to use when fitting the ring background model's weights -- "
+            "more is slower with diminishing accuracy gains past a few hundred."
+        )
+
+        self.cnmf_e_patch_check = QCheckBox("Use patch-based extraction (for large fields of view)")
+        self.cnmf_e_patch_check.toggled.connect(
+            lambda: self._update_patch_rows_visibility("cnmf_e", "cnmf_e_patch", self.cnmf_e_patch_check)
+        )
+        self.cnmf_e_patch_size_spin = make_spinbox(10, 2000, 80)
+        self.cnmf_e_patch_overlap_spin = make_spinbox(0, 500, 20)
+        self.cnmf_e_components_per_patch_spin = make_spinbox(1, 200, 10)
+
         # GraFT (Graph-Filtered Temporal dictionary learning, via the
         # pygraft-gui dependency) -- same whole-FOV/patch-based split as
         # CNMF above, same reason (patch-based is required, not just
@@ -217,6 +261,19 @@ class SourceExtractionTab(QWidget):
         self.params_dialog.add_row("patch size (px)", self.cnmf_patch_size_spin, group="cnmf_patch")
         self.params_dialog.add_row("patch overlap (px)", self.cnmf_patch_overlap_spin, group="cnmf_patch")
         self.params_dialog.add_row("components per patch", self.cnmf_components_per_patch_spin, group="cnmf_patch")
+        self.params_dialog.add_row("number of components", self.cnmf_e_n_components_spin, group="cnmf_e")
+        self.params_dialog.add_row("search radius (px)", self.cnmf_e_search_radius_spin, group="cnmf_e")
+        self.params_dialog.add_row("merge threshold", self.cnmf_e_merge_thresh_spin, group="cnmf_e")
+        self.params_dialog.add_row("min correlation (seeding)", self.cnmf_e_min_corr_spin, group="cnmf_e")
+        self.params_dialog.add_row("min peak-to-noise ratio (seeding)", self.cnmf_e_min_pnr_spin, group="cnmf_e")
+        self.params_dialog.add_row("ring model inner radius (px)", self.cnmf_e_ring_inner_radius_spin, group="cnmf_e")
+        self.params_dialog.add_row("ring model outer radius (px)", self.cnmf_e_ring_outer_radius_spin, group="cnmf_e")
+        self.params_dialog.add_row("ring model downsample factor", self.cnmf_e_ring_downsample_spin, group="cnmf_e")
+        self.params_dialog.add_row("ring model max fit frames", self.cnmf_e_ring_max_fit_frames_spin, group="cnmf_e")
+        self.params_dialog.add_row("", self.cnmf_e_patch_check, group="cnmf_e")
+        self.params_dialog.add_row("patch size (px)", self.cnmf_e_patch_size_spin, group="cnmf_e_patch")
+        self.params_dialog.add_row("patch overlap (px)", self.cnmf_e_patch_overlap_spin, group="cnmf_e_patch")
+        self.params_dialog.add_row("components per patch", self.cnmf_e_components_per_patch_spin, group="cnmf_e_patch")
         self.params_dialog.add_row("number of dictionary components", self.graft_n_dict_spin, group="graft")
         self.params_dialog.add_row("sparsity (lambda)", self.graft_lambda_spin, group="graft")
         self.params_dialog.add_row("Frobenius regularization (lamForb)", self.graft_lam_forb_spin, group="graft")
@@ -238,6 +295,7 @@ class SourceExtractionTab(QWidget):
         self.action_stack = QStackedWidget()
         self.run_pca_ica_btn = self._add_run_action("Run PCA-ICA", self._on_run_pca_ica_clicked)
         self.run_cnmf_btn = self._add_run_action("Run CNMF", self._on_run_cnmf_clicked)
+        self.run_cnmf_e_btn = self._add_run_action("Run CNMF-E", self._on_run_cnmf_e_clicked)
         self.run_graft_btn = self._add_run_action("Run GraFT", self._on_run_graft_clicked)
         controls_row.addWidget(self.action_stack)
 
@@ -250,6 +308,16 @@ class SourceExtractionTab(QWidget):
         controls_row.addWidget(self.clear_all_btn)
         controls_row.addStretch()
         layout.addLayout(controls_row)
+
+        # Non-blocking, always-current hint (not a modal dialog -- updates
+        # live as either Method or the Load tab's modality toggles change,
+        # see _update_modality_warning) about a poor method/modality
+        # pairing, e.g. CNMF-E on 2P data or CNMF/PCA-ICA on dendritic data.
+        self.modality_warning_label = QLabel()
+        self.modality_warning_label.setWordWrap(True)
+        self.modality_warning_label.setStyleSheet(f"color: {WARNING};")
+        self.modality_warning_label.setVisible(False)
+        layout.addWidget(self.modality_warning_label)
 
         layout.addLayout(self._build_correlation_rows())
 
@@ -322,10 +390,43 @@ class SourceExtractionTab(QWidget):
     def _on_method_changed(self, label: str) -> None:
         method = _METHOD_KEYS[label]
         self.params_dialog.show_only_group(method)
-        # show_only_group above always hides "cnmf_patch"/"graft_patch" -- reapply on top
+        # show_only_group above always hides "cnmf_patch"/"cnmf_e_patch"/"graft_patch" -- reapply on top
         self._update_patch_rows_visibility("cnmf", "cnmf_patch", self.cnmf_patch_check)
+        self._update_patch_rows_visibility("cnmf_e", "cnmf_e_patch", self.cnmf_e_patch_check)
         self._update_patch_rows_visibility("graft", "graft_patch", self.graft_patch_check)
         self.action_stack.setCurrentIndex(_METHOD_ORDER.index(method))
+        self._update_modality_warning()
+
+    def _update_modality_warning(self) -> None:
+        """Non-blocking hint (not every mismatch is necessarily wrong for
+        a given dataset, so this never prevents Run) about a poor
+        Method/modality pairing -- re-evaluated on every Method change
+        AND every Load tab modality-toggle change (see _on_method_changed/
+        on_modality_changed), against the Load tab's current
+        somatic_1p/somatic_2p/dendrites/axons/widefield toggles."""
+        method = _METHOD_KEYS[self.method_combo.currentText()]
+        messages = []
+
+        if self.state.somatic_2p and method == "cnmf_e":
+            messages.append("CNMF-E is designed for 1P (microendoscopic) data, but 2P-Somatic is checked.")
+        if self.state.somatic_1p and method in ("cnmf", "pca_ica"):
+            messages.append(
+                f"{self.method_combo.currentText()} is better suited to 2P data, but 1P-Somatic is checked "
+                "-- consider CNMF-E instead."
+            )
+        dendritic_or_axonal_or_widefield = [
+            name for name, on in (
+                ("Dendrites", self.state.dendrites), ("Axons", self.state.axons), ("Widefield", self.state.widefield),
+            ) if on
+        ]
+        if dendritic_or_axonal_or_widefield and method != "graft":
+            messages.append(
+                f"{', '.join(dendritic_or_axonal_or_widefield)} is checked -- GraFT is the only method here "
+                "well suited to dendritic/axonal/widefield data."
+            )
+
+        self.modality_warning_label.setText("⚠ " + "  ".join(messages))
+        self.modality_warning_label.setVisible(bool(messages))
 
     def _update_patch_rows_visibility(self, method: str, group: str, patch_check: QCheckBox) -> None:
         """Shows ``group``'s patch-only param rows only when both
@@ -356,6 +457,7 @@ class SourceExtractionTab(QWidget):
         if volumetric and _METHOD_KEYS[self.method_combo.currentText()] != "graft":
             self.method_combo.setCurrentText("GraFT")
         self.auto_seed_btn.setEnabled(not volumetric)
+        self._update_modality_warning()
 
     def on_data_loaded(self) -> None:
         movie = self.state.active_data()
@@ -596,6 +698,56 @@ class SourceExtractionTab(QWidget):
     def _on_cnmf_finished(self, result: CNMFResult) -> None:
         rois = self._make_rois(
             result.masks, result.traces, "cnmf", spike_traces=result.spike_traces, params=self._pending_batch_params
+        )
+        self._add_candidates(rois)
+
+    def _on_run_cnmf_e_clicked(self) -> None:
+        movie = self.state.active_data()
+        memmap_input = movie is not None and is_memmap(movie)
+        if self._refuse_if_memmap_without_patch(memmap_input, self.cnmf_e_patch_check, "CNMF-E"):
+            return
+        # Same reasoning as _on_run_cnmf_clicked: capped to the 5000-frame
+        # preview for a memmap movie either way; _commit() re-extracts
+        # every accepted ROI's trace from the full movie afterward.
+        worker_movie = preview_slice(movie) if memmap_input else None
+
+        # search_radius/min_corr/min_pnr/ring_* are common to both modes
+        # (whole-FOV takes them directly; patch mode forwards them as
+        # **cnmf_e_kwargs to each patch's own cnmf_e_source_extraction
+        # call) -- only n_components vs. n_components_per_patch differs.
+        ring_params = dict(
+            search_radius=self.cnmf_e_search_radius_spin.value(), min_corr=self.cnmf_e_min_corr_spin.value(),
+            min_pnr=self.cnmf_e_min_pnr_spin.value(), ring_inner_radius=self.cnmf_e_ring_inner_radius_spin.value(),
+            ring_outer_radius=self.cnmf_e_ring_outer_radius_spin.value(),
+            ring_downsample=self.cnmf_e_ring_downsample_spin.value(),
+            ring_max_fit_frames=self.cnmf_e_ring_max_fit_frames_spin.value(),
+        )
+
+        if self.cnmf_e_patch_check.isChecked():
+            patch = self.cnmf_e_patch_size_spin.value()
+            self._pending_batch_params = dict(
+                patch_size=(patch, patch), overlap=self.cnmf_e_patch_overlap_spin.value(),
+                n_components_per_patch=self.cnmf_e_components_per_patch_spin.value(),
+                merge_thresh=self.cnmf_e_merge_thresh_spin.value(), **ring_params,
+            )
+            self._run_batch_method(
+                "Running patch-based CNMF-E (this can take a while)...", patch_cnmf_e_source_extraction,
+                self._on_cnmf_e_finished, worker_movie=worker_movie, **self._pending_batch_params,
+            )
+            return
+
+        self._pending_batch_params = dict(
+            n_components=self.cnmf_e_n_components_spin.value(), merge_thresh=self.cnmf_e_merge_thresh_spin.value(),
+            **ring_params,
+        )
+        self._run_batch_method(
+            "Running CNMF-E (this can take a while)...", cnmf_e_source_extraction, self._on_cnmf_e_finished,
+            worker_movie=worker_movie, **self._pending_batch_params,
+        )
+
+    def _on_cnmf_e_finished(self, result: CNMFResult) -> None:
+        rois = self._make_rois(
+            result.masks, result.traces, "cnmf_e", spike_traces=result.spike_traces, params=self._pending_batch_params
         )
         self._add_candidates(rois)
 

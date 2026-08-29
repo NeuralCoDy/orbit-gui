@@ -179,6 +179,19 @@ _SOURCE_EXTRACTION_EQUATIONS = {
         "\n"
         r"\[ c_t = \sum_{i=1}^{p} g_i\, c_{t-i} + s_t,\qquad s_t \geq 0. \]"
     ),
+    "cnmf_e": (
+        r"CNMF-E (Zhou et al., 2018), for one-photon/microendoscopic data, extends CNMF with two "
+        r"changes suited to strong, spatially-varying out-of-focus background fluorescence: "
+        r"components are seeded at peaks of correlation image $\times$ peak-to-noise ratio (PNR) "
+        r"rather than plain intensity, and the background is modeled per-pixel from a local ring of "
+        r"neighboring pixels rather than one global low-rank term,"
+        "\n"
+        r"\[ b_i(t) = \sum_{j \in \text{ring}(i)} w_{ij}\, \big(Y_j(t) - (AC)_j(t)\big), \]"
+        "\n"
+        r"with ring weights $w_{ij}$ fit once by per-pixel least-squares regression against the "
+        r"neuron-subtracted residual. Spatial/temporal updates and OASIS deconvolution are otherwise "
+        r"identical to plain CNMF above."
+    ),
     "graft": (
         r"GraFT (Graph-Filtered Temporal dictionary learning) jointly learns a spatial dictionary $S$ "
         r"and temporal dictionary $D$ by solving"
@@ -222,10 +235,13 @@ def _motion_correction_key(label: str) -> str:
 
 def _source_extraction_key(label: str) -> str | None:
     lowered = label.lower()
+    normalized = lowered.replace(" ", "").replace("-", "").replace("_", "")
     if "correlation" in lowered:
         return "correlation"
-    if "pca-ica" in lowered or "pca ica" in lowered:
+    if "pcaica" in normalized:
         return "pca_ica"
+    if "cnmfe" in normalized:  # checked before "cnmf" -- "cnmf" is itself a substring of "cnmf-e"/"cnmf_e"
+        return "cnmf_e"
     if "cnmf" in lowered:
         return "cnmf"
     if "graft" in lowered:

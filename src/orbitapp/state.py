@@ -61,12 +61,14 @@ class AppState:
     axons: bool = False
     widefield: bool = False
     volumetric: bool = False
+    somatic_1p: bool = False
+    somatic_2p: bool = False
 
     def modality_modifiers(self) -> list[str]:
         """Which of the Load tab's data-modality toggles are on, in a
         fixed display order -- used to label the header's pipeline
         diagram, e.g. "Current pipeline (widefield):"."""
-        names = ("dendrites", "axons", "widefield", "volumetric")
+        names = ("dendrites", "axons", "widefield", "volumetric", "somatic_1p", "somatic_2p")
         return [name for name in names if getattr(self, name)]
 
     def active_data(self) -> np.ndarray | None:

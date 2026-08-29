@@ -7,6 +7,7 @@ function, called by the GUI rather than implemented inside it.
 """
 
 from .cnmf import CNMFResult, cnmf_source_extraction
+from .cnmf_e import cnmf_e_source_extraction
 from .denoising import (
     denoise_gaussian,
     denoise_median,
@@ -71,4 +72,5 @@ __all__ = [
     "pca_ica_source_extraction",
     "CNMFResult",
     "cnmf_source_extraction",
+    "cnmf_e_source_extraction",
 ]

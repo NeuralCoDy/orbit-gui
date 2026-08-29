@@ -166,6 +166,38 @@ def test_untoggling_a_modality_removes_it():
     assert state.modality_modifiers() == []
 
 
+def test_somatic_checkboxes_present_and_off_by_default():
+    state = AppState()
+    tab = LoadTab(state)
+    assert "somatic_1p" in tab._modality_checks
+    assert "somatic_2p" in tab._modality_checks
+    assert not tab._modality_checks["somatic_1p"].isChecked()
+    assert not tab._modality_checks["somatic_2p"].isChecked()
+
+
+def test_somatic_1p_and_2p_checkbox_labels_are_1p_somatic_and_2p_somatic():
+    state = AppState()
+    tab = LoadTab(state)
+    assert tab._modality_checks["somatic_1p"].text() == "1P-Somatic"
+    assert tab._modality_checks["somatic_2p"].text() == "2P-Somatic"
+    # Existing labels stay byte-identical after the checkbox-loop refactor.
+    assert tab._modality_checks["dendrites"].text() == "Dendrites"
+
+
+def test_somatic_toggle_updates_state_and_emits_modality_changed():
+    state = AppState()
+    tab = LoadTab(state)
+
+    emitted = []
+    tab.modality_changed.connect(lambda: emitted.append(1))
+
+    tab._modality_checks["somatic_1p"].setChecked(True)
+
+    assert state.somatic_1p
+    assert state.modality_modifiers() == ["somatic_1p"]
+    assert len(emitted) == 1
+
+
 def test_loading_a_different_path_does_not_prompt(tmp_path, monkeypatch):
     state = AppState()
     old_path = tmp_path / "old.tif"

@@ -5,6 +5,7 @@ import pytest
 
 from orbitapp.report import (
     _latex_escape,
+    _source_extraction_key,
     generate_report,
     render_report,
 )
@@ -90,6 +91,29 @@ def test_generate_report_source_extraction_reports_aggregate_roi_counts():
     tex = generate_report(state, None)
     assert "cnmf" in tex
     assert "2" in tex  # two committed ROIs
+
+
+def test_source_extraction_key_prefers_cnmf_e_over_cnmf_substring():
+    # Regression guard: "cnmf" is itself a substring of "cnmf-e"/"cnmf_e"
+    # -- the dispatch must not misclassify CNMF-E's own equation as
+    # plain CNMF's just because of that substring relationship (same
+    # trap _motion_correction_key already guards against for
+    # "patch"/"patchwarp").
+    assert _source_extraction_key("CNMF-E") == "cnmf_e"
+    assert _source_extraction_key("CNMF") == "cnmf"
+
+
+def test_generate_report_includes_cnmf_e_equation():
+    state = _full_state()
+    state.steps.append(
+        PipelineStep(
+            stage="source_extraction", label="CNMF-E",
+            params={"n_components": 20, "ring_inner_radius": 20.0, "ring_outer_radius": 25.0},
+        )
+    )
+    tex = generate_report(state, None)
+    assert "ring" in tex.lower()
+    assert "peak-to-noise" in tex.lower()
 
 
 def test_generate_report_with_only_load_step_has_no_other_sections():

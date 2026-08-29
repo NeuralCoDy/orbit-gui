@@ -70,6 +70,25 @@ def test_whole_fov_cnmf_is_refused_for_a_memmap_movie_without_patch_based_checke
     assert tab._candidates == []
 
 
+def test_whole_fov_cnmf_e_is_refused_for_a_memmap_movie_without_patch_based_checked(tmp_path, monkeypatch):
+    warned = []
+    monkeypatch.setattr(
+        "orbitapp.tabs.source_extraction_tab.QMessageBox.warning", lambda *a, **k: warned.append(1)
+    )
+    path, movie = _memmapped_movie(tmp_path)
+    state = AppState()
+    state.load(str(path), movie)
+    tab = SourceExtractionTab(state)
+    tab.on_data_loaded()
+    _wait(tab)
+
+    assert not tab.cnmf_e_patch_check.isChecked()
+    tab._on_run_cnmf_e_clicked()
+
+    assert warned == [1]
+    assert tab._candidates == []
+
+
 def test_patch_based_cnmf_runs_on_a_memmap_movie_and_commit_reextracts_traces_from_the_full_movie(tmp_path):
     path, movie = _memmapped_movie(tmp_path)
     state = AppState()

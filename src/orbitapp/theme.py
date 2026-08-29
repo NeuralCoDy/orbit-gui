@@ -14,6 +14,7 @@ BACKGROUND = "#000000"
 PANEL_BACKGROUND = "#0d0d0d"
 ACCENT = "#61afef"  # the light blue used for highlights/links in this chat's terminal UI
 DISABLED = "#3a5a70"
+WARNING = "#e5a94e"  # amber -- non-blocking inline warnings (e.g. a poorly-matched method/modality pairing)
 
 _STYLESHEET = f"""
 QWidget {{
