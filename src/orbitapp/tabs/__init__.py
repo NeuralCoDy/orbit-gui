@@ -1,4 +1,5 @@
 from .denoising_tab import DenoisingTab
+from .detrending_tab import DetrendingTab
 from .load_tab import LoadTab
 from .mask_tab import MaskTab
 from .motion_correction_tab import MotionCorrectionTab
@@ -14,6 +15,7 @@ __all__ = [
     "MotionCorrectionTab",
     "MaskTab",
     "DenoisingTab",
+    "DetrendingTab",
     "NormalizationTab",
     "SourceExtractionTab",
     "ROIValidationTab",

@@ -24,20 +24,27 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
+from .. import theme
 from ..assets import LOGO_PATH, load_logo
-from ..theme import ACCENT, BACKGROUND, set_font_size_scale
+from ..theme import set_accent_color, set_font_size_scale
 from .options_dialog import OptionsDialog
 
-# Same colors as every other bordered widget in the app's dark theme
-# (theme.py's own QPushButton/QTabBar/QMainWindow rules all use
-# "border: 1px solid {ACCENT}" against a black background) -- not
-# palette(...) roles, since this app's dark theme is a QSS stylesheet
-# override rather than an actual QPalette change, so palette(...)
-# would resolve to the default (unthemed) system colors instead.
-_BOX_STYLE = (
-    f"QLabel {{ border: 1px solid {ACCENT}; border-radius: 4px; "
-    f"padding: 2px 10px; background-color: {BACKGROUND}; }}"
-)
+
+def _box_style() -> str:
+    """Rebuilt (rather than a module-level constant) so it always
+    reflects the CURRENT theme.ACCENT -- a plain ``from ..theme import
+    ACCENT`` would instead bind the value once at import time, so a
+    later theme.set_accent_color() call wouldn't reach it. Same colors
+    as every other bordered widget in the app's dark theme (theme.py's
+    own QPushButton/QTabBar/QMainWindow rules all use "border: 1px
+    solid {ACCENT}" against a black background) -- not palette(...)
+    roles, since this app's dark theme is a QSS stylesheet override
+    rather than an actual QPalette change, so palette(...) would
+    resolve to the default (unthemed) system colors instead."""
+    return (
+        f"QLabel {{ border: 1px solid {theme.ACCENT}; border-radius: 4px; "
+        f"padding: 2px 10px; background-color: {theme.BACKGROUND}; }}"
+    )
 
 
 class _PipelineDiagram(QWidget):
@@ -63,7 +70,7 @@ class _PipelineDiagram(QWidget):
             if i > 0:
                 self._row.addWidget(self._make_arrow())
             box = QLabel(step)
-            box.setStyleSheet(_BOX_STYLE)
+            box.setStyleSheet(_box_style())
             self._row.addWidget(box)
             self._boxes.append(box)
         self._row.addStretch()
@@ -93,6 +100,7 @@ class HeaderBar(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._font_scale = 1.0  # 1.0 == the app's base text size -- see _on_font_scale_changed
+        self._accent_color = theme.ACCENT  # see _on_accent_color_changed
 
         # Two columns: all text on the left (same two-row arrangement as
         # before, with its own vertical padding), gear+logo in a row of
@@ -203,8 +211,9 @@ class HeaderBar(QWidget):
         self.title_label.setFont(title_font)
 
     def _on_options_clicked(self) -> None:
-        dialog = OptionsDialog(self, current_scale=self._font_scale)
+        dialog = OptionsDialog(self, current_scale=self._font_scale, current_color=self._accent_color)
         dialog.font_scale_changed.connect(self._on_font_scale_changed)
+        dialog.accent_color_changed.connect(self._on_accent_color_changed)
         dialog.exec()
 
     def _on_font_scale_changed(self, scale: float) -> None:
@@ -222,6 +231,17 @@ class HeaderBar(QWidget):
         # The text column just grew/shrank -- resize the logo/gear to match
         # right away rather than waiting for the next resizeEvent.
         self._refresh_logo_pixmap()
+
+    def _on_accent_color_changed(self, color: str) -> None:
+        self._accent_color = color
+        app = QApplication.instance()
+        if app is None:
+            return
+        set_accent_color(app, color)
+        # The pipeline-diagram boxes bake _box_style() into each QLabel's
+        # own stylesheet at construction time -- refresh them explicitly,
+        # same reasoning as _on_font_scale_changed's title/arrow refresh.
+        self.pipeline_diagram.set_steps(self.pipeline_diagram.step_labels())
 
     def set_data_info(self, summary: str | None) -> None:
         self.data_label.setText(summary or "No data loaded.")

@@ -26,6 +26,7 @@ from .format import format_header_summary
 from .state import AppState
 from .tabs import (
     DenoisingTab,
+    DetrendingTab,
     LoadTab,
     MaskTab,
     MotionCorrectionTab,
@@ -57,6 +58,7 @@ class MainWindow(QMainWindow):
         self.motion_correction_tab = MotionCorrectionTab(self.state)
         self.mask_tab = MaskTab(self.state)
         self.denoising_tab = DenoisingTab(self.state)
+        self.detrending_tab = DetrendingTab(self.state)
         self.normalization_tab = NormalizationTab(self.state)
         self.source_extraction_tab = SourceExtractionTab(self.state)
         self.roi_validation_tab = ROIValidationTab(self.state)
@@ -72,6 +74,7 @@ class MainWindow(QMainWindow):
             self.motion_correction_tab,
             self.mask_tab,
             self.denoising_tab,
+            self.detrending_tab,
             self.normalization_tab,
             self.source_extraction_tab,
             self.roi_validation_tab,
@@ -80,7 +83,10 @@ class MainWindow(QMainWindow):
         # Extraction's Commit only adds to state.rois -- active_data() is
         # unchanged, so there's nothing for other movie-consuming tabs to
         # refresh -- it's wired to the header breadcrumb separately below.
-        self._mutating_tabs = [self.motion_correction_tab, self.mask_tab, self.denoising_tab, self.normalization_tab]
+        self._mutating_tabs = [
+            self.motion_correction_tab, self.mask_tab, self.denoising_tab, self.detrending_tab,
+            self.normalization_tab,
+        ]
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.load_tab, "Load")
@@ -88,6 +94,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.motion_correction_tab, "Motion Correction")
         self.tabs.addTab(self.mask_tab, "Mask")
         self.tabs.addTab(self.denoising_tab, "Denoising")
+        self.tabs.addTab(self.detrending_tab, "Detrending")
         self.tabs.addTab(self.normalization_tab, "Normalization")
         self.tabs.addTab(self.source_extraction_tab, "Source Extraction")
         self.tabs.addTab(self.roi_validation_tab, "ROI Validation")

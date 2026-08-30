@@ -9,12 +9,13 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QApplication, QHBoxLayout  # noqa: E402
+from PySide6.QtWidgets import QApplication, QHBoxLayout, QWidget  # noqa: E402
 
 from orbitapp.fits_io import create_fits_memmap  # noqa: E402
 from orbitapp.io import is_memmap, load_movie  # noqa: E402
 from orbitapp.state import AppState  # noqa: E402
 from orbitapp.tabs.stage_tab import StageTab  # noqa: E402
+from orbitapp.widgets import StagePanel  # noqa: E402
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -170,6 +171,45 @@ def test_chunked_commit_failure_shows_a_dialog_and_leaves_commit_retryable(tmp_p
     assert state.active_data() is mmap_movie  # nothing got committed
     assert tab.commit_controls.apply_btn.isEnabled()
     assert tab.commit_controls.commit_btn.isEnabled()  # candidate is still there to retry
+
+
+def test_build_panel_and_show_before_preview_are_overridable():
+    # A subclass whose main figure isn't a before/after image pair (e.g.
+    # Detrending's single trace plot) only needs to override
+    # _build_panel/_show_before_preview -- everything else (Apply/
+    # Commit/chunked-commit) keeps working unchanged.
+    class _PlotPanelTab(_DoubleTab):
+        def _build_panel(self, before_title, after_title):
+            widget = QWidget()
+            widget.received_titles = (before_title, after_title)
+            return widget
+
+        def _show_before_preview(self, movie):
+            self.preview_seen = movie
+
+    state = AppState()
+    movie = np.arange(2 * 2 * 6, dtype=float).reshape(2, 2, 6)
+    state.load("movie.tif", movie)
+    tab = _PlotPanelTab(state, apply_label="Apply")
+
+    assert not isinstance(tab.panel, StagePanel)
+    assert tab.panel.received_titles == ("Raw (mean projection)", "Candidate (mean projection)")
+
+    tab.on_data_loaded()
+    assert np.array_equal(tab.preview_seen, movie)
+
+
+def test_default_build_panel_and_show_before_preview_still_use_stage_panel():
+    # Every existing StageTab subclass relies on the default -- confirms
+    # the refactor didn't change default behavior.
+    state = AppState()
+    movie = np.arange(2 * 2 * 6, dtype=float).reshape(2, 2, 6)
+    state.load("movie.tif", movie)
+    tab = _DoubleTab(state, apply_label="Apply")
+
+    assert isinstance(tab.panel, StagePanel)
+    tab.on_data_loaded()
+    assert tab.panel.before_view.image is not None
 
 
 def test_stage_without_a_chunked_commit_override_fails_cleanly_for_memmap_input(tmp_path, monkeypatch):

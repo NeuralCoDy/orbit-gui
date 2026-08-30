@@ -91,10 +91,30 @@ class StageTab(QWidget):
         self.status_label = QLabel("No data loaded.")
         layout.addWidget(self.status_label)
 
-        self.panel = StagePanel(before_title=before_title, after_title=after_title)
+        self.panel = self._build_panel(before_title, after_title)
         layout.addWidget(self.panel)
 
         self._build_metrics()
+
+    def _build_panel(self, before_title: str, after_title: str) -> QWidget:
+        """The stage's main content widget, stored as self.panel --
+        defaults to the shared before/after-image StagePanel every
+        other stage tab uses. Override for a stage whose main figure
+        isn't a pair of images (e.g. a single trace plot) -- if you do,
+        also override _show_before_preview below, since its default
+        assumes a StagePanel."""
+        return StagePanel(before_title=before_title, after_title=after_title)
+
+    def _show_before_preview(self, movie: np.ndarray) -> None:
+        """Populates self.panel with a preview of the freshly-loaded
+        movie, before any Apply has run -- called from on_data_loaded.
+        Default assumes self.panel is a StagePanel; see _build_panel."""
+        # preview_slice bounds this to the first 5000 frames for a
+        # memmap movie -- otherwise this mean projection alone would
+        # force a full read of an arbitrarily large movie just to
+        # populate the "Raw" thumbnail.
+        self.panel.before_view.setImage(preview_slice(movie).mean(axis=2))
+        self.panel.set_before_movie(movie)
 
     def _build_controls_row(self) -> QHBoxLayout:
         """Returns the row above the busy bar: algorithm choice,
@@ -118,12 +138,7 @@ class StageTab(QWidget):
         self._last_run = None  # a new/changed movie invalidates any prior "already run" state
         self._on_data_reset()
         if movie is not None:
-            # preview_slice bounds this to the first 5000 frames for a
-            # memmap movie -- otherwise this mean projection alone would
-            # force a full read of an arbitrarily large movie just to
-            # populate the "Raw" thumbnail.
-            self.panel.before_view.setImage(preview_slice(movie).mean(axis=2))
-            self.panel.set_before_movie(movie)
+            self._show_before_preview(movie)
             self.status_label.setText(f"Ready. shape={movie.shape}")
 
     def _current_fingerprint(self) -> dict:

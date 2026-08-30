@@ -4,12 +4,23 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
+from orbitapp import theme  # noqa: E402
 from orbitapp.widgets.header_bar import HeaderBar  # noqa: E402
 
 
 @pytest.fixture(scope="module", autouse=True)
 def qapp():
     return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def _restore_accent():
+    # theme.ACCENT is genuine mutable global state -- restore it after
+    # each test here so a color-changing test can't leak into another
+    # (in this file or any other test module run in the same process).
+    original = theme.ACCENT
+    yield
+    theme.ACCENT = original
 
 
 def test_generate_report_clicked_fires_on_button_click():
@@ -105,3 +116,61 @@ def test_changing_font_scale_refreshes_the_title_and_pipeline_arrow_fonts(monkey
     assert after_title == app.font().pointSize() + 2  # same fixed bump, over the new scaled base
 
     header._on_font_scale_changed(1.0)  # reset for other tests
+
+
+def test_options_button_opens_a_dialog_with_the_current_accent_color(monkeypatch):
+    header = HeaderBar()
+    opened = []
+    monkeypatch.setattr(
+        "orbitapp.widgets.header_bar.OptionsDialog.exec",
+        lambda self: opened.append([c.isChecked() for c in self._color_checks.values()]),
+    )
+
+    header.options_btn.click()
+
+    assert opened == [[True, False, False, False]]  # T-GECO1 blue (the default) checked
+
+
+def test_options_dialog_reopens_at_the_last_color_the_user_set(monkeypatch):
+    header = HeaderBar()
+    header._accent_color = "#ff5c5c"  # RCaMP red
+
+    opened = []
+    monkeypatch.setattr(
+        "orbitapp.widgets.header_bar.OptionsDialog.exec",
+        lambda self: opened.append(self._color_checks["rcamp_red"].isChecked()),
+    )
+
+    header.options_btn.click()
+
+    assert opened == [True]
+
+
+def test_changing_accent_color_calls_set_accent_color_via_theme(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "orbitapp.widgets.header_bar.set_accent_color", lambda app, color: calls.append(color)
+    )
+
+    header = HeaderBar()
+    header._on_accent_color_changed("#3ddc71")
+
+    assert calls == ["#3ddc71"]
+    assert header._accent_color == "#3ddc71"
+
+
+def test_changing_accent_color_refreshes_the_pipeline_box_style():
+    app = QApplication.instance()
+    theme.apply_dark_theme(app)
+
+    header = HeaderBar()
+    header.set_pipeline(["Load", "Rigid"])
+    original_color = theme.ACCENT
+    before_style = header.pipeline_diagram._boxes[0].styleSheet()
+    assert original_color in before_style
+
+    header._on_accent_color_changed("#ff5c5c")
+
+    after_style = header.pipeline_diagram._boxes[0].styleSheet()
+    assert "#ff5c5c" in after_style
+    assert original_color not in after_style
