@@ -15,12 +15,23 @@ def qapp():
 
 @pytest.fixture(autouse=True)
 def _restore_accent():
-    # theme.ACCENT is genuine mutable global state -- restore it after
-    # each test here so a color-changing test can't leak into another
-    # (in this file or any other test module run in the same process).
-    original = theme.ACCENT
+    # theme.ACCENT/DISABLED are genuine mutable global state (see
+    # set_accent_color) -- restore both after each test here so a
+    # color-changing test can't leak into another (in this file or any
+    # other test module run in the same process).
+    original_accent, original_disabled = theme.ACCENT, theme.DISABLED
     yield
-    theme.ACCENT = original
+    theme.ACCENT = original_accent
+    theme.DISABLED = original_disabled
+
+
+class _FakeDialog:
+    """Stands in for a real StepParamsDialog in tests that monkeypatch
+    it out -- only .exec() is ever called on the real thing at the
+    _PipelineDiagram._show_params call site."""
+
+    def exec(self):
+        pass
 
 
 def test_generate_report_clicked_fires_on_button_click():
@@ -174,3 +185,67 @@ def test_changing_accent_color_refreshes_the_pipeline_box_style():
     after_style = header.pipeline_diagram._boxes[0].styleSheet()
     assert "#ff5c5c" in after_style
     assert original_color not in after_style
+
+
+def test_clicking_a_pipeline_box_opens_its_step_params_dialog(monkeypatch):
+    opened = []
+    monkeypatch.setattr(
+        "orbitapp.widgets.header_bar.StepParamsDialog",
+        lambda step_label, params, parent: opened.append((step_label, params)) or _FakeDialog(),
+    )
+
+    header = HeaderBar()
+    header.set_pipeline(
+        ["Load", "Rigid"], params_list=[{"data_path": "movie.tif"}, {"max_shift": 15.0}]
+    )
+
+    header.pipeline_diagram._boxes[1].clicked.emit()
+
+    assert opened == [("Rigid", {"max_shift": 15.0})]
+
+
+def test_clicking_a_box_with_no_params_list_shows_an_empty_dict(monkeypatch):
+    opened = []
+    monkeypatch.setattr(
+        "orbitapp.widgets.header_bar.StepParamsDialog",
+        lambda step_label, params, parent: opened.append((step_label, params)) or _FakeDialog(),
+    )
+
+    header = HeaderBar()
+    header.set_pipeline(["Load"])  # no params_list given
+
+    header.pipeline_diagram._boxes[0].clicked.emit()
+
+    assert opened == [("Load", {})]
+
+
+def test_pipeline_params_survive_a_font_scale_refresh(monkeypatch):
+    header = HeaderBar()
+    header.set_pipeline(["Load", "Rigid"], params_list=[{}, {"max_shift": 15.0}])
+
+    header._on_font_scale_changed(1.5)
+
+    opened = []
+    monkeypatch.setattr(
+        "orbitapp.widgets.header_bar.StepParamsDialog",
+        lambda step_label, params, parent: opened.append((step_label, params)) or _FakeDialog(),
+    )
+    header.pipeline_diagram._boxes[1].clicked.emit()
+
+    assert opened == [("Rigid", {"max_shift": 15.0})]
+
+
+def test_pipeline_params_survive_an_accent_color_refresh(monkeypatch):
+    header = HeaderBar()
+    header.set_pipeline(["Load", "Rigid"], params_list=[{}, {"max_shift": 15.0}])
+
+    header._on_accent_color_changed("#3ddc71")
+
+    opened = []
+    monkeypatch.setattr(
+        "orbitapp.widgets.header_bar.StepParamsDialog",
+        lambda step_label, params, parent: opened.append((step_label, params)) or _FakeDialog(),
+    )
+    header.pipeline_diagram._boxes[1].clicked.emit()
+
+    assert opened == [("Rigid", {"max_shift": 15.0})]

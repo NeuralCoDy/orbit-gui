@@ -125,6 +125,53 @@ def test_pipeline_only_load_restores_params_without_rois(tmp_path, monkeypatch):
     assert win2.state.rois == []
 
 
+def test_committing_a_stage_updates_the_header_s_clickable_pipeline_params():
+    win = MainWindow()
+    movie = np.random.default_rng(0).standard_normal((10, 10, 20))
+    win.state.load("movie.tif", movie)
+    win.load_tab.data_loaded.emit()
+    for _ in range(20):
+        QApplication.processEvents()
+
+    win.state.commit(movie + 1, "Rigid", stage="motion_correction", params={"max_shift": 15.0})
+    win._on_data_committed()
+
+    assert win.header.pipeline_diagram.step_labels() == ["Load", "Rigid"]
+    assert win.header._pipeline_params == [{"data_path": "movie.tif"}, {"max_shift": 15.0}]
+
+
+def test_loading_a_session_updates_the_header_s_clickable_pipeline_params(tmp_path, monkeypatch):
+    movie_path = tmp_path / "movie.tif"
+    _write_synthetic_movie(movie_path)
+
+    win = MainWindow()
+    win.load_tab._load(str(movie_path))
+    _wait_for_worker(win.load_tab)
+
+    mc = win.motion_correction_tab
+    mc.on_data_loaded()
+    mc.max_shift_spin.setValue(42.0)
+    mc._apply()
+    _wait_for_worker(mc)
+    mc._commit()
+
+    path = tmp_path / "pipeline_only.h5"
+    monkeypatch.setattr(
+        "orbitapp.tabs.save_tab.QFileDialog.getSaveFileName", lambda *a, **k: (str(path), "")
+    )
+    win.save_tab._on_save_pipeline_clicked()
+
+    win2 = MainWindow()
+    monkeypatch.setattr(
+        "orbitapp.tabs.save_tab.QFileDialog.getOpenFileName", lambda *a, **k: (str(path), "")
+    )
+    monkeypatch.setattr("orbitapp.app.QMessageBox.information", lambda *a, **k: None)
+    win2.save_tab._on_load_session_clicked()
+
+    assert win2.header.pipeline_diagram.step_labels() == win2.state.pipeline
+    assert win2.header._pipeline_params[-1]["max_shift"] == 42.0
+
+
 def test_generate_report_with_nothing_committed_shows_a_guard_dialog(monkeypatch):
     informed = []
     monkeypatch.setattr("orbitapp.app.QMessageBox.information", lambda *a, **k: informed.append(1))

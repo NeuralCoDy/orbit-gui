@@ -28,6 +28,7 @@ from .. import theme
 from ..assets import LOGO_PATH, load_logo
 from ..theme import set_accent_color, set_font_size_scale
 from .options_dialog import OptionsDialog
+from .step_params_dialog import StepParamsDialog
 
 
 def _box_style() -> str:
@@ -47,6 +48,24 @@ def _box_style() -> str:
     )
 
 
+class _StepBox(QLabel):
+    """One pipeline-diagram box -- a plain QLabel except clickable, so
+    a user can pull up that step's recorded parameters (see
+    _PipelineDiagram._show_params) without leaving whatever tab they're
+    on."""
+
+    clicked = Signal()
+
+    def __init__(self, text: str, parent=None) -> None:
+        super().__init__(text, parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
 class _PipelineDiagram(QWidget):
     """A horizontal row of boxes, one per committed pipeline step, each
     connected to the next by an arrow. Rebuilt from scratch on every
@@ -58,22 +77,37 @@ class _PipelineDiagram(QWidget):
         self._row = QHBoxLayout(self)
         self._row.setContentsMargins(0, 0, 0, 0)
         self._boxes: list[QLabel] = []
+        self._params_list: list[dict] = []
 
-    def set_steps(self, steps: list[str]) -> None:
+    def set_steps(self, steps: list[str], params_list: list[dict] | None = None) -> None:
+        """``params_list``, if given, is one params dict per entry of
+        ``steps`` (same order) -- clicking a box shows its own dict via
+        StepParamsDialog. Missing/short lists just leave the extra
+        boxes with an empty dict, rather than erroring, since a caller
+        refreshing only the font/color (not the pipeline itself) may
+        not have new params to give -- see step_labels()/HeaderBar's
+        own _pipeline_params, which re-supply the last-known list on
+        that kind of refresh."""
         while self._row.count():
             item = self._row.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         self._boxes = []
+        self._params_list = list(params_list) if params_list is not None else []
 
         for i, step in enumerate(steps):
             if i > 0:
                 self._row.addWidget(self._make_arrow())
-            box = QLabel(step)
+            box = _StepBox(step)
             box.setStyleSheet(_box_style())
+            params = self._params_list[i] if i < len(self._params_list) else {}
+            box.clicked.connect(lambda step=step, params=params: self._show_params(step, params))
             self._row.addWidget(box)
             self._boxes.append(box)
         self._row.addStretch()
+
+    def _show_params(self, step_label: str, params: dict) -> None:
+        StepParamsDialog(step_label, params, self).exec()
 
     @staticmethod
     def _make_arrow() -> QLabel:
@@ -101,6 +135,7 @@ class HeaderBar(QWidget):
         super().__init__(parent)
         self._font_scale = 1.0  # 1.0 == the app's base text size -- see _on_font_scale_changed
         self._accent_color = theme.ACCENT  # see _on_accent_color_changed
+        self._pipeline_params: list[dict] = []  # last-given set_pipeline() params_list -- see the refresh calls below
 
         # Two columns: all text on the left (same two-row arrangement as
         # before, with its own vertical padding), gear+logo in a row of
@@ -227,7 +262,7 @@ class HeaderBar(QWidget):
         # those specifically so ALL text scales, not just the majority
         # that inherits the app default automatically.
         self._style_title_label()
-        self.pipeline_diagram.set_steps(self.pipeline_diagram.step_labels())
+        self.pipeline_diagram.set_steps(self.pipeline_diagram.step_labels(), self._pipeline_params)
         # The text column just grew/shrank -- resize the logo/gear to match
         # right away rather than waiting for the next resizeEvent.
         self._refresh_logo_pixmap()
@@ -241,7 +276,7 @@ class HeaderBar(QWidget):
         # The pipeline-diagram boxes bake _box_style() into each QLabel's
         # own stylesheet at construction time -- refresh them explicitly,
         # same reasoning as _on_font_scale_changed's title/arrow refresh.
-        self.pipeline_diagram.set_steps(self.pipeline_diagram.step_labels())
+        self.pipeline_diagram.set_steps(self.pipeline_diagram.step_labels(), self._pipeline_params)
 
     def set_data_info(self, summary: str | None) -> None:
         self.data_label.setText(summary or "No data loaded.")
@@ -253,11 +288,18 @@ class HeaderBar(QWidget):
         self.report_btn.setEnabled(not busy)
         self.report_btn.setText("Generating..." if busy else "Generate Report...")
 
-    def set_pipeline(self, steps: list[str], modifiers: list[str] | None = None) -> None:
+    def set_pipeline(
+        self, steps: list[str], modifiers: list[str] | None = None, params_list: list[dict] | None = None
+    ) -> None:
         """``modifiers`` are the Load tab's active data-modality toggles
         (see AppState.modality_modifiers), shown parenthetically in the
         caption, e.g. "Current pipeline (widefield):" -- purely a label
-        for now."""
+        for now. ``params_list``, if given, is one params dict per entry
+        of ``steps`` (same order, e.g. ``[step.params for step in
+        state.steps]``) -- clicking a step's box shows its own dict;
+        remembered (see _pipeline_params) so a later font/color-only
+        refresh can re-supply it without the caller having to."""
         suffix = f" ({', '.join(modifiers)})" if modifiers else ""
         self.pipeline_caption_label.setText(f"Current pipeline{suffix}:")
-        self.pipeline_diagram.set_steps(steps)
+        self._pipeline_params = list(params_list) if params_list is not None else []
+        self.pipeline_diagram.set_steps(steps, self._pipeline_params)

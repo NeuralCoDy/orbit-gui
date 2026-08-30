@@ -145,19 +145,28 @@ class MainWindow(QMainWindow):
         else:
             summary = format_header_summary(path, movie)
         self.header.set_data_info(summary)
-        self.header.set_pipeline(self.state.pipeline, self.state.modality_modifiers())
+        self._refresh_header_pipeline()
+
+    def _refresh_header_pipeline(self) -> None:
+        """Pushes the current pipeline breadcrumb (+ each step's
+        recorded params, for the header's click-to-show-params boxes)
+        into the header -- shared by every place that changes what the
+        breadcrumb should show."""
+        self.header.set_pipeline(
+            self.state.pipeline, self.state.modality_modifiers(), [step.params for step in self.state.steps]
+        )
 
     def _on_data_committed(self) -> None:
         """A stage tab committed a new active dataset (see
         orbitapp.widgets.CommitControls) -- reflect the updated pipeline
         breadcrumb."""
-        self.header.set_pipeline(self.state.pipeline, self.state.modality_modifiers())
+        self._refresh_header_pipeline()
 
     def _on_modality_changed(self) -> None:
         """One of the Load tab's data-modality toggles flipped -- only
         the header caption reflects this today (see AppState.
         modality_modifiers)."""
-        self.header.set_pipeline(self.state.pipeline, self.state.modality_modifiers())
+        self._refresh_header_pipeline()
 
     def _on_session_loaded(self, session: dict) -> None:
         """SaveTab only reads/writes files -- reconstructing AppState and

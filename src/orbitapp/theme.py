@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pyqtgraph as pg
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 
 BACKGROUND = "#000000"
 PANEL_BACKGROUND = "#0d0d0d"
@@ -171,6 +171,34 @@ def apply_dark_theme(app: QApplication) -> None:
     pg.setConfigOption("foreground", ACCENT)
 
 
+def _reachable_widgets(app: QApplication, widget_type: type) -> list:
+    """Every widget of ``widget_type`` reachable from a CURRENT top-level
+    window, rather than app.allWidgets() -- which returns literally
+    every QWidget instance the process has ever constructed and not yet
+    garbage-collected, including widgets with no live window ancestor
+    (e.g. a test's throwaway pg.PlotWidget()). That distinction is
+    mostly academic in a normal running GUI session (whose widget count
+    stays bounded by what's actually on screen), but it matters a lot
+    in a long test suite: confirmed empirically that after enough
+    GUI-heavy tests accumulate in one process, app.allWidgets() can
+    return tens of thousands of stale objects, making a naive walk over
+    it (as set_font_size_scale/set_accent_color used to do) take seconds
+    to minutes per call -- topLevelWidgets()+findChildren() instead
+    stays proportional to what's actually reachable, regardless of how
+    much unreferenced debris a long-lived process has piled up."""
+    seen: set[int] = set()
+    result = []
+    for top in app.topLevelWidgets():
+        candidates = list(top.findChildren(widget_type))
+        if isinstance(top, widget_type):
+            candidates.append(top)
+        for widget in candidates:
+            if id(widget) not in seen:
+                seen.add(id(widget))
+                result.append(widget)
+    return result
+
+
 def set_font_size_scale(app: QApplication, scale: float) -> None:
     """Sets the app-wide font size to ``scale`` times the original base
     size (captured once in apply_dark_theme) -- always relative to the
@@ -194,7 +222,7 @@ def set_font_size_scale(app: QApplication, scale: float) -> None:
     font = app.font()
     font.setPointSize(max(1, round(base * scale)))
     app.setFont(font)
-    for widget in app.allWidgets():
+    for widget in _reachable_widgets(app, QWidget):
         widget.setFont(font)
 
 
@@ -240,8 +268,8 @@ def set_accent_color(app: QApplication, color: str) -> None:
       stylesheet, and pg.setConfigOption("foreground", ...) only
       affects pyqtgraph objects created AFTER the call -- already-built
       plots' axis pens/text and any already-added legend's colors need
-      updating directly, via app.allWidgets() (which includes
-      pg.PlotWidget and pg.ImageView, both QWidget subclasses).
+      updating directly, via _reachable_widgets (see its own docstring
+      for why that's used here rather than app.allWidgets()).
       pg.ImageView's own histogram/LUT widget has an AxisItem of its
       own (its intensity-scale ticks) that's easy to miss since it
       isn't reachable through a PlotWidget at all."""
@@ -251,19 +279,19 @@ def set_accent_color(app: QApplication, color: str) -> None:
     app.setStyleSheet(_build_stylesheet())
     pg.setConfigOption("foreground", ACCENT)
 
-    for widget in app.allWidgets():
-        if isinstance(widget, pg.PlotWidget):
-            plot_item = widget.getPlotItem()
-            for axis_name in ("left", "bottom", "right", "top"):
-                _restyle_axis(plot_item.getAxis(axis_name), ACCENT)
-            if plot_item.titleLabel.text:
-                _restyle_label(plot_item.titleLabel, ACCENT)
-            legend = plot_item.legend
-            if legend is not None:
-                legend.setLabelTextColor(ACCENT)  # sets the legend's OWN default for any item added later
-                legend.setPen(pg.mkPen(ACCENT))
-                legend.setBrush(pg.mkBrush(PANEL_BACKGROUND))
-                for _sample, label in legend.items:
-                    _restyle_label(label, ACCENT)
-        elif isinstance(widget, pg.ImageView):
-            _restyle_axis(widget.getHistogramWidget().item.axis, ACCENT)
+    for widget in _reachable_widgets(app, pg.PlotWidget):
+        plot_item = widget.getPlotItem()
+        for axis_name in ("left", "bottom", "right", "top"):
+            _restyle_axis(plot_item.getAxis(axis_name), ACCENT)
+        if plot_item.titleLabel.text:
+            _restyle_label(plot_item.titleLabel, ACCENT)
+        legend = plot_item.legend
+        if legend is not None:
+            legend.setLabelTextColor(ACCENT)  # sets the legend's OWN default for any item added later
+            legend.setPen(pg.mkPen(ACCENT))
+            legend.setBrush(pg.mkBrush(PANEL_BACKGROUND))
+            for _sample, label in legend.items:
+                _restyle_label(label, ACCENT)
+
+    for widget in _reachable_widgets(app, pg.ImageView):
+        _restyle_axis(widget.getHistogramWidget().item.axis, ACCENT)

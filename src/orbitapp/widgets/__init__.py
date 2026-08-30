@@ -12,6 +12,7 @@ from .roi_overlay import render_roi_overlay
 from .roi_review_panel import ROIReviewPanel
 from .spinbox import make_spinbox
 from .stage_panel import StagePanel
+from .step_params_dialog import StepParamsDialog
 from .volumetric_load_dialog import VolumetricLoadDialog
 
 __all__ = [
@@ -34,4 +35,5 @@ __all__ = [
     "confirm_recompute",
     "VolumetricLoadDialog",
     "OptionsDialog",
+    "StepParamsDialog",
 ]

@@ -3,7 +3,7 @@ import pytest
 pytest.importorskip("PySide6")
 pg = pytest.importorskip("pyqtgraph")
 
-from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
+from PySide6.QtWidgets import QApplication, QLabel, QMainWindow  # noqa: E402
 
 from orbitapp import theme  # noqa: E402
 
@@ -246,3 +246,36 @@ def test_set_accent_color_updates_an_already_added_legend_s_item_labels(qapp):
     theme.set_accent_color(qapp, "#3ddc71")
 
     assert "3ddc71" in label.item.toHtml().lower()
+
+
+def test_reachable_widgets_finds_a_standalone_unparented_plot():
+    # The existing-test convention (pg.PlotWidget() with no parent) IS
+    # itself a top-level widget -- app.topLevelWidgets() alone wouldn't
+    # find it as a CHILD of anything, so _reachable_widgets must also
+    # check whether each top-level widget itself matches, not just its
+    # descendants.
+    plot = pg.PlotWidget()
+    assert plot in theme._reachable_widgets(QApplication.instance(), pg.PlotWidget)
+
+
+def test_reachable_widgets_finds_a_plot_nested_in_a_real_window():
+    win = QMainWindow()
+    plot = pg.PlotWidget()
+    win.setCentralWidget(plot)
+    assert plot in theme._reachable_widgets(QApplication.instance(), pg.PlotWidget)
+
+
+def test_reachable_widgets_only_returns_the_requested_type():
+    plot = pg.PlotWidget()
+    label = QLabel()
+    found = theme._reachable_widgets(QApplication.instance(), pg.PlotWidget)
+    assert plot in found
+    assert label not in found
+
+
+def test_reachable_widgets_does_not_duplicate_a_widget_reachable_two_ways():
+    win = QMainWindow()
+    plot = pg.PlotWidget()
+    win.setCentralWidget(plot)
+    found = theme._reachable_widgets(QApplication.instance(), pg.PlotWidget)
+    assert found.count(plot) == 1
