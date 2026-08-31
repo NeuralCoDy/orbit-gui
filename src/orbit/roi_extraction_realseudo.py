@@ -43,7 +43,6 @@ def real_seudo_source_extraction(
     min_roi_size: int = 50,
     min_avg_px: float = -1.0,
     mask_blur_rad: int = 1,
-    exclude_radius_known_cells: int = 5,
     consecutive_frames_required: int = 5,
     max_track_gap: int = 1,
     eq8_merge_threshold: float = 0.75,
@@ -71,7 +70,7 @@ def real_seudo_source_extraction(
     )
     detection = DetectionParams(
         cutoff_multiplier=cutoff_multiplier, min_roi_size=min_roi_size, min_avg_px=min_avg_px,
-        mask_blur_rad=mask_blur_rad, exclude_radius_known_cells=exclude_radius_known_cells,
+        mask_blur_rad=mask_blur_rad,
     )
     promotion = PromotionParams(
         consecutive_frames_required=consecutive_frames_required, max_track_gap=max_track_gap,

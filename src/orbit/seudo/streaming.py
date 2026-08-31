@@ -189,29 +189,6 @@ class DetectionParams:
     letting new fragmentary candidates spawn from its own thresholded-away
     edges. 0.0 (default): no-op, exactly the original behavior.
 
-    exclude_radius_known_cells: how many pixels a known cell's (or a
-    too-large rejected region's -- see _quarantine_rejected_regions)
-    footprint is dilated by before being excluded from NEW-candidate
-    detection. r=0 still unconditionally excludes the known cell's own
-    footprint pixels (just with no dilation buffer around them) -- it is
-    NOT "off": on a dataset with real overlapping cells, a second, genuinely
-    distinct cell sharing pixels with an already-known one can never be
-    detected at r=0, since those shared pixels are excluded outright before
-    any fit or regularization even runs. r<0 (e.g. -1) is real "off": known-
-    cell exclusion is skipped entirely (state.known_cell_exclude_mask stays
-    permanently all-False), so every pixel stays eligible for new-candidate
-    detection regardless of what's already been found there -- confirmed
-    via full-movie benchmark this recovers substantially more real cells
-    (up to 50/52 matched vs. r=2's 33-34/52) at a real, measured precision
-    cost (up to 138 unmatched vs. r=2's 4-5) -- not a clean win, a deliberate
-    recall-over-precision choice for this overlap-heavy dataset. Only
-    known-cell exclusion is affected by r<0; the separate active-track
-    self-exclusion in _subtract_tracked_contributions and the quarantine
-    dilation in _quarantine_rejected_regions both floor at 0 instead (an
-    already-tracked candidate's own territory and an already-rejected
-    oversized region are different concerns from known-cell overlap, and
-    negative dilation would incorrectly shrink rather than disable them).
-
     xtemp_smooth_sigma: Gaussian std (pixels) for smoothing a candidate
     track's built profile in `_build_promoted_profile` -- every place a
     Xtemp track's profile representation gets used (Eq.8 merge-on-create,
@@ -257,7 +234,6 @@ class DetectionParams:
     mask_blur_rad: int = 1
     min_roi_size: int = 50
     min_avg_px: float = -1.0  # <0: |min_avg_px| * local noise level; >=0: absolute threshold
-    exclude_radius_known_cells: int = 5
     noise_grid_shape: tuple = (1, 1)
     blobify_radius: float = None
     max_roi_extent: int = None
@@ -315,11 +291,14 @@ class PromotionParams:
     rois_params.m's combine_near_min_common/combine_far_min_common. LOWERING
     either makes a merge easier to trigger (less overlap/containment
     required to call two detections "the same underlying cell") -- a more
-    aggressive anti-duplication stance, relevant when
-    DetectionParams.exclude_radius_known_cells is reduced or disabled: with
-    less spatial exclusion protecting against a region re-spawning
-    fragmentary duplicate tracks, these merge checks become the primary
-    remaining defense instead of a secondary safety net."""
+    aggressive anti-duplication stance. There's no separate spatial
+    exclusion protecting a known cell's own territory from re-spawning a
+    fragmentary duplicate track (a per-dataset-tuned dilation radius for
+    that was tried and rejected -- not part of the paper's own design, and
+    real-data benchmarking found it a poor, invented substitute for these
+    merge checks), so eq8_merge_threshold/eq9_merge_threshold are the
+    primary defense against duplicate detections of an already-known
+    cell's own residual, not a secondary safety net."""
     consecutive_frames_required: int = 5
     max_track_gap: int = 1
     match_max_centroid_dist: float = 5.0
@@ -462,9 +441,9 @@ def _bbox_union(a, b):
 class StreamingState:
     """Mutable state carried across realSEUDOfit() calls: the (growing) cell
     profile set, a cached per-cell fit setup for each known cell, the
-    known-cell exclusion mask for candidate detection, and in-progress
-    (not-yet-promoted) candidate tracks. Mutates in place across calls --
-    avoids copying a growing profile array every frame."""
+    quarantined-region mask (see _quarantine_rejected_regions), and
+    in-progress (not-yet-promoted) candidate tracks. Mutates in place
+    across calls -- avoids copying a growing profile array every frame."""
 
     def __init__(
         self, mov_shape, initial_profiles=None, zero_level=0.0,
@@ -516,7 +495,6 @@ class StreamingState:
         self.frame_index = 0
         self.first_detected_frame = {}
         self._cell_setups = {}
-        self.known_cell_exclude_mask = np.zeros((self.mov_y, self.mov_x), dtype=bool)
         self.rejected_region_mask = np.zeros((self.mov_y, self.mov_x), dtype=bool)
         self.candidate_tracks = {}
         self._next_track_id = 0
@@ -528,7 +506,6 @@ class StreamingState:
             y0, y1, x0, x1 = _cell_window_bounds(
                 self.profiles[:, :, cell_id], self.fit.pad_space, self.mov_y, self.mov_x, self.fit.use_com)
             _add_cell_setup(self, cell_id, y0, y1, x0, x1)
-            _update_known_cell_exclude_mask(self, cell_id, y0, y1, x0, x1)
 
     def close(self):
         """No-op placeholder, kept for API/context-manager compatibility --
@@ -563,38 +540,11 @@ def _invalidate_overlapping_setups(state, new_id, y0, y1, x0, x1):
             _add_cell_setup(state, cell_id, *cell_bbox)
 
 
-def _update_known_cell_exclude_mask(state, cell_id, y0, y1, x0, x1, footprint_source=None):
-    """footprint_source: an optional (mov_y, mov_x) array to read the
-    footprint from instead of state.profiles[:,:,cell_id] -- used at
-    promotion time when DetectionParams.candidate_profile_threshold has
-    shrunk the STORED profile (a real quality improvement for fitting/
-    display) so the exclude mask can still claim the cell's FULL original
-    extent, not just its thresholded core. Confirmed by benchmark this
-    distinction matters: reading the mask from the already-thresholded
-    stored profile let future frames re-detect the thresholded-away edges
-    as spurious new fragments -- precision measurably worsened with
-    threshold alone, unaffected by decoupling the (separate) temp-track
-    exclude mask in _subtract_tracked_contributions."""
-    r = state.detection.exclude_radius_known_cells
-    if r < 0:
-        # real "off" -- see DetectionParams.exclude_radius_known_cells'
-        # docstring: r=0 still unconditionally excludes the known cell's
-        # own footprint, which r<0 must not do
-        return
-    source = footprint_source if footprint_source is not None else state.profiles[:, :, cell_id]
-    footprint = source[y0:y1 + 1, x0:x1 + 1] > 0
-    if r > 0:
-        structure = np.ones((2 * r + 1, 2 * r + 1), dtype=bool)
-        footprint = ndimage.binary_dilation(footprint, structure=structure)
-    state.known_cell_exclude_mask[y0:y1 + 1, x0:x1 + 1] |= footprint
-
-
 def _quarantine_rejected_regions(state, rejected_bboxes):
     """Permanently exclude a region rejected for being physically too large
     to be a real cell (see DetectionParams.max_roi_extent) from all future
-    scanning, the same way a promoted cell's footprint is excluded --
-    without this, a region that's too large gets discarded and then
-    re-detected (and re-rejected) from scratch every single frame, which on
+    scanning -- without this, a region that's too large gets discarded and
+    then re-detected (and re-rejected) from scratch every single frame, which on
     real data actually made things WORSE than no cap at all: a rejected-
     but-not-excluded region keeps getting rescanned and can fragment into
     several smaller, under-the-cap spurious detections over time instead of
@@ -607,18 +557,8 @@ def _quarantine_rejected_regions(state, rejected_bboxes):
     oversized blob in a single noisy frame) gets quarantined just as
     permanently as a truly static illumination artifact -- there's no
     decay or re-evaluation once a region is quarantined here."""
-    # floor at 0 -- unlike known-cell exclusion (see this same field's
-    # docstring), quarantine of an already-rejected oversized region is a
-    # different concern that r<0 must not disable; negative dilation would
-    # incorrectly shrink the quarantined rectangle instead
-    r = max(0, state.detection.exclude_radius_known_cells)
     for y0, y1, x0, x1 in rejected_bboxes:
-        # the rejected region is a solid (unbroken) rectangle, so dilating
-        # it by r is exactly equivalent to expanding the rectangle by r
-        # pixels on each side -- no need for an actual binary_dilation call
-        py0, py1 = max(0, y0 - r), min(state.mov_y - 1, y1 + r)
-        px0, px1 = max(0, x0 - r), min(state.mov_x - 1, x1 + r)
-        state.rejected_region_mask[py0:py1 + 1, px0:px1 + 1] = True
+        state.rejected_region_mask[y0:y1 + 1, x0:x1 + 1] = True
 
 
 def _estimate_noise_level(residual, scale):
@@ -886,7 +826,7 @@ def _subtract_tracked_contributions(state, residual):
     a window (and thus disambiguate each other) when they overlap.
 
     Returns (residual2, exclude_mask, track_footprints, track_weights):
-    exclude_mask is the union of every active track's (dilated) footprint
+    exclude_mask is the union of every active track's own footprint
     regardless of this frame's fitted weight -- a track's own territory
     should never spawn a duplicate new track even on a frame its regression
     fit happens to be weak. track_footprints is [(track_id, tight_mask,
@@ -901,8 +841,6 @@ def _subtract_tracked_contributions(state, residual):
     to use as a per-frame signal-quality check."""
     residual2 = residual.copy()
     exclude_mask = np.zeros((state.mov_y, state.mov_x), dtype=bool)
-    r = state.detection.exclude_radius_known_cells
-    structure = np.ones((2 * r + 1, 2 * r + 1), dtype=bool) if r > 0 else None
     track_footprints = []
     track_weights = {}
 
@@ -947,8 +885,7 @@ def _subtract_tracked_contributions(state, residual):
         if weight > 0:
             residual2[y0:y1 + 1, x0:x1 + 1] -= profile[y0:y1 + 1, x0:x1 + 1] * weight
 
-        dilated = ndimage.binary_dilation(footprint, structure=structure) if structure is not None else footprint
-        exclude_mask[y0:y1 + 1, x0:x1 + 1] |= dilated
+        exclude_mask[y0:y1 + 1, x0:x1 + 1] |= footprint
 
     return residual2, exclude_mask, track_footprints, track_weights
 
@@ -1393,17 +1330,11 @@ def _replace_cell_profile(state, cell_id, new_profile):
     determined its old shape actually contained extra structure beyond a
     newly-promoted candidate. Rebuilds its cached fit window/setup the same
     way a brand-new cell's is built, and re-invalidates any OTHER cell's
-    setup whose window now overlaps this one's new (smaller) bbox. The
-    exclude mask is only ever grown (|=), never shrunk, for this cell --
-    a shrinking cell leaves a few stale excluded pixels behind from its old,
-    larger footprint, which is a conservative, safe direction (slightly
-    under- rather than over-detects future candidates there), not an
-    incorrect one."""
+    setup whose window now overlaps this one's new (smaller) bbox."""
     state.profiles[:, :, cell_id] = new_profile
     y0, y1, x0, x1 = _cell_window_bounds(new_profile, state.fit.pad_space, state.mov_y, state.mov_x, state.fit.use_com)
     _add_cell_setup(state, cell_id, y0, y1, x0, x1)
     _invalidate_overlapping_setups(state, cell_id, y0, y1, x0, x1)
-    _update_known_cell_exclude_mask(state, cell_id, y0, y1, x0, x1)
 
 
 def _promote_candidate(state, track, frame_index):
@@ -1416,17 +1347,6 @@ def _promote_candidate(state, track, frame_index):
     profile, _bbox = _build_promoted_profile(track, (state.mov_y, state.mov_x),
                                               state.detection.candidate_profile_threshold,
                                               smooth_sigma=state.detection.xtemp_smooth_sigma)
-    # UNthresholded companion, used only to size the exclude mask below
-    # (see _update_known_cell_exclude_mask's footprint_source) -- the
-    # thresholded `profile` is a real quality improvement for what gets
-    # STORED/fit/displayed, but the exclude mask needs the cell's FULL
-    # original extent to keep claiming its own territory; otherwise future
-    # frames re-detect the thresholded-away edges as spurious new
-    # fragments (confirmed by benchmark, not just theoretical).
-    full_footprint_profile = profile
-    if state.detection.candidate_profile_threshold > 0:
-        full_footprint_profile, _bbox = _build_promoted_profile(
-            track, (state.mov_y, state.mov_x), smooth_sigma=state.detection.xtemp_smooth_sigma)
 
     merge_target = _find_stable_merge_target(state, profile, k_stab=state.promotion.eq9_merge_threshold)
     if merge_target is not None:
@@ -1441,7 +1361,6 @@ def _promote_candidate(state, track, frame_index):
             if sub_profile is None:
                 return cell_id, False
             profile = sub_profile
-            full_footprint_profile = sub_profile
         else:  # 'candidate_new'
             if sub_profile is not None:
                 _replace_cell_profile(state, cell_id, sub_profile)
@@ -1454,7 +1373,6 @@ def _promote_candidate(state, track, frame_index):
     y0, y1, x0, x1 = _cell_window_bounds(profile, state.fit.pad_space, state.mov_y, state.mov_x, state.fit.use_com)
     _add_cell_setup(state, new_id, y0, y1, x0, x1)
     _invalidate_overlapping_setups(state, new_id, y0, y1, x0, x1)
-    _update_known_cell_exclude_mask(state, new_id, y0, y1, x0, x1, footprint_source=full_footprint_profile)
     return new_id, True
 
 
@@ -1543,11 +1461,16 @@ def realSEUDOfit(frame, state, frame_index=None, zero_level=None):
 
     # detect on R1 (raw residual after known-cell fitting) and advance every
     # existing track by centroid-matching against it -- unchanged from
-    # before two-stage detection; see _update_candidate_tracks. Also
-    # excludes rejected_region_mask -- a region quarantined (see
+    # before two-stage detection; see _update_candidate_tracks. Excludes
+    # rejected_region_mask -- a region quarantined (see
     # _quarantine_rejected_regions) for being too large to be a real cell
-    # on some earlier frame should never be rescanned either.
-    base_exclude_mask = state.known_cell_exclude_mask | state.rejected_region_mask
+    # on some earlier frame should never be rescanned either. Nothing here
+    # excludes a known cell's own footprint (see the module docstring's
+    # eq8_merge_threshold/eq9_merge_threshold note for why) -- a known
+    # cell's own residual re-crossing threshold is caught by the same Eq.
+    # 8/9 merge checks that catch any other duplicate, not a separate
+    # spatial exclusion mask.
+    base_exclude_mask = state.rejected_region_mask
     smoothed = convolve2d(residual, state.detect_blob, mode='same')
     raw_candidates, rejected_bboxes = _run_tile_detection(state, smoothed, noise_map, base_exclude_mask)
     matched_track_ids = _update_candidate_tracks(state, raw_candidates, residual, frame_index)

@@ -733,7 +733,9 @@ def test_run_cnmf_without_data_warns(monkeypatch):
 
 def _pca_ica_fingerprint(tab, movie):
     kwargs = dict(n_pca_components=tab.n_pca_components_spin.value(), n_ica_components=tab.n_ica_components_spin.value())
-    return (id(movie), pca_ica_source_extraction, tuple(sorted(kwargs.items())))
+    # trailing None matches _run_batch_method's extra_fingerprint default
+    # (a normal, non-test run) -- see run_test_btn's n_frames_limit.
+    return (id(movie), pca_ica_source_extraction, tuple(sorted(kwargs.items())), None)
 
 
 def test_run_pca_ica_with_unchanged_parameters_prompts_and_skips_if_declined(monkeypatch):
@@ -1273,3 +1275,136 @@ def test_on_modality_changed_disables_real_seudo_when_volumetric():
 
     idx = tab.method_combo.findText("Real-SEUDO")
     assert not tab.method_combo.model().item(idx).isEnabled()
+
+
+# --- "Run <N>-frame test" button ---------------------------------------
+# _TEST_N_FRAMES is monkeypatched down to a small value throughout so these
+# tests don't need a genuinely 10000+-frame synthetic movie to exercise the
+# gray-out/enabled boundary or an actual capped run.
+
+def test_run_test_btn_is_disabled_with_no_data_loaded():
+    state = AppState()
+    tab = SourceExtractionTab(state)
+    assert not tab.run_test_btn.isEnabled()
+
+
+def test_run_test_btn_disabled_when_movie_has_fewer_frames_than_threshold(monkeypatch):
+    monkeypatch.setattr("orbitapp.tabs.source_extraction_tab._TEST_N_FRAMES", 50)
+    state = AppState()
+    state.load("movie.tif", _synthetic_movie(n_frames=49))
+    tab = SourceExtractionTab(state)
+    tab.on_data_loaded()
+    _wait_for_worker(tab)
+
+    assert not tab.run_test_btn.isEnabled()
+
+
+def test_run_test_btn_enabled_when_movie_has_at_least_threshold_frames(monkeypatch):
+    monkeypatch.setattr("orbitapp.tabs.source_extraction_tab._TEST_N_FRAMES", 50)
+    state = AppState()
+    state.load("movie.tif", _synthetic_movie(n_frames=50))
+    tab = SourceExtractionTab(state)
+    tab.on_data_loaded()
+    _wait_for_worker(tab)
+
+    assert tab.run_test_btn.isEnabled()
+
+
+def test_run_test_btn_reflects_a_movie_loaded_after_construction(monkeypatch):
+    # on_modality_changed (not just on_data_loaded) also refreshes the
+    # button, since either can flip which movie/modality is active.
+    monkeypatch.setattr("orbitapp.tabs.source_extraction_tab._TEST_N_FRAMES", 50)
+    state = AppState()
+    tab = SourceExtractionTab(state)
+    assert not tab.run_test_btn.isEnabled()
+
+    state.load("movie.tif", _synthetic_movie(n_frames=50))
+    tab.on_data_loaded()
+    _wait_for_worker(tab)
+    assert tab.run_test_btn.isEnabled()
+
+    tab.on_modality_changed()
+    assert tab.run_test_btn.isEnabled()
+
+
+def test_on_run_test_clicked_dispatches_to_whichever_method_is_selected(monkeypatch):
+    state = AppState()
+    state.load("movie.tif", _synthetic_movie())
+    tab = SourceExtractionTab(state)
+    tab.on_data_loaded()
+    _wait_for_worker(tab)
+
+    calls = []
+    for name in ("pca_ica", "cnmf", "cnmf_e", "graft", "real_seudo"):
+        monkeypatch.setattr(
+            tab, f"_on_run_{name}_clicked", lambda n_frames_limit=None, name=name: calls.append((name, n_frames_limit))
+        )
+
+    for label, key in (
+        ("PCA-ICA", "pca_ica"), ("CNMF", "cnmf"), ("CNMF-E", "cnmf_e"),
+        ("GraFT", "graft"), ("Real-SEUDO", "real_seudo"),
+    ):
+        tab.method_combo.setCurrentIndex(tab.method_combo.findText(label))
+        tab._on_run_test_clicked()
+
+    from orbitapp.tabs.source_extraction_tab import _TEST_N_FRAMES
+    assert calls == [
+        ("pca_ica", _TEST_N_FRAMES), ("cnmf", _TEST_N_FRAMES), ("cnmf_e", _TEST_N_FRAMES),
+        ("graft", _TEST_N_FRAMES), ("real_seudo", _TEST_N_FRAMES),
+    ]
+
+
+def test_run_test_btn_caps_pca_ica_to_the_requested_frame_count(monkeypatch):
+    monkeypatch.setattr("orbitapp.tabs.source_extraction_tab._TEST_N_FRAMES", 20)
+    state = AppState()
+    state.load("movie.tif", _synthetic_movie(n_frames=60))
+    tab = SourceExtractionTab(state)
+    tab.on_data_loaded()
+    _wait_for_worker(tab)
+    # Component counts must fit within the 20-frame test cap below (the
+    # spinboxes' own defaults, 50/40, exceed it and would make sklearn
+    # raise -- see _set_lenient_real_seudo_params's own precedent).
+    tab.n_pca_components_spin.setValue(10)
+    tab.n_ica_components_spin.setValue(6)
+
+    seen_shapes = []
+    real_fn = pca_ica_source_extraction
+    monkeypatch.setattr(
+        "orbitapp.tabs.source_extraction_tab.pca_ica_source_extraction",
+        lambda movie, **kw: (seen_shapes.append(movie.shape), real_fn(movie, **kw))[1],
+    )
+
+    tab.method_combo.setCurrentIndex(tab.method_combo.findText("PCA-ICA"))
+    tab._on_run_test_clicked()
+    _wait_for_worker(tab)
+
+    assert seen_shapes == [(30, 30, 20)]  # capped, not the full 60-frame movie
+
+
+def test_run_test_btn_and_a_full_run_are_not_treated_as_the_same_prior_run(monkeypatch):
+    # A test run and a full run share every algorithm kwarg, but must not
+    # be mistaken for "already ran with these exact parameters" against
+    # each other -- extra_fingerprint (the n_frames_limit) keeps them apart.
+    monkeypatch.setattr("orbitapp.tabs.source_extraction_tab._TEST_N_FRAMES", 20)
+    state = AppState()
+    state.load("movie.tif", _synthetic_movie(n_frames=60))
+    tab = SourceExtractionTab(state)
+    tab.on_data_loaded()
+    _wait_for_worker(tab)
+    # Must fit within the 20-frame test cap used below, not just the
+    # 60-frame full run (see the sibling test above for why).
+    tab.n_pca_components_spin.setValue(10)
+    tab.n_ica_components_spin.setValue(6)
+
+    prompted = []
+    monkeypatch.setattr(
+        "orbitapp.tabs.source_extraction_tab.confirm_recompute", lambda *a, **k: prompted.append(1) or False
+    )
+
+    tab.method_combo.setCurrentIndex(tab.method_combo.findText("PCA-ICA"))
+    tab._on_run_pca_ica_clicked()  # full run
+    _wait_for_worker(tab)
+    tab._on_run_test_clicked()  # test run, same params -- must not be seen as a repeat of the full run
+    _wait_for_worker(tab)
+
+    assert prompted == []

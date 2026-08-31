@@ -86,6 +86,16 @@ _PIPELINE_LABELS = {
     "real_seudo": "Real-SEUDO",
 }
 
+# "Run <N>-frame test" button: runs whichever method is currently selected,
+# with its current parameters, capped to just the movie's first N frames --
+# a quick way to sanity-check parameters before committing to a potentially
+# very slow full run (Real-SEUDO in particular fits one frame at a time, so
+# its full-movie cost scales directly with frame count -- see
+# orbit.roi_extraction_realseudo's docstring). Grayed out (see
+# _update_test_button_enabled) whenever the loaded movie has fewer than
+# this many frames to begin with.
+_TEST_N_FRAMES = 10000
+
 
 def _grow_seeds(movie: np.ndarray, seeds: list[tuple[int, int]], kwargs: dict) -> list[dict]:
     """Runs off the GUI thread. Returns plain dicts rather than ROI objects
@@ -273,12 +283,6 @@ class SourceExtractionTab(QWidget):
             "local noise level, positive values are an absolute threshold."
         )
         self.real_seudo_mask_blur_rad_spin = make_spinbox(0, 50, 1)
-        self.real_seudo_exclude_radius_spin = make_spinbox(-1, 500, 5)
-        self.real_seudo_exclude_radius_spin.setToolTip(
-            "How far (in pixels) a known cell's footprint is dilated before being excluded from new-"
-            "candidate detection. -1 disables known-cell exclusion entirely (recovers more overlapping "
-            "cells, at a real precision cost) -- see orbit.seudo.streaming.DetectionParams' docstring."
-        )
         self.real_seudo_consecutive_frames_spin = make_spinbox(1, 1000, 5)
         self.real_seudo_max_track_gap_spin = make_spinbox(0, 100, 1)
         self.real_seudo_eq8_merge_thresh_spin = make_spinbox(0.0, 1.0, 0.75, step=0.05, decimal=True)
@@ -332,7 +336,6 @@ class SourceExtractionTab(QWidget):
         self.params_dialog.add_row("min ROI size (px)", self.real_seudo_min_roi_size_spin, group="real_seudo")
         self.params_dialog.add_row("min average brightness", self.real_seudo_min_avg_px_spin, group="real_seudo")
         self.params_dialog.add_row("mask blur radius (px)", self.real_seudo_mask_blur_rad_spin, group="real_seudo")
-        self.params_dialog.add_row("known-cell exclusion radius (px)", self.real_seudo_exclude_radius_spin, group="real_seudo")
         self.params_dialog.add_row("consecutive frames to promote", self.real_seudo_consecutive_frames_spin, group="real_seudo")
         self.params_dialog.add_row("max track gap (frames)", self.real_seudo_max_track_gap_spin, group="real_seudo")
         self.params_dialog.add_row("merge threshold (candidate-candidate)", self.real_seudo_eq8_merge_thresh_spin, group="real_seudo")
@@ -352,6 +355,16 @@ class SourceExtractionTab(QWidget):
         self.run_graft_btn = self._add_run_action("Run GraFT", self._on_run_graft_clicked)
         self.run_real_seudo_btn = self._add_run_action("Run Real-SEUDO", self._on_run_real_seudo_clicked)
         controls_row.addWidget(self.action_stack)
+
+        self.run_test_btn = QPushButton(f"Run {_TEST_N_FRAMES}-frame test")
+        self.run_test_btn.clicked.connect(self._on_run_test_clicked)
+        self.run_test_btn.setToolTip(
+            f"Runs the currently-selected method with its current parameters, capped to just the movie's "
+            f"first {_TEST_N_FRAMES} frames -- a quick way to sanity-check parameters before committing to "
+            f"a potentially very slow full run. Grayed out if the loaded movie has fewer than "
+            f"{_TEST_N_FRAMES} frames."
+        )
+        controls_row.addWidget(self.run_test_btn)
 
         self.commit_btn = QPushButton("Commit Accepted ROIs")
         self.commit_btn.clicked.connect(self._commit)
@@ -392,6 +405,7 @@ class SourceExtractionTab(QWidget):
 
         self._on_method_changed(self.method_combo.currentText())
         self.on_modality_changed()  # reflects state.volumetric's initial value, if already set
+        self._update_test_button_enabled()
 
     def _build_correlation_rows(self) -> QVBoxLayout:
         """Correlation-based click-to-add: always active, independent of
@@ -512,6 +526,20 @@ class SourceExtractionTab(QWidget):
             self.method_combo.setCurrentText("GraFT")
         self.auto_seed_btn.setEnabled(not volumetric)
         self._update_modality_warning()
+        self._update_test_button_enabled()
+
+    def _update_test_button_enabled(self) -> None:
+        """Grays out run_test_btn whenever the active movie has fewer than
+        _TEST_N_FRAMES frames to begin with -- a "test" capped to the
+        first N frames of a shorter movie would just be the full run
+        again, not a useful quick check. Time is axis 0 for a volumetric
+        (T, L, W, D) movie, axis -1 for a 2D (H, W, T) one."""
+        movie = self.state.active_data()
+        if movie is None:
+            self.run_test_btn.setEnabled(False)
+            return
+        n_frames = movie.shape[0] if self.state.volumetric else movie.shape[-1]
+        self.run_test_btn.setEnabled(n_frames >= _TEST_N_FRAMES)
 
     def on_data_loaded(self) -> None:
         movie = self.state.active_data()
@@ -519,6 +547,7 @@ class SourceExtractionTab(QWidget):
         self._clear_preview()
         self._last_batch_run = None  # a new/changed movie invalidates any prior "already run" state
         self.review_panel.set_candidates(self._candidates)
+        self._update_test_button_enabled()
         if movie is None:
             self._corr_image = None
             self.status_label.setText("No data loaded.")
@@ -642,7 +671,9 @@ class SourceExtractionTab(QWidget):
         )
         self._add_candidates(rois)
 
-    def _run_batch_method(self, message: str, fn, on_success, worker_movie=None, **kwargs) -> None:
+    def _run_batch_method(
+        self, message: str, fn, on_success, worker_movie=None, extra_fingerprint=None, **kwargs
+    ) -> None:
         """Launches a batch extraction algorithm (PCA-ICA, CNMF, ...) in
         the background -- shared by every such method since they only
         differ in the function/message/kwargs/result-handler. Skips
@@ -655,13 +686,18 @@ class SourceExtractionTab(QWidget):
         the "already ran" fingerprint still keys off the real active
         movie (``id(movie)``) regardless, so switching between a memmap
         and non-memmap load of the same path is still treated as a
-        different dataset."""
+        different dataset. ``extra_fingerprint`` folds an extra value
+        into that same fingerprint without forwarding it to ``fn`` as a
+        kwarg -- used by run_test_btn's n_frames_limit, so a test run and
+        a full run with otherwise-identical parameters are correctly
+        treated as different (not "already ran"), even though worker_movie
+        itself isn't part of the fingerprint."""
         movie = self.state.active_data()
         if movie is None:
             QMessageBox.warning(self, "No data", "Load data on the Load tab first.")
             return
 
-        fingerprint = (id(movie), fn, tuple(sorted(kwargs.items())))
+        fingerprint = (id(movie), fn, tuple(sorted(kwargs.items())), extra_fingerprint)
         if fingerprint == self._last_batch_run:
             already_done = "This method was already run with these exact parameters on this data."
             if not confirm_recompute(self, already_done):
@@ -676,19 +712,25 @@ class SourceExtractionTab(QWidget):
             on_success=_on_success, on_failure=self._on_failed, **kwargs,
         )
 
-    def _on_run_pca_ica_clicked(self) -> None:
+    def _on_run_pca_ica_clicked(self, n_frames_limit: int | None = None) -> None:
         movie = self.state.active_data()
         self._pending_batch_params = dict(
             n_pca_components=self.n_pca_components_spin.value(), n_ica_components=self.n_ica_components_spin.value(),
         )
-        # PCA/ICA decomposes the whole (P, T) movie at once -- no
-        # patch-based equivalent exists for it, so a memmap movie is
-        # always capped to the same 5000-frame preview Apply uses
-        # elsewhere in the app, rather than materializing the whole thing.
-        worker_movie = preview_slice(movie) if movie is not None and is_memmap(movie) else None
+        if n_frames_limit is not None:
+            # run_test_btn -- capped to a fixed prefix regardless of memmap,
+            # a much smaller/faster slice than even the memmap preview below.
+            worker_movie = movie[:, :, :n_frames_limit] if movie is not None else None
+        else:
+            # PCA/ICA decomposes the whole (P, T) movie at once -- no
+            # patch-based equivalent exists for it, so a memmap movie is
+            # always capped to the same 5000-frame preview Apply uses
+            # elsewhere in the app, rather than materializing the whole thing.
+            worker_movie = preview_slice(movie) if movie is not None and is_memmap(movie) else None
+        message = "Running PCA-ICA..." if n_frames_limit is None else f"Running PCA-ICA (first {n_frames_limit} frames)..."
         self._run_batch_method(
-            "Running PCA-ICA...", pca_ica_source_extraction, self._on_pca_ica_finished,
-            worker_movie=worker_movie, **self._pending_batch_params,
+            message, pca_ica_source_extraction, self._on_pca_ica_finished,
+            worker_movie=worker_movie, extra_fingerprint=n_frames_limit, **self._pending_batch_params,
         )
 
     def _on_pca_ica_finished(self, result: PCAICAResult) -> None:
@@ -711,20 +753,28 @@ class SourceExtractionTab(QWidget):
         )
         return True
 
-    def _on_run_cnmf_clicked(self) -> None:
+    def _on_run_cnmf_clicked(self, n_frames_limit: int | None = None) -> None:
         movie = self.state.active_data()
         memmap_input = movie is not None and is_memmap(movie)
-        if self._refuse_if_memmap_without_patch(memmap_input, self.cnmf_patch_check, "CNMF"):
+        # run_test_btn's capped slice is already far smaller than even the
+        # memmap preview below -- the patch-required-for-memmap guard exists
+        # to avoid materializing a whole huge movie, which a test run never
+        # attempts regardless of patch mode.
+        if n_frames_limit is None and self._refuse_if_memmap_without_patch(memmap_input, self.cnmf_patch_check, "CNMF"):
             return
-        # Both CNMF modes are capped to the same 5000-frame preview for a
-        # memmap movie: patch-based CNMF is already bounded by patch
-        # size regardless of frame count, but at the sizes memmap users
-        # are dealing with it's still much faster to fit against a
-        # representative sample than the whole recording. _commit()
-        # re-extracts every accepted ROI's trace from the full movie
-        # afterward, so this doesn't leave traces reflecting only the
-        # preview in the committed result.
-        worker_movie = preview_slice(movie) if memmap_input else None
+        if n_frames_limit is not None:
+            worker_movie = movie[:, :, :n_frames_limit] if movie is not None else None
+        else:
+            # Both CNMF modes are capped to the same 5000-frame preview for a
+            # memmap movie: patch-based CNMF is already bounded by patch
+            # size regardless of frame count, but at the sizes memmap users
+            # are dealing with it's still much faster to fit against a
+            # representative sample than the whole recording. _commit()
+            # re-extracts every accepted ROI's trace from the full movie
+            # afterward, so this doesn't leave traces reflecting only the
+            # preview in the committed result.
+            worker_movie = preview_slice(movie) if memmap_input else None
+        suffix = "" if n_frames_limit is None else f" (first {n_frames_limit} frames)"
 
         if self.cnmf_patch_check.isChecked():
             patch = self.cnmf_patch_size_spin.value()
@@ -735,8 +785,9 @@ class SourceExtractionTab(QWidget):
                 search_radius=self.cnmf_search_radius_spin.value(),
             )
             self._run_batch_method(
-                "Running patch-based CNMF (this can take a while)...", patch_cnmf_source_extraction,
-                self._on_cnmf_finished, worker_movie=worker_movie, **self._pending_batch_params,
+                f"Running patch-based CNMF{suffix} (this can take a while)...", patch_cnmf_source_extraction,
+                self._on_cnmf_finished, worker_movie=worker_movie, extra_fingerprint=n_frames_limit,
+                **self._pending_batch_params,
             )
             return
 
@@ -745,8 +796,8 @@ class SourceExtractionTab(QWidget):
             merge_thresh=self.cnmf_merge_thresh_spin.value(),
         )
         self._run_batch_method(
-            "Running CNMF (this can take a while)...", cnmf_source_extraction, self._on_cnmf_finished,
-            worker_movie=worker_movie, **self._pending_batch_params,
+            f"Running CNMF{suffix} (this can take a while)...", cnmf_source_extraction, self._on_cnmf_finished,
+            worker_movie=worker_movie, extra_fingerprint=n_frames_limit, **self._pending_batch_params,
         )
 
     def _on_cnmf_finished(self, result: CNMFResult) -> None:
@@ -755,15 +806,19 @@ class SourceExtractionTab(QWidget):
         )
         self._add_candidates(rois)
 
-    def _on_run_cnmf_e_clicked(self) -> None:
+    def _on_run_cnmf_e_clicked(self, n_frames_limit: int | None = None) -> None:
         movie = self.state.active_data()
         memmap_input = movie is not None and is_memmap(movie)
-        if self._refuse_if_memmap_without_patch(memmap_input, self.cnmf_e_patch_check, "CNMF-E"):
+        if n_frames_limit is None and self._refuse_if_memmap_without_patch(memmap_input, self.cnmf_e_patch_check, "CNMF-E"):
             return
-        # Same reasoning as _on_run_cnmf_clicked: capped to the 5000-frame
-        # preview for a memmap movie either way; _commit() re-extracts
-        # every accepted ROI's trace from the full movie afterward.
-        worker_movie = preview_slice(movie) if memmap_input else None
+        if n_frames_limit is not None:
+            worker_movie = movie[:, :, :n_frames_limit] if movie is not None else None
+        else:
+            # Same reasoning as _on_run_cnmf_clicked: capped to the 5000-frame
+            # preview for a memmap movie either way; _commit() re-extracts
+            # every accepted ROI's trace from the full movie afterward.
+            worker_movie = preview_slice(movie) if memmap_input else None
+        suffix = "" if n_frames_limit is None else f" (first {n_frames_limit} frames)"
 
         # search_radius/min_corr/min_pnr/ring_* are common to both modes
         # (whole-FOV takes them directly; patch mode forwards them as
@@ -785,8 +840,9 @@ class SourceExtractionTab(QWidget):
                 merge_thresh=self.cnmf_e_merge_thresh_spin.value(), **ring_params,
             )
             self._run_batch_method(
-                "Running patch-based CNMF-E (this can take a while)...", patch_cnmf_e_source_extraction,
-                self._on_cnmf_e_finished, worker_movie=worker_movie, **self._pending_batch_params,
+                f"Running patch-based CNMF-E{suffix} (this can take a while)...", patch_cnmf_e_source_extraction,
+                self._on_cnmf_e_finished, worker_movie=worker_movie, extra_fingerprint=n_frames_limit,
+                **self._pending_batch_params,
             )
             return
 
@@ -795,8 +851,8 @@ class SourceExtractionTab(QWidget):
             **ring_params,
         )
         self._run_batch_method(
-            "Running CNMF-E (this can take a while)...", cnmf_e_source_extraction, self._on_cnmf_e_finished,
-            worker_movie=worker_movie, **self._pending_batch_params,
+            f"Running CNMF-E{suffix} (this can take a while)...", cnmf_e_source_extraction, self._on_cnmf_e_finished,
+            worker_movie=worker_movie, extra_fingerprint=n_frames_limit, **self._pending_batch_params,
         )
 
     def _on_cnmf_e_finished(self, result: CNMFResult) -> None:
@@ -820,20 +876,24 @@ class SourceExtractionTab(QWidget):
             "learn_eps": self.graft_learn_eps_spin.value(),
         }
 
-    def _on_run_graft_clicked(self) -> None:
+    def _on_run_graft_clicked(self, n_frames_limit: int | None = None) -> None:
         if self.state.volumetric:
-            self._on_run_graft_clicked_volumetric()
+            self._on_run_graft_clicked_volumetric(n_frames_limit=n_frames_limit)
             return
         movie = self.state.active_data()
         memmap_input = movie is not None and is_memmap(movie)
-        if self._refuse_if_memmap_without_patch(memmap_input, self.graft_patch_check, "GraFT"):
+        if n_frames_limit is None and self._refuse_if_memmap_without_patch(memmap_input, self.graft_patch_check, "GraFT"):
             return
-        # Same reasoning as _on_run_cnmf_clicked: capped to the 5000-frame
-        # preview for a memmap movie either way (patch-based GraFT is
-        # already memmap-safe regardless, but fitting against the whole
-        # recording is unnecessarily slow at the sizes memmap users deal
-        # with) -- _commit() re-extracts traces from the full movie after.
-        worker_movie = preview_slice(movie) if memmap_input else None
+        if n_frames_limit is not None:
+            worker_movie = movie[:, :, :n_frames_limit] if movie is not None else None
+        else:
+            # Same reasoning as _on_run_cnmf_clicked: capped to the 5000-frame
+            # preview for a memmap movie either way (patch-based GraFT is
+            # already memmap-safe regardless, but fitting against the whole
+            # recording is unnecessarily slow at the sizes memmap users deal
+            # with) -- _commit() re-extracts traces from the full movie after.
+            worker_movie = preview_slice(movie) if memmap_input else None
+        suffix = "" if n_frames_limit is None else f" (first {n_frames_limit} frames)"
 
         if self.graft_patch_check.isChecked():
             patch = self.graft_patch_size_spin.value()
@@ -843,18 +903,19 @@ class SourceExtractionTab(QWidget):
                 n_dict_per_patch=self.graft_n_dict_per_patch_spin.value(), **self._graft_shared_params(),
             )
             self._run_batch_method(
-                "Running patch-based GraFT (this can take a while)...", patch_graft_source_extraction,
-                self._on_graft_finished, worker_movie=worker_movie, **self._pending_batch_params,
+                f"Running patch-based GraFT{suffix} (this can take a while)...", patch_graft_source_extraction,
+                self._on_graft_finished, worker_movie=worker_movie, extra_fingerprint=n_frames_limit,
+                **self._pending_batch_params,
             )
             return
 
         self._pending_batch_params = dict(n_dict=self.graft_n_dict_spin.value(), **self._graft_shared_params())
         self._run_batch_method(
-            "Running GraFT (this can take a while)...", graft_source_extraction, self._on_graft_finished,
-            worker_movie=worker_movie, **self._pending_batch_params,
+            f"Running GraFT{suffix} (this can take a while)...", graft_source_extraction, self._on_graft_finished,
+            worker_movie=worker_movie, extra_fingerprint=n_frames_limit, **self._pending_batch_params,
         )
 
-    def _on_run_graft_clicked_volumetric(self) -> None:
+    def _on_run_graft_clicked_volumetric(self, n_frames_limit: int | None = None) -> None:
         # Must be a real, restricting mask -- not given, not empty, and
         # not all-True (an explicit Clear Mask, or an auto-threshold that
         # happened to keep everything, doesn't reduce the voxel count).
@@ -870,9 +931,13 @@ class SourceExtractionTab(QWidget):
             return
         movie = self.state.active_data()
         memmap_input = movie is not None and is_memmap(movie)
-        if self._refuse_if_memmap_without_patch(memmap_input, self.graft_patch_check, "GraFT"):
+        if n_frames_limit is None and self._refuse_if_memmap_without_patch(memmap_input, self.graft_patch_check, "GraFT"):
             return
-        worker_movie = preview_slice_volumetric(movie) if memmap_input else None
+        if n_frames_limit is not None:
+            worker_movie = movie[:n_frames_limit] if movie is not None else None  # time is axis 0 for (T, L, W, D)
+        else:
+            worker_movie = preview_slice_volumetric(movie) if memmap_input else None
+        suffix = "" if n_frames_limit is None else f" (first {n_frames_limit} frames)"
 
         # mask is bound into the callable itself (functools.partial) rather
         # than passed as a kwarg -- _run_batch_method's "already ran with
@@ -891,28 +956,29 @@ class SourceExtractionTab(QWidget):
             )
             fn = functools.partial(patch_graft_source_extraction_3d, mask=self.state.mask)
             self._run_batch_method(
-                "Running patch-based GraFT (this can take a while)...", fn,
-                self._on_graft_finished, worker_movie=worker_movie, **self._pending_batch_params,
+                f"Running patch-based GraFT{suffix} (this can take a while)...", fn,
+                self._on_graft_finished, worker_movie=worker_movie, extra_fingerprint=n_frames_limit,
+                **self._pending_batch_params,
             )
             return
 
         self._pending_batch_params = dict(n_dict=self.graft_n_dict_spin.value(), **self._graft_shared_params())
         fn = functools.partial(graft_source_extraction_3d, mask=self.state.mask)
         self._run_batch_method(
-            "Running GraFT (this can take a while)...", fn, self._on_graft_finished,
-            worker_movie=worker_movie, **self._pending_batch_params,
+            f"Running GraFT{suffix} (this can take a while)...", fn, self._on_graft_finished,
+            worker_movie=worker_movie, extra_fingerprint=n_frames_limit, **self._pending_batch_params,
         )
 
     def _on_graft_finished(self, result: GraFTResult | GraFTResult3D) -> None:
         rois = self._make_rois(result.masks, result.traces, "graft", params=self._pending_batch_params)
         self._add_candidates(rois)
 
-    def _on_run_real_seudo_clicked(self) -> None:
+    def _on_run_real_seudo_clicked(self, n_frames_limit: int | None = None) -> None:
         # Unlike every other batch method above, no memmap/patch handling
         # at all: real_seudo_source_extraction fits one frame at a time by
         # construction, so it's already memmap-safe -- no worker_movie=
-        # override needed, _run_batch_method runs it directly against the
-        # real active_data() regardless of whether that's memmap-backed.
+        # override needed for a full run, only for run_test_btn's capped one.
+        movie = self.state.active_data()
         self._pending_batch_params = dict(
             sigma2=self.real_seudo_sigma2_spin.value(), lambda_blob=self.real_seudo_lambda_blob_spin.value(),
             blob_radius=self.real_seudo_blob_radius_spin.value(), pad_space=self.real_seudo_pad_space_spin.value(),
@@ -921,20 +987,44 @@ class SourceExtractionTab(QWidget):
             min_roi_size=self.real_seudo_min_roi_size_spin.value(),
             min_avg_px=self.real_seudo_min_avg_px_spin.value(),
             mask_blur_rad=self.real_seudo_mask_blur_rad_spin.value(),
-            exclude_radius_known_cells=self.real_seudo_exclude_radius_spin.value(),
             consecutive_frames_required=self.real_seudo_consecutive_frames_spin.value(),
             max_track_gap=self.real_seudo_max_track_gap_spin.value(),
             eq8_merge_threshold=self.real_seudo_eq8_merge_thresh_spin.value(),
             eq9_merge_threshold=self.real_seudo_eq9_merge_thresh_spin.value(),
         )
+        worker_movie = movie[:, :, :n_frames_limit] if n_frames_limit is not None and movie is not None else None
+        message = (
+            "Running Real-SEUDO (this can take a while)..." if n_frames_limit is None
+            else f"Running Real-SEUDO (first {n_frames_limit} frames)..."
+        )
         self._run_batch_method(
-            "Running Real-SEUDO (this can take a while)...", real_seudo_source_extraction,
-            self._on_real_seudo_finished, **self._pending_batch_params,
+            message, real_seudo_source_extraction, self._on_real_seudo_finished,
+            worker_movie=worker_movie, extra_fingerprint=n_frames_limit, **self._pending_batch_params,
         )
 
     def _on_real_seudo_finished(self, result: RealSeudoResult) -> None:
         rois = self._make_rois(result.masks, result.traces, "real_seudo", params=self._pending_batch_params)
         self._add_candidates(rois)
+
+    def _on_run_test_clicked(self) -> None:
+        """run_test_btn: runs whichever method is currently selected, with
+        its current parameters, capped to the movie's first _TEST_N_FRAMES
+        frames -- each method's own _on_run_*_clicked already knows how to
+        build a frame-capped worker_movie (see their n_frames_limit
+        parameter), so this just dispatches to the right one rather than
+        duplicating any of their param-gathering logic. GraFT's own
+        handler already branches to its volumetric counterpart internally
+        (see _on_run_graft_clicked), so "graft" doesn't need special-
+        casing here even under state.volumetric."""
+        method = _METHOD_KEYS[self.method_combo.currentText()]
+        handler = {
+            "pca_ica": self._on_run_pca_ica_clicked,
+            "cnmf": self._on_run_cnmf_clicked,
+            "cnmf_e": self._on_run_cnmf_e_clicked,
+            "graft": self._on_run_graft_clicked,
+            "real_seudo": self._on_run_real_seudo_clicked,
+        }[method]
+        handler(n_frames_limit=_TEST_N_FRAMES)
 
     def _make_rois(
         self, masks: list[np.ndarray], traces: list[np.ndarray], source_method: str,
