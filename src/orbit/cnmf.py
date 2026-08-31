@@ -17,6 +17,7 @@ import os
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
 from graft import solvers as graft_solvers
@@ -348,37 +349,42 @@ def _run_patch(movie_patch: np.ndarray, n_components_per_patch: int, merge_thres
     )
 
 
-def patch_cnmf_source_extraction(
+def _run_patches_and_merge(
     movie: np.ndarray,
-    patch_size: tuple[int, int] = (80, 80),
-    overlap: int = 20,
-    n_components_per_patch: int = 10,
-    merge_thresh: float = 0.8,
-    progress_callback=None,
-    max_workers: int | None = _DEFAULT_MAX_WORKERS,
-    **cnmf_kwargs,
+    per_patch_fn: Callable[[np.ndarray, int, float, dict], CNMFResult],
+    patch_size: tuple[int, int],
+    overlap: int,
+    n_components_per_patch: int,
+    merge_thresh: float,
+    progress_callback,
+    max_workers: int | None,
+    patch_kwargs: dict,
 ) -> CNMFResult:
-    """Runs cnmf_source_extraction independently on overlapping spatial
-    patches instead of the whole field of view at once, then merges
-    components found in more than one patch's overlap region -- reusing
-    merge_overlapping_components, the same logic a single-patch run
-    already uses to resolve split/duplicate components.
+    """Shared patch-orchestration core for patch_cnmf_source_extraction
+    below and cnmf_e.patch_cnmf_e_source_extraction: splits the field of
+    view into overlapping patches, runs ``per_patch_fn`` (a module-level,
+    ProcessPoolExecutor-picklable per-patch entry point -- see _run_patch/
+    cnmf_e._run_patch_e) on each in its own worker process, re-embeds
+    each patch's locally-indexed components into full-FOV-sized
+    footprints, and merges components found in more than one patch's
+    overlap region via merge_overlapping_components -- the same logic a
+    single-patch run already uses to resolve split/duplicate components.
 
-    Patching exists because several of cnmf_source_extraction's costs
-    scale with the *whole frame* regardless of how many components are
+    Patching exists because several of a single-patch run's costs scale
+    with the *whole frame* regardless of how many components are
     actually in it (background estimation, the initial reconstruction,
     the spatial-update scan region) -- restricting each run to a patch
     keeps those bounded by patch_size instead of the full (H, W).
-    cnmf_kwargs are forwarded to every patch's cnmf_source_extraction
-    call (gauss_sigma, init_radius, search_radius, n_iterations, ...).
-    progress_callback, if given, is called as progress_callback(
-    patches_done, total_patches) once per patch, in patch order, as each
-    patch's result becomes available (patches themselves may finish out
-    of order across worker processes). max_workers caps how many patches
-    run concurrently -- None falls back to
-    min(_DEFAULT_MAX_WORKERS, os.cpu_count(), len(patches)); see
-    _DEFAULT_MAX_WORKERS' comment for why that stays a small constant
-    rather than just os.cpu_count()."""
+    ``patch_kwargs`` are forwarded to every patch's ``per_patch_fn`` call
+    (gauss_sigma, init_radius, search_radius, n_iterations, ... or, for
+    CNMF-E, also the ring-model parameters). progress_callback, if
+    given, is called as progress_callback(patches_done, total_patches)
+    once per patch, in patch order, as each patch's result becomes
+    available (patches themselves may finish out of order across worker
+    processes). max_workers caps how many patches run concurrently --
+    None falls back to min(_DEFAULT_MAX_WORKERS, os.cpu_count(),
+    len(patches)); see _DEFAULT_MAX_WORKERS' comment for why that stays
+    a small constant rather than just os.cpu_count()."""
     height, width, _n_frames = movie.shape
     patches = make_patches_2d(height, width, patch_size, overlap)
     workers = max_workers if max_workers is not None else min(_DEFAULT_MAX_WORKERS, os.cpu_count() or 1, len(patches))
@@ -386,7 +392,7 @@ def patch_cnmf_source_extraction(
     all_footprints, all_traces, all_spikes, all_g = [], [], [], []
     with _single_threaded_blas_for_children(), ProcessPoolExecutor(max_workers=workers, mp_context=_MP_CONTEXT) as pool:
         futures = [
-            pool.submit(_run_patch, movie[r0:r1, c0:c1, :], n_components_per_patch, merge_thresh, cnmf_kwargs)
+            pool.submit(per_patch_fn, movie[r0:r1, c0:c1, :], n_components_per_patch, merge_thresh, patch_kwargs)
             for r0, r1, c0, c1 in patches
         ]
         for i, (future, (r0, r1, c0, c1)) in enumerate(zip(futures, patches)):
@@ -410,3 +416,22 @@ def patch_cnmf_source_extraction(
         np.stack(all_footprints), np.stack(all_traces), np.stack(all_spikes), all_g, merge_thresh
     )
     return _finalize_result(movie, merged_footprints, merged_spikes)
+
+
+def patch_cnmf_source_extraction(
+    movie: np.ndarray,
+    patch_size: tuple[int, int] = (80, 80),
+    overlap: int = 20,
+    n_components_per_patch: int = 10,
+    merge_thresh: float = 0.8,
+    progress_callback=None,
+    max_workers: int | None = _DEFAULT_MAX_WORKERS,
+    **cnmf_kwargs,
+) -> CNMFResult:
+    """Runs cnmf_source_extraction independently on overlapping spatial
+    patches instead of the whole field of view at once -- see
+    _run_patches_and_merge for the shared orchestration/merge mechanics."""
+    return _run_patches_and_merge(
+        movie, _run_patch, patch_size, overlap, n_components_per_patch, merge_thresh, progress_callback,
+        max_workers, cnmf_kwargs,
+    )

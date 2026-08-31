@@ -14,26 +14,25 @@ _finalize_result UNCHANGED -- neither update function cares whether the
 movie it's given already had a background subtracted from it, so the
 ring-corrected movie is a legitimate drop-in for the raw movie those
 functions were written against. patch_cnmf_e_source_extraction below
-mirrors cnmf.py's patch_cnmf_source_extraction structure exactly.
+also reuses cnmf.py's _run_patches_and_merge for the patch-splitting/
+worker-pool/merge orchestration itself (identical to plain CNMF's own
+patch_cnmf_source_extraction there, parametrized by _run_patch_e as the
+per-patch entry point instead of _run_patch).
 """
 
 from __future__ import annotations
 
-import os
 import warnings
-from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 
 from ._masks import threshold_footprint
-from ._patches import make_patches_2d
 from .cnmf import (
     _DEFAULT_MAX_WORKERS,
-    _MP_CONTEXT,
     CNMFResult,
     _finalize_result,
-    _single_threaded_blas_for_children,
     merge_overlapping_components,
+    _run_patches_and_merge,
     update_spatial_components,
     update_temporal_components,
 )
@@ -154,12 +153,9 @@ def patch_cnmf_e_source_extraction(
     **cnmf_e_kwargs,
 ) -> CNMFResult:
     """Runs cnmf_e_source_extraction independently on overlapping
-    spatial patches, then merges components found in more than one
-    patch's overlap region -- mirrors
-    cnmf.patch_cnmf_source_extraction's exact structure (same
-    ProcessPoolExecutor/_single_threaded_blas_for_children/
-    make_patches_2d/merge pattern), with cnmf_e_source_extraction as the
-    per-patch call.
+    spatial patches -- see cnmf._run_patches_and_merge for the shared
+    orchestration/merge mechanics (identical to plain CNMF's own
+    patch_cnmf_source_extraction there).
 
     Warns if ``overlap`` is smaller than the ring model's own
     ``ring_outer_radius`` (default 25.0, or whatever's passed via
@@ -177,34 +173,7 @@ def patch_cnmf_e_source_extraction(
             stacklevel=2,
         )
 
-    height, width, _n_frames = movie.shape
-    patches = make_patches_2d(height, width, patch_size, overlap)
-    workers = max_workers if max_workers is not None else min(_DEFAULT_MAX_WORKERS, os.cpu_count() or 1, len(patches))
-
-    all_footprints, all_traces, all_spikes, all_g = [], [], [], []
-    with _single_threaded_blas_for_children(), ProcessPoolExecutor(max_workers=workers, mp_context=_MP_CONTEXT) as pool:
-        futures = [
-            pool.submit(_run_patch_e, movie[r0:r1, c0:c1, :], n_components_per_patch, merge_thresh, cnmf_e_kwargs)
-            for r0, r1, c0, c1 in patches
-        ]
-        for i, (future, (r0, r1, c0, c1)) in enumerate(zip(futures, patches)):
-            result = future.result()
-            for mask, trace, spike in zip(result.masks, result.traces, result.spike_traces):
-                if not mask.any():
-                    continue
-                full_footprint = np.zeros((height, width))
-                full_footprint[r0:r1, c0:c1] = mask
-                all_footprints.append(full_footprint)
-                all_traces.append(trace)
-                all_spikes.append(spike)
-                all_g.append(estimate_ar1_coefficient(trace))
-            if progress_callback is not None:
-                progress_callback(i + 1, len(patches))
-
-    if not all_footprints:
-        return CNMFResult(masks=[], traces=[], spike_traces=[])
-
-    merged_footprints, _merged_traces, merged_spikes, _g = merge_overlapping_components(
-        np.stack(all_footprints), np.stack(all_traces), np.stack(all_spikes), all_g, merge_thresh
+    return _run_patches_and_merge(
+        movie, _run_patch_e, patch_size, overlap, n_components_per_patch, merge_thresh, progress_callback,
+        max_workers, cnmf_e_kwargs,
     )
-    return _finalize_result(movie, merged_footprints, merged_spikes)
