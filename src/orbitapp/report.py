@@ -203,6 +203,15 @@ _SOURCE_EXTRACTION_EQUATIONS = {
         r"into a flat pixel-by-time array before this same optimization, and the result scattered back "
         r"into a $(L, W, D)$ mask."
     ),
+    "real_seudo": (
+        r"Real-SEUDO streams the movie one frame at a time, fitting each known cell's profile against "
+        r"a nonnegative, $\ell_1$-penalized sparse regression (the SEUDO solver, Gauthier \& Charles, "
+        r"2021) and detecting candidate new cells in the unexplained residual. A candidate is tracked "
+        r"across consecutive frames and promoted into the known-cell set once it's been consistently "
+        r"detected for long enough, rather than requiring the whole movie or a fixed initial guess "
+        r"upfront -- so, unlike every other method here, it never needs the whole movie in memory at "
+        r"once."
+    ),
 }
 
 _BASELINE_NAMES = {
@@ -246,6 +255,8 @@ def _source_extraction_key(label: str) -> str | None:
         return "cnmf"
     if "graft" in lowered:
         return "graft"
+    if "realseudo" in normalized:
+        return "real_seudo"
     return None
 
 

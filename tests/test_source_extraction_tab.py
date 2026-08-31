@@ -80,7 +80,8 @@ def test_method_combo_only_offers_batch_algorithms():
     tab = SourceExtractionTab(state)
 
     labels = [tab.method_combo.itemText(i) for i in range(tab.method_combo.count())]
-    assert labels == ["PCA-ICA", "CNMF", "CNMF-E", "GraFT"]  # correlation click-to-add is not a Method option
+    # correlation click-to-add is not a Method option
+    assert labels == ["PCA-ICA", "CNMF", "CNMF-E", "GraFT", "Real-SEUDO"]
 
 
 def test_method_combo_switches_parameter_group_and_action_widget():
@@ -1181,3 +1182,94 @@ def test_turning_volumetric_off_leaves_2d_source_extraction_unaffected():
     assert len(tab._candidates) > 0
     assert all(roi.source_method == "graft" for roi in tab._candidates)
     assert all(roi.neuropil_trace is not None for roi in tab._candidates)
+
+
+def _single_blob_onset_movie(height=30, width=30, n_frames=40, onset=5, amplitude=5.0, center=(15, 15), seed=0):
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:height, 0:width]
+    blob = np.exp(-((yy - center[0]) ** 2 + (xx - center[1]) ** 2) / (2 * 2.0 ** 2))
+    blob /= blob.max()
+    activity = np.zeros(n_frames)
+    activity[onset:] = amplitude
+    movie = np.zeros((height, width, n_frames))
+    for t in range(n_frames):
+        movie[:, :, t] = blob * activity[t] + rng.normal(scale=0.05, size=(height, width))
+    return movie
+
+
+def _set_lenient_real_seudo_params(tab):
+    """Small/lenient enough to reliably discover a single synthetic blob
+    within a short test movie -- the wrapper's own defaults are tuned for
+    real, much longer recordings."""
+    tab.real_seudo_min_roi_size_spin.setValue(5)
+    tab.real_seudo_consecutive_frames_spin.setValue(3)
+    tab.real_seudo_lookahead_frames_spin.setValue(1)
+
+
+def test_method_combo_includes_real_seudo():
+    state = AppState()
+    tab = SourceExtractionTab(state)
+
+    tab.method_combo.setCurrentIndex(tab.method_combo.findText("Real-SEUDO"))
+    assert not tab.params_dialog.form.isRowVisible(tab.graft_n_dict_spin)
+    assert tab.params_dialog.form.isRowVisible(tab.real_seudo_sigma2_spin)
+    assert tab.action_stack.currentWidget() is tab.action_stack.widget(4)  # 5th method, 0-indexed
+
+
+def test_run_real_seudo_adds_a_candidate_at_the_synthetic_blob():
+    state = AppState()
+    movie = _single_blob_onset_movie()
+    state.load("movie.tif", movie)
+    tab = SourceExtractionTab(state)
+    tab.on_data_loaded()
+    _wait_for_worker(tab)
+
+    tab.method_combo.setCurrentIndex(tab.method_combo.findText("Real-SEUDO"))
+    _set_lenient_real_seudo_params(tab)
+    tab._on_run_real_seudo_clicked()
+    _wait_for_worker(tab, timeout_ms=30000)
+
+    assert len(tab._candidates) >= 1
+    assert all(roi.source_method == "real_seudo" for roi in tab._candidates)
+    assert all(roi.status == "pending" for roi in tab._candidates)
+    assert all(roi.spike_trace is None for roi in tab._candidates)  # Real-SEUDO doesn't produce one, unlike CNMF
+
+    centers = [np.argwhere(roi.mask).mean(axis=0) for roi in tab._candidates if roi.mask.any()]
+    assert any(np.hypot(*(c - (15, 15))) < 4 for c in centers)
+
+
+def test_run_real_seudo_records_the_batch_parameters_used():
+    state = AppState()
+    movie = _single_blob_onset_movie()
+    state.load("movie.tif", movie)
+    tab = SourceExtractionTab(state)
+    tab.on_data_loaded()
+    _wait_for_worker(tab)
+
+    tab.method_combo.setCurrentIndex(tab.method_combo.findText("Real-SEUDO"))
+    _set_lenient_real_seudo_params(tab)
+    tab._on_run_real_seudo_clicked()
+    _wait_for_worker(tab, timeout_ms=30000)
+
+    assert len(tab._candidates) >= 1
+    assert tab._candidates[0].params["min_roi_size"] == 5
+    assert tab._candidates[0].params["consecutive_frames_required"] == 3
+
+
+def test_run_real_seudo_without_data_warns(monkeypatch):
+    monkeypatch.setattr("orbitapp.tabs.source_extraction_tab.QMessageBox.warning", lambda *a, **k: None)
+    state = AppState()
+    tab = SourceExtractionTab(state)
+
+    tab._on_run_real_seudo_clicked()
+
+    assert tab._candidates == []
+
+
+def test_on_modality_changed_disables_real_seudo_when_volumetric():
+    state = AppState()
+    state.volumetric = True
+    tab = SourceExtractionTab(state)
+
+    idx = tab.method_combo.findText("Real-SEUDO")
+    assert not tab.method_combo.model().item(idx).isEnabled()

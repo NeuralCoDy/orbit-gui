@@ -25,3 +25,15 @@ def make_seudo_blob(blob_radius: float, clip_height: float = 0.01) -> np.ndarray
     blob = _matlab_fspecial_gaussian(hsize, blob_radius)
     blob = blob * (blob > clip_height * blob.max())
     return blob / np.sqrt(np.sum(blob**2))
+
+
+def make_smoothing_kernel(radius: float) -> np.ndarray:
+    """Sum-normalized (not L2-normalized) Gaussian smoothing kernel, for
+    denoising a frame via convolution -- preserves the frame's overall
+    pixel-intensity scale (mirrors _matlab_fspecial_gaussian's own
+    normalization), unlike make_seudo_blob's L2-normalized (sum of squares
+    = 1) SEUDO basis-function convention, which would badly distort a
+    frame's amplitude if used as a plain smoothing filter instead."""
+    crop_rad = int(np.ceil(radius * 2.5 + np.finfo(float).eps))
+    hsize = crop_rad * 2 + 1
+    return _matlab_fspecial_gaussian(hsize, radius)

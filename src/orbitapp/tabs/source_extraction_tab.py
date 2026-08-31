@@ -63,6 +63,7 @@ from orbit.roi_extraction_graft_3d import (
     patch_graft_source_extraction_3d,
 )
 from orbit.roi_extraction_pca_ica import PCAICAResult, pca_ica_source_extraction
+from orbit.roi_extraction_realseudo import RealSeudoResult, real_seudo_source_extraction
 
 from ..io import is_memmap, preview_slice
 from ..state import AppState, ROI
@@ -76,11 +77,13 @@ _METHODS = (
     ("CNMF", "cnmf"),
     ("CNMF-E", "cnmf_e"),
     ("GraFT", "graft"),
+    ("Real-SEUDO", "real_seudo"),
 )
 _METHOD_KEYS = dict(_METHODS)
 _METHOD_ORDER = [key for _label, key in _METHODS]
 _PIPELINE_LABELS = {
     "correlation": "Correlation ROIs", "pca_ica": "PCA-ICA", "cnmf": "CNMF", "cnmf_e": "CNMF-E", "graft": "GraFT",
+    "real_seudo": "Real-SEUDO",
 }
 
 
@@ -245,6 +248,42 @@ class SourceExtractionTab(QWidget):
         self.graft_patch_overlap_spin = make_spinbox(0, 500, 10)
         self.graft_n_dict_per_patch_spin = make_spinbox(1, 200, 10)
 
+        # Real-SEUDO -- fits one frame at a time against a growing known-cell
+        # set, discovering and promoting new cells as their activity is
+        # detected (see orbit.roi_extraction_realseudo/orbit.seudo.streaming
+        # docstrings). Unlike every method above, this never needs the whole
+        # movie in RAM (one frame at a time by construction), so there's no
+        # patch-based mode here at all -- it's already memmap-safe. Defaults
+        # match the wrapper's own real-data-tuned values.
+        self.real_seudo_sigma2_spin = make_spinbox(0.0, 10.0, 0.0020, decimal=True, decimals=4)
+        self.real_seudo_lambda_blob_spin = make_spinbox(0.0, 1000.0, 10.0, step=0.5, decimal=True)
+        self.real_seudo_blob_radius_spin = make_spinbox(0.1, 50.0, 3.0, step=0.1, decimal=True)
+        self.real_seudo_pad_space_spin = make_spinbox(0, 200, 5)
+        self.real_seudo_lookahead_frames_spin = make_spinbox(1, 100, 3)
+        self.real_seudo_lookahead_frames_spin.setToolTip(
+            "Forward-looking averaging window before reporting a frame's activity -- improves detection "
+            "quality at the cost of this many frames of latency. 1 disables lookahead entirely (immediate, "
+            "strictly causal results)."
+        )
+        self.real_seudo_cutoff_multiplier_spin = make_spinbox(0.1, 100.0, 4.0, step=0.5, decimal=True)
+        self.real_seudo_min_roi_size_spin = make_spinbox(1, 100000, 50)
+        self.real_seudo_min_avg_px_spin = make_spinbox(-1000.0, 1000.0, -1.0, step=0.5, decimal=True)
+        self.real_seudo_min_avg_px_spin.setToolTip(
+            "Minimum average brightness for a candidate region -- negative values are multiples of the "
+            "local noise level, positive values are an absolute threshold."
+        )
+        self.real_seudo_mask_blur_rad_spin = make_spinbox(0, 50, 1)
+        self.real_seudo_exclude_radius_spin = make_spinbox(-1, 500, 5)
+        self.real_seudo_exclude_radius_spin.setToolTip(
+            "How far (in pixels) a known cell's footprint is dilated before being excluded from new-"
+            "candidate detection. -1 disables known-cell exclusion entirely (recovers more overlapping "
+            "cells, at a real precision cost) -- see orbit.seudo.streaming.DetectionParams' docstring."
+        )
+        self.real_seudo_consecutive_frames_spin = make_spinbox(1, 1000, 5)
+        self.real_seudo_max_track_gap_spin = make_spinbox(0, 100, 1)
+        self.real_seudo_eq8_merge_thresh_spin = make_spinbox(0.0, 1.0, 0.75, step=0.05, decimal=True)
+        self.real_seudo_eq9_merge_thresh_spin = make_spinbox(0.0, 1.0, 0.75, step=0.05, decimal=True)
+
         # Correlation click-to-add's own parameters live on the main screen
         # (see _build_correlation_rows), not in this dialog -- it's always
         # active, not tied to the Method combo below, so this dialog only
@@ -284,6 +323,20 @@ class SourceExtractionTab(QWidget):
         self.params_dialog.add_row("patch size (px)", self.graft_patch_size_spin, group="graft_patch")
         self.params_dialog.add_row("patch overlap (px)", self.graft_patch_overlap_spin, group="graft_patch")
         self.params_dialog.add_row("dictionary components per patch", self.graft_n_dict_per_patch_spin, group="graft_patch")
+        self.params_dialog.add_row("noise level (sigma2)", self.real_seudo_sigma2_spin, group="real_seudo")
+        self.params_dialog.add_row("blob sparsity (lambda_blob)", self.real_seudo_lambda_blob_spin, group="real_seudo")
+        self.params_dialog.add_row("blob radius (px)", self.real_seudo_blob_radius_spin, group="real_seudo")
+        self.params_dialog.add_row("fit window padding (px)", self.real_seudo_pad_space_spin, group="real_seudo")
+        self.params_dialog.add_row("lookahead frames", self.real_seudo_lookahead_frames_spin, group="real_seudo")
+        self.params_dialog.add_row("detection cutoff (x noise)", self.real_seudo_cutoff_multiplier_spin, group="real_seudo")
+        self.params_dialog.add_row("min ROI size (px)", self.real_seudo_min_roi_size_spin, group="real_seudo")
+        self.params_dialog.add_row("min average brightness", self.real_seudo_min_avg_px_spin, group="real_seudo")
+        self.params_dialog.add_row("mask blur radius (px)", self.real_seudo_mask_blur_rad_spin, group="real_seudo")
+        self.params_dialog.add_row("known-cell exclusion radius (px)", self.real_seudo_exclude_radius_spin, group="real_seudo")
+        self.params_dialog.add_row("consecutive frames to promote", self.real_seudo_consecutive_frames_spin, group="real_seudo")
+        self.params_dialog.add_row("max track gap (frames)", self.real_seudo_max_track_gap_spin, group="real_seudo")
+        self.params_dialog.add_row("merge threshold (candidate-candidate)", self.real_seudo_eq8_merge_thresh_spin, group="real_seudo")
+        self.params_dialog.add_row("merge threshold (candidate-known)", self.real_seudo_eq9_merge_thresh_spin, group="real_seudo")
 
         controls_row = QHBoxLayout()
         controls_row.addWidget(QLabel("Method:"))
@@ -297,6 +350,7 @@ class SourceExtractionTab(QWidget):
         self.run_cnmf_btn = self._add_run_action("Run CNMF", self._on_run_cnmf_clicked)
         self.run_cnmf_e_btn = self._add_run_action("Run CNMF-E", self._on_run_cnmf_e_clicked)
         self.run_graft_btn = self._add_run_action("Run GraFT", self._on_run_graft_clicked)
+        self.run_real_seudo_btn = self._add_run_action("Run Real-SEUDO", self._on_run_real_seudo_clicked)
         controls_row.addWidget(self.action_stack)
 
         self.commit_btn = QPushButton("Commit Accepted ROIs")
@@ -851,6 +905,35 @@ class SourceExtractionTab(QWidget):
 
     def _on_graft_finished(self, result: GraFTResult | GraFTResult3D) -> None:
         rois = self._make_rois(result.masks, result.traces, "graft", params=self._pending_batch_params)
+        self._add_candidates(rois)
+
+    def _on_run_real_seudo_clicked(self) -> None:
+        # Unlike every other batch method above, no memmap/patch handling
+        # at all: real_seudo_source_extraction fits one frame at a time by
+        # construction, so it's already memmap-safe -- no worker_movie=
+        # override needed, _run_batch_method runs it directly against the
+        # real active_data() regardless of whether that's memmap-backed.
+        self._pending_batch_params = dict(
+            sigma2=self.real_seudo_sigma2_spin.value(), lambda_blob=self.real_seudo_lambda_blob_spin.value(),
+            blob_radius=self.real_seudo_blob_radius_spin.value(), pad_space=self.real_seudo_pad_space_spin.value(),
+            lookahead_frames=self.real_seudo_lookahead_frames_spin.value(),
+            cutoff_multiplier=self.real_seudo_cutoff_multiplier_spin.value(),
+            min_roi_size=self.real_seudo_min_roi_size_spin.value(),
+            min_avg_px=self.real_seudo_min_avg_px_spin.value(),
+            mask_blur_rad=self.real_seudo_mask_blur_rad_spin.value(),
+            exclude_radius_known_cells=self.real_seudo_exclude_radius_spin.value(),
+            consecutive_frames_required=self.real_seudo_consecutive_frames_spin.value(),
+            max_track_gap=self.real_seudo_max_track_gap_spin.value(),
+            eq8_merge_threshold=self.real_seudo_eq8_merge_thresh_spin.value(),
+            eq9_merge_threshold=self.real_seudo_eq9_merge_thresh_spin.value(),
+        )
+        self._run_batch_method(
+            "Running Real-SEUDO (this can take a while)...", real_seudo_source_extraction,
+            self._on_real_seudo_finished, **self._pending_batch_params,
+        )
+
+    def _on_real_seudo_finished(self, result: RealSeudoResult) -> None:
+        rois = self._make_rois(result.masks, result.traces, "real_seudo", params=self._pending_batch_params)
         self._add_candidates(rois)
 
     def _make_rois(

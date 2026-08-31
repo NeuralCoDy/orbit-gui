@@ -116,6 +116,27 @@ def test_generate_report_includes_cnmf_e_equation():
     assert "peak-to-noise" in tex.lower()
 
 
+def test_source_extraction_key_resolves_real_seudo_and_does_not_collide_with_seudo():
+    # "seudo" alone (e.g. a hypothetical "SEUDO" label) isn't a registered
+    # key at all -- only the full "real-seudo"/"real_seudo" spelling this
+    # app's own _PIPELINE_LABELS actually produces should resolve.
+    assert _source_extraction_key("Real-SEUDO") == "real_seudo"
+    assert _source_extraction_key("real_seudo") == "real_seudo"
+
+
+def test_generate_report_includes_real_seudo_equation():
+    state = _full_state()
+    state.steps.append(
+        PipelineStep(
+            stage="source_extraction", label="Real-SEUDO",
+            params={"sigma2": 0.002, "lambda_blob": 10.0, "consecutive_frames_required": 5},
+        )
+    )
+    tex = generate_report(state, None)
+    assert "seudo" in tex.lower()
+    assert "streams the movie" in tex.lower()
+
+
 def test_generate_report_with_only_load_step_has_no_other_sections():
     state = AppState()
     state.data_path = "movie.tif"

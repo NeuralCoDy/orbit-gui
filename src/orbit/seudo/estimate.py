@@ -39,6 +39,28 @@ def _get_frame(movie: np.ndarray, frame_index: int, zero_level: float) -> np.nda
     return movie[:, :, frame_index].astype(float) - zero_level
 
 
+def _cell_window_bounds(
+    prof: np.ndarray, pad_space: int, mov_y: int, mov_x: int, use_com: bool,
+) -> tuple[int, int, int, int]:
+    """One cell's fit window: either a single pixel at its center of mass
+    (use_com) or its full outer bounding box, padded by pad_space and
+    clamped to the movie's own extent -- shared by this module's own
+    per-cell precompute loop below and streaming.py's online per-cell
+    setup, so both use identical window-bounds math."""
+    coms, outer_bounds = compute_roi_coms(prof)
+    if use_com:
+        cy, cx = int(round(coms[0, 1])), int(round(coms[0, 0]))
+        y0 = y1 = cy
+        x0 = x1 = cx
+    else:
+        y0, y1, x0, x1 = outer_bounds[0]
+    y0 = max(0, int(y0) - pad_space)
+    y1 = min(mov_y - 1, int(y1) + pad_space)
+    x0 = max(0, int(x0) - pad_space)
+    x1 = min(mov_x - 1, int(x1) + pad_space)
+    return y0, y1, x0, x1
+
+
 def _setup_cell_window(
     profiles: np.ndarray, this_cell: int, y0: int, y1: int, x0: int, x1: int, min_pix_for_inclusion: int,
     lambda_prof: float, lambda_blob: float, sigma2_ds: float, p: float, one_blob: np.ndarray,
@@ -183,19 +205,7 @@ def estimate_time_courses_with_seudo(
 
     for cc, this_cell in enumerate(which_cells):
         prof = profiles[:, :, this_cell]
-        _coms, outer_bounds = compute_roi_coms(prof)
-        if use_com:
-            coms, _ = compute_roi_coms(prof)
-            cy, cx = int(round(coms[0, 1])), int(round(coms[0, 0]))
-            y0 = y1 = cy
-            x0 = x1 = cx
-        else:
-            y0, y1, x0, x1 = outer_bounds[0]
-
-        y0 = max(0, y0 - pad_space)
-        y1 = min(mov_y - 1, y1 + pad_space)
-        x0 = max(0, x0 - pad_space)
-        x1 = min(mov_x - 1, x1 + pad_space)
+        y0, y1, x0, x1 = _cell_window_bounds(prof, pad_space, mov_y, mov_x, use_com)
 
         pix_mask = np.zeros((mov_y, mov_x), dtype=bool)
         pix_mask[y0 : y1 + 1, x0 : x1 + 1] = True
