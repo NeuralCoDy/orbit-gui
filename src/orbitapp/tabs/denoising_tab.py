@@ -23,7 +23,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QMessageBox, QPushButton
+from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton
 
 from orbit._volumetric import depth_project
 from orbit.denoising import (
@@ -41,10 +41,10 @@ from orbit.projections import local_correlation_projection
 from orbit.qc_traces import qc_trace_samples
 
 from ..fits_io import create_fits_memmap
-from ..io import is_memmap, preview_slice
+from ..io import preview_slice
 from ..state import AppState
 from ..volumetric_io import preview_slice_volumetric
-from ..widgets import ParametersDialog, QCPlotGrid, add_location_markers, confirm_recompute, make_spinbox, pixels_to_data_pos, split_by_kind
+from ..widgets import ParametersDialog, QCPlotGrid, add_location_markers, make_spinbox, pixels_to_data_pos, split_by_kind
 from ..workers import run_worker
 from .stage_tab import StageTab
 
@@ -193,7 +193,9 @@ def _plot_trace(plots, sample: dict) -> None:
 class DenoisingTab(StageTab):
     _stage_name = "Denoising"
     _result_key = "denoised"
+    _result_key_3d = "denoised_3d"
     _stage_key = "denoising"
+    _supports_volumetric = True
 
     def __init__(self, state: AppState, parent=None) -> None:
         super().__init__(state, apply_label="Apply Denoising", parent=parent)
@@ -366,8 +368,6 @@ class DenoisingTab(StageTab):
         return 0
 
     def _chunked_commit(self, source: np.ndarray, output_path: Path) -> np.ndarray:
-        if self.state.volumetric:
-            return self._chunked_commit_volumetric(source, output_path)
         algorithm, kwargs = self._algorithm_and_kwargs()
         if algorithm == "wavelet_time":
             raise NotImplementedError(
@@ -463,52 +463,6 @@ class DenoisingTab(StageTab):
         if volumetric and _ALGORITHM_KEYS[self.method_combo.currentText()] not in _DENOISE_FUNCS_3D:
             self.method_combo.setCurrentIndex(2)  # "Gaussian Filter"
 
-    def on_data_loaded(self) -> None:
-        if self.state.volumetric:
-            self._on_volumetric_data_loaded()
-            return
-        super().on_data_loaded()
-
-    def _on_volumetric_data_loaded(self) -> None:
-        movie = self.state.active_data()
-        self.commit_controls.set_apply_enabled(movie is not None)
-        self.commit_controls.set_commit_enabled(False)
-        self._pending_result = None
-        self._pending_step_label = None
-        self._last_run = None
-        self._on_data_reset()
-        if movie is not None:
-            projected = depth_project(preview_slice_volumetric(movie))
-            self.panel.before_view.setImage(projected.mean(axis=2))
-            self.panel.set_before_movie(projected)
-            self.status_label.setText(f"Ready. shape={movie.shape} (volumetric)")
-
-    def _apply(self) -> None:
-        if self.state.volumetric:
-            self._apply_volumetric()
-            return
-        super()._apply()
-
-    def _apply_volumetric(self) -> None:
-        movie = self.state.active_data()
-        if movie is None:
-            QMessageBox.warning(self, "No data", "Load data on the Load tab first.")
-            return
-
-        params = self._current_fingerprint()
-        fingerprint = (id(movie), tuple(sorted(params.items())))
-        if fingerprint == self._last_run:
-            message = f"{self._stage_name} was already run with these exact parameters on this data."
-            if not confirm_recompute(self, message):
-                return
-
-        self._pending_fingerprint = fingerprint
-        self._pending_params = params
-        self._input_movie = movie
-        self.commit_controls.set_apply_enabled(False)
-        self.commit_controls.set_commit_enabled(False)
-        self._start_worker_volumetric(preview_slice_volumetric(movie))
-
     def _volumetric_algorithm_and_kwargs(self) -> tuple[str, dict]:
         algorithm = _ALGORITHM_KEYS[self.method_combo.currentText()]
         if algorithm == "gaussian":
@@ -526,17 +480,6 @@ class DenoisingTab(StageTab):
             self.busy_bar, "Running denoising and metrics (this can take a while)...",
             _run_and_assess_3d, movie, algorithm, on_success=self._on_finished, on_failure=self._on_failed, **kwargs,
         )
-
-    def _commit(self) -> None:
-        if self._pending_result is None:
-            return
-        if is_memmap(self._input_movie):
-            self._start_chunked_commit()
-            return
-        if self.state.volumetric:
-            self._finish_commit(self._pending_result["denoised_3d"])
-            return
-        self._finish_commit(self._pending_result[self._result_key])
 
     def _chunked_commit_volumetric(self, source: np.ndarray, output_path: Path) -> np.ndarray:
         algorithm, kwargs = self._volumetric_algorithm_and_kwargs()

@@ -32,6 +32,30 @@ against a memmap input (StageTab's own default raises, which becomes a
 Commit failure dialog rather than any silent wrong behavior). Non-memmap
 input is completely unaffected -- Commit stays the free "promote
 whatever Apply already computed" it's always been.
+
+A volumetric movie (state.volumetric) runs an entirely separate,
+dimension-specific algorithm (e.g. rigid_motion_correct_3d, not the 2D
+rigid path) rather than a parameter variant of the same one, so
+on_data_loaded/_apply/_commit each dispatch to a `*_volumetric`
+counterpart instead of just branching internally. Subclasses that
+support volumetric data set `_supports_volumetric = True` and implement
+`_start_worker_volumetric` (parallel to `_start_worker`),
+`_result_key_3d` (parallel to `_result_key`), and optionally
+`_chunked_commit_volumetric` (parallel to `_chunked_commit`, for a
+memmap-backed volumetric Commit).
+
+`_supports_volumetric` defaults to False and must be opted into
+explicitly, rather than every subclass automatically getting the
+volumetric dispatch: every tab -- including ones with no volumetric
+implementation at all, e.g. Detrending's single-trace-plot panel --
+gets on_data_loaded() called on it whenever ANY tab commits (see
+app.py's cross-tab data_changed wiring), regardless of state.volumetric
+or whether that particular tab is even usable in volumetric mode.
+Dispatching unconditionally would run _on_volumetric_data_loaded's
+StagePanel-shaped preview code against a tab whose self.panel isn't one
+(confirmed: an AttributeError on self.panel.before_view, not a graceful
+no-op) the first time a volumetric commit happened to be followed by a
+refresh of a non-supporting tab.
 """
 
 from __future__ import annotations
@@ -44,8 +68,11 @@ import numpy as np
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QMessageBox, QVBoxLayout, QWidget
 
+from orbit._volumetric import depth_project
+
 from ..io import is_memmap, preview_slice
 from ..state import AppState
+from ..volumetric_io import preview_slice_volumetric
 from ..widgets import BusyBar, CommitControls, StagePanel, confirm_recompute
 from ..workers import FunctionWorker, run_worker
 
@@ -55,8 +82,10 @@ class StageTab(QWidget):
 
     _stage_name = "Stage"  # used in the failure dialog title
     _result_key = "result"  # key into the worker's result dict for the candidate array
+    _result_key_3d = "result_3d"  # same, for the volumetric worker's result dict (see class docstring)
     _stage_key = "stage"  # lowercase identifier recorded in AppState.steps / session_io.py
     _chunk_frames = 500  # time-chunk size for a memmap input's chunked Commit
+    _supports_volumetric = False  # set True by subclasses with a real *_volumetric implementation (see below)
 
     def __init__(
         self,
@@ -101,8 +130,9 @@ class StageTab(QWidget):
         defaults to the shared before/after-image StagePanel every
         other stage tab uses. Override for a stage whose main figure
         isn't a pair of images (e.g. a single trace plot) -- if you do,
-        also override _show_before_preview below, since its default
-        assumes a StagePanel."""
+        also override _show_before_preview (and, for a stage that
+        supports volumetric data too, _show_before_preview_volumetric)
+        below, since their defaults assume a StagePanel."""
         return StagePanel(before_title=before_title, after_title=after_title)
 
     def _show_before_preview(self, movie: np.ndarray) -> None:
@@ -130,6 +160,9 @@ class StageTab(QWidget):
         (e.g. QC location markers). No-op by default."""
 
     def on_data_loaded(self) -> None:
+        if self.state.volumetric and self._supports_volumetric:
+            self._on_volumetric_data_loaded()
+            return
         movie = self.state.active_data()
         self.commit_controls.set_apply_enabled(movie is not None)
         self.commit_controls.set_commit_enabled(False)
@@ -140,6 +173,33 @@ class StageTab(QWidget):
         if movie is not None:
             self._show_before_preview(movie)
             self.status_label.setText(f"Ready. shape={movie.shape}")
+
+    def _on_volumetric_data_loaded(self) -> None:
+        """Volumetric counterpart of on_data_loaded."""
+        movie = self.state.active_data()
+        self.commit_controls.set_apply_enabled(movie is not None)
+        self.commit_controls.set_commit_enabled(False)
+        self._pending_result = None
+        self._pending_step_label = None
+        self._last_run = None
+        self._on_data_reset()
+        if movie is not None:
+            self._show_before_preview_volumetric(movie)
+            self.status_label.setText(f"Ready. shape={movie.shape} (volumetric)")
+
+    def _show_before_preview_volumetric(self, movie: np.ndarray) -> None:
+        """Volumetric counterpart of _show_before_preview -- the
+        before-preview defaults to a depth projection of the (T, L, W, D)
+        volume (see orbit._volumetric.depth_project), since self.panel's
+        images are inherently 2D. Default assumes self.panel is a
+        StagePanel, same caveat as _show_before_preview; override
+        alongside _build_panel/_show_before_preview for a stage whose
+        main figure isn't a pair of images (see DetrendingTab, whose
+        volumetric preview is a 1D per-volume trace, not an image at
+        all -- no depth projection needed there)."""
+        projected = depth_project(preview_slice_volumetric(movie))
+        self.panel.before_view.setImage(projected.mean(axis=2))
+        self.panel.set_before_movie(projected)
 
     def _current_fingerprint(self) -> dict:
         """Named snapshot of every widget value that affects the
@@ -170,7 +230,18 @@ class StageTab(QWidget):
         run_worker, with self._on_finished/self._on_failed as callbacks."""
         raise NotImplementedError
 
+    def _start_worker_volumetric(self, movie: np.ndarray) -> None:
+        """Volumetric counterpart of _start_worker -- ``movie`` is a
+        (T, L, W, D) preview, not (H, W, T). Only needed by subclasses
+        that support volumetric data; state.volumetric is only ever set
+        when the data path supports it (see load_tab.py), so this
+        default is unreachable in practice rather than a real gap."""
+        raise NotImplementedError
+
     def _apply(self) -> None:
+        if self.state.volumetric and self._supports_volumetric:
+            self._apply_volumetric()
+            return
         movie = self.state.active_data()
         if movie is None:
             QMessageBox.warning(self, "No data", "Load data on the Load tab first.")
@@ -192,6 +263,29 @@ class StageTab(QWidget):
         self.commit_controls.set_apply_enabled(False)
         self.commit_controls.set_commit_enabled(False)
         self._start_worker(preview_slice(movie))
+
+    def _apply_volumetric(self) -> None:
+        """Volumetric counterpart of _apply -- same fingerprint/confirm
+        logic, against preview_slice_volumetric and _start_worker_volumetric
+        instead."""
+        movie = self.state.active_data()
+        if movie is None:
+            QMessageBox.warning(self, "No data", "Load data on the Load tab first.")
+            return
+
+        params = self._current_fingerprint()
+        fingerprint = (id(movie), tuple(sorted(params.items())))
+        if fingerprint == self._last_run:
+            message = f"{self._stage_name} was already run with these exact parameters on this data."
+            if not confirm_recompute(self, message):
+                return
+
+        self._pending_fingerprint = fingerprint
+        self._pending_params = params
+        self._input_movie = movie
+        self.commit_controls.set_apply_enabled(False)
+        self.commit_controls.set_commit_enabled(False)
+        self._start_worker_volumetric(preview_slice_volumetric(movie))
 
     def _render_result(self, result: dict) -> None:
         """Updates the panel images/movies and self.metrics_label (plus
@@ -230,11 +324,32 @@ class StageTab(QWidget):
         _on_chunked_commit_failed, not a silent full materialization."""
         raise NotImplementedError(f"{self._stage_name} doesn't support committing a memory-mapped movie.")
 
+    def _chunked_commit_volumetric(self, source: np.ndarray, output_path: Path) -> np.ndarray:
+        """Volumetric counterpart of _chunked_commit -- ``source`` is
+        (T, L, W, D). See _run_chunked_commit for the dispatch between
+        the two."""
+        raise NotImplementedError(f"{self._stage_name} doesn't support committing a memory-mapped volumetric movie.")
+
+    def _run_chunked_commit(self, source: np.ndarray, output_path: Path) -> np.ndarray:
+        """The actual worker callable _start_chunked_commit launches --
+        dispatches to _chunked_commit or _chunked_commit_volumetric so
+        neither subclass override needs to repeat that check itself."""
+        if self.state.volumetric and self._supports_volumetric:
+            return self._chunked_commit_volumetric(source, output_path)
+        return self._chunked_commit(source, output_path)
+
     def _commit(self) -> None:
         if self._pending_result is None:
             return
         if is_memmap(self._input_movie):
             self._start_chunked_commit()
+            return
+        if self.state.volumetric and self._supports_volumetric:
+            # The worker's result dict carries both a depth-projected 2D
+            # array (under _result_key, for _on_finished/_render_result's
+            # shared display code) and the real 4D array (under
+            # _result_key_3d) -- only Commit needs to tell them apart.
+            self._finish_commit(self._pending_result[self._result_key_3d])
             return
         self._finish_commit(self._pending_result[self._result_key])
 
@@ -254,7 +369,7 @@ class StageTab(QWidget):
         os.close(fd)
         self.worker = run_worker(
             self.busy_bar, f"Committing {self._stage_name} across the full movie (this can take a while)...",
-            self._chunked_commit, self._input_movie, Path(path),
+            self._run_chunked_commit, self._input_movie, Path(path),
             on_success=self._on_chunked_commit_finished, on_failure=self._on_chunked_commit_failed,
         )
 

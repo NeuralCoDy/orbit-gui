@@ -28,10 +28,10 @@ from orbit._volumetric import depth_project
 from orbit.masking import apply_mask, apply_mask_3d, compute_mask
 
 from ..fits_io import create_fits_memmap
-from ..io import is_memmap, preview_slice
+from ..io import preview_slice
 from ..state import AppState
 from ..volumetric_io import preview_slice_volumetric
-from ..widgets import ParametersDialog, confirm_recompute, make_spinbox
+from ..widgets import ParametersDialog, make_spinbox
 from ..workers import run_worker
 from .stage_tab import StageTab
 
@@ -92,7 +92,9 @@ def _run_and_assess_3d(movie: np.ndarray, action: str, **kwargs) -> dict:
 class MaskTab(StageTab):
     _stage_name = "Mask"
     _result_key = "masked"
+    _result_key_3d = "masked_3d"
     _stage_key = "mask"
+    _supports_volumetric = True
 
     def __init__(self, state: AppState, parent=None) -> None:
         super().__init__(state, apply_label="Apply Mask", parent=parent)
@@ -194,8 +196,6 @@ class MaskTab(StageTab):
         )
 
     def _chunked_commit(self, source: np.ndarray, output_path: Path) -> np.ndarray:
-        if self.state.volumetric:
-            return self._chunked_commit_volumetric(source, output_path)
         # The mask is fit once from the same <=5000-frame preview Apply
         # (or Clear Mask) already used, then applied as a fixed
         # per-pixel gate to every chunk of the full movie -- same
@@ -238,26 +238,6 @@ class MaskTab(StageTab):
     # entry point checks self.state.volumetric first, falling through to
     # the unmodified 2D behavior above when it's off.
 
-    def on_data_loaded(self) -> None:
-        if self.state.volumetric:
-            self._on_volumetric_data_loaded()
-            return
-        super().on_data_loaded()
-
-    def _on_volumetric_data_loaded(self) -> None:
-        movie = self.state.active_data()
-        self.commit_controls.set_apply_enabled(movie is not None)
-        self.commit_controls.set_commit_enabled(False)
-        self._pending_result = None
-        self._pending_step_label = None
-        self._last_run = None
-        self._on_data_reset()
-        if movie is not None:
-            projected = depth_project(preview_slice_volumetric(movie))
-            self.panel.before_view.setImage(projected.mean(axis=2))
-            self.panel.set_before_movie(projected)
-            self.status_label.setText(f"Ready. shape={movie.shape} (volumetric)")
-
     def _on_clear_clicked_volumetric(self) -> None:
         movie = self.state.active_data()
         if movie is None:
@@ -270,32 +250,6 @@ class MaskTab(StageTab):
         result = _run_and_assess_3d(preview_slice_volumetric(movie), "clear")
         self._on_finished(result)
 
-    def _apply(self) -> None:
-        if self.state.volumetric:
-            self._apply_volumetric()
-            return
-        super()._apply()
-
-    def _apply_volumetric(self) -> None:
-        movie = self.state.active_data()
-        if movie is None:
-            QMessageBox.warning(self, "No data", "Load data on the Load tab first.")
-            return
-
-        params = self._current_fingerprint()
-        fingerprint = (id(movie), tuple(sorted(params.items())))
-        if fingerprint == self._last_run:
-            message = f"{self._stage_name} was already run with these exact parameters on this data."
-            if not confirm_recompute(self, message):
-                return
-
-        self._pending_fingerprint = fingerprint
-        self._pending_params = params
-        self._input_movie = movie
-        self.commit_controls.set_apply_enabled(False)
-        self.commit_controls.set_commit_enabled(False)
-        self._start_worker_volumetric(preview_slice_volumetric(movie))
-
     def _start_worker_volumetric(self, movie: np.ndarray) -> None:
         action = self._pending_params["action"]
         self._pending_step_label = f"Mask ({_METHOD_LABELS[action]})"
@@ -304,17 +258,6 @@ class MaskTab(StageTab):
             _run_and_assess_3d, movie, action, on_success=self._on_finished, on_failure=self._on_failed,
             **_mask_kwargs(action, self._pending_params),
         )
-
-    def _commit(self) -> None:
-        if self._pending_result is None:
-            return
-        if is_memmap(self._input_movie):
-            self._start_chunked_commit()
-            return
-        if self.state.volumetric:
-            self._finish_commit(self._pending_result["masked_3d"])
-            return
-        self._finish_commit(self._pending_result[self._result_key])
 
     def _chunked_commit_volumetric(self, source: np.ndarray, output_path: Path) -> np.ndarray:
         action = self._pending_params.get("action", "triangle")

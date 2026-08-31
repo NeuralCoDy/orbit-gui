@@ -37,14 +37,32 @@ def _tab_with_loaded_movie(movie=None) -> tuple[AppState, DetrendingTab]:
     return state, tab
 
 
-def test_on_data_loaded_plots_the_raw_fov_average_trace():
+def test_on_data_loaded_plots_the_raw_fov_average_trace_normalized_to_frame_0():
     movie = _drifting_movie()
     _state, tab = _tab_with_loaded_movie(movie)
 
     items = tab.trace_plot.listDataItems()
     assert len(items) == 1
     plotted = items[0].yData
-    assert np.allclose(plotted, movie.mean(axis=(0, 1)))
+    raw = movie.mean(axis=(0, 1))
+    assert np.allclose(plotted, raw / raw[0])
+    assert plotted[0] == 1.0
+
+
+def test_on_data_loaded_plots_the_masked_average_when_a_mask_is_set():
+    movie = _drifting_movie(height=10, width=10)
+    mask = np.zeros((10, 10), dtype=bool)
+    mask[3:7, 3:7] = True
+    movie_with_junk = movie.copy()
+    movie_with_junk[~mask] = 1e6  # blank background at a wildly different, non-decaying scale
+
+    state, tab = _tab_with_loaded_movie(movie_with_junk)
+    state.mask = mask
+    tab.on_data_loaded()  # re-trigger the preview now that a mask is set, as a real Mask-tab commit would
+
+    plotted = tab.trace_plot.listDataItems()[0].yData
+    expected = movie[mask].mean(axis=0)
+    assert np.allclose(plotted, expected / expected[0])
 
 
 def test_params_dialog_has_percentile_and_window_rows():
@@ -195,3 +213,172 @@ def test_commit_of_a_memmap_movie_covers_the_whole_movie_not_just_the_preview(tm
     raw_drop = raw_trace[0] - raw_trace[-1]
     corrected_drop = abs(committed_trace[-200:].mean() - committed_trace[:200].mean())
     assert corrected_drop < raw_drop * 0.2
+
+
+def _drifting_volume(n_frames=200, length=6, width=6, depth=4, seed=0):
+    rng = np.random.default_rng(seed)
+    decay = np.linspace(1.0, 0.4, n_frames)
+    movie = (rng.standard_normal((n_frames, length, width, depth)) * 0.01 + 1.0) * decay[:, None, None, None]
+    return np.clip(movie, 0.01, None)
+
+
+def test_volumetric_on_data_loaded_plots_the_per_volume_average_normalized_to_volume_0():
+    # Regression test: this used to crash (AttributeError, then a pyqtgraph
+    # ValueError trying to plot a 2D depth-projected slice as a 1D trace) --
+    # see the StageTab _supports_volumetric fix this accompanies.
+    movie = _drifting_volume()
+    state = AppState()
+    state.volumetric = True
+    state.load("movie.fits", movie)
+    tab = DetrendingTab(state)
+    tab.on_data_loaded()
+
+    items = tab.trace_plot.listDataItems()
+    assert len(items) == 1
+    plotted = items[0].yData
+    raw = movie.mean(axis=(1, 2, 3))
+    assert np.allclose(plotted, raw / raw[0])
+    assert plotted[0] == 1.0
+
+
+def test_volumetric_on_data_loaded_plots_the_masked_average_when_a_mask_is_set():
+    movie = _drifting_volume()
+    mask = np.zeros(movie.shape[1:], dtype=bool)
+    mask[2:5, 2:5, 1:3] = True
+    movie_with_junk = movie.copy()
+    movie_with_junk[:, ~mask] = 1e6
+
+    state = AppState()
+    state.volumetric = True
+    state.load("movie.fits", movie_with_junk)
+    state.mask = mask
+    tab = DetrendingTab(state)
+    tab.on_data_loaded()
+
+    plotted = tab.trace_plot.listDataItems()[0].yData
+    expected = movie[:, mask].mean(axis=1)
+    assert np.allclose(plotted, expected / expected[0])
+
+
+def test_volumetric_apply_and_commit_produces_a_true_4d_array():
+    movie = _drifting_volume()
+    state = AppState()
+    state.volumetric = True
+    state.load("movie.fits", movie)
+    tab = DetrendingTab(state)
+    tab.on_data_loaded()
+    tab.percentile_spin.setValue(8.0)
+    tab.window_spin.setValue(30)
+
+    tab._apply()
+    _wait(tab)
+    assert tab.commit_controls.commit_btn.isEnabled()
+    tab._commit()
+    _wait(tab)
+
+    committed = state.active_data()
+    assert committed.shape == movie.shape  # true (T, L, W, D)
+
+    committed_trace = np.asarray(committed).mean(axis=(1, 2, 3))
+    raw_trace = movie.mean(axis=(1, 2, 3))
+    raw_drop = raw_trace[0] - raw_trace[-1]
+    corrected_drop = abs(committed_trace[-30:].mean() - committed_trace[:30].mean())
+    assert corrected_drop < raw_drop * 0.2
+
+
+def test_volumetric_commit_respects_the_mask():
+    movie = _drifting_volume()
+    mask = np.zeros(movie.shape[1:], dtype=bool)
+    mask[2:5, 2:5, 1:3] = True
+    movie_with_junk = movie.copy()
+    movie_with_junk[:, ~mask] = 1e6  # never decays -- would swamp an unmasked average
+
+    state = AppState()
+    state.volumetric = True
+    state.load("movie.fits", movie_with_junk)
+    state.mask = mask
+    tab = DetrendingTab(state)
+    tab.on_data_loaded()
+    tab.percentile_spin.setValue(8.0)
+    tab.window_spin.setValue(30)
+
+    tab._apply()
+    _wait(tab)
+    tab._commit()
+    _wait(tab)
+
+    committed = np.asarray(state.active_data())
+    # The masked-in region should be corrected as if the junk voxels never
+    # existed -- compare against detrending the clean movie directly.
+    clean_state = AppState()
+    clean_state.volumetric = True
+    clean_state.load("movie.fits", movie)
+    clean_state.mask = mask
+    clean_tab = DetrendingTab(clean_state)
+    clean_tab.on_data_loaded()
+    clean_tab.percentile_spin.setValue(8.0)
+    clean_tab.window_spin.setValue(30)
+    clean_tab._apply()
+    _wait(clean_tab)
+    clean_tab._commit()
+    _wait(clean_tab)
+    expected = np.asarray(clean_state.active_data())
+
+    assert np.allclose(committed[:, mask], expected[:, mask], rtol=0.05)
+
+
+def test_volumetric_commit_of_a_memmap_movie_produces_a_4d_fits_memmap(tmp_path):
+    fits = pytest.importorskip("astropy.io.fits")
+    from orbitapp.volumetric_io import load_volumetric_movie
+
+    movie = _drifting_volume(n_frames=8000).astype(np.float32)
+    path = tmp_path / "movie.fits"
+    fits.PrimaryHDU(data=movie).writeto(path, overwrite=True)
+    mmapped = load_volumetric_movie(path, mmap=True)
+
+    state = AppState()
+    state.volumetric = True
+    state.load(str(path), mmapped)
+    tab = DetrendingTab(state)
+    tab.on_data_loaded()
+    tab._chunk_frames = 1000
+    tab.percentile_spin.setValue(8.0)
+    tab.window_spin.setValue(200)
+
+    tab._apply()
+    _wait(tab)
+    assert tab._pending_result["corrected"].shape[0] == 5000  # capped preview
+
+    tab._commit()
+    _wait(tab)
+
+    committed = state.active_data()
+    assert is_memmap(committed)
+    assert committed.shape == mmapped.shape  # the WHOLE volume series, not just the 5000-frame preview
+    assert np.all(np.isfinite(np.asarray(committed)))
+
+    committed_trace = np.asarray(committed).mean(axis=(1, 2, 3))
+    raw_trace = np.asarray(mmapped).mean(axis=(1, 2, 3))
+    raw_drop = raw_trace[0] - raw_trace[-1]
+    corrected_drop = abs(committed_trace[-200:].mean() - committed_trace[:200].mean())
+    assert corrected_drop < raw_drop * 0.2
+
+
+def test_turning_volumetric_off_leaves_the_2d_detrending_path_unaffected():
+    state = AppState()
+    movie = _drifting_movie()
+    state.load("movie.tif", movie)
+    tab = DetrendingTab(state)
+    tab.on_data_loaded()
+    tab.percentile_spin.setValue(8.0)
+    tab.window_spin.setValue(30)
+
+    tab._apply()
+    _wait(tab)
+    tab._commit()
+    _wait(tab)
+
+    committed = state.active_data()
+    assert committed.shape == movie.shape
+    raw = movie.mean(axis=(0, 1))
+    assert np.allclose(tab._pending_result["trace"], raw / raw[0])
