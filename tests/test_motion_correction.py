@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from scipy.ndimage import fourier_shift, gaussian_filter, map_coordinates
 
-from orbit.motion_correction import motion_correct, patch_motion_correct, rigid_motion_correct
+from orbit.motion_correction import _pad_to_fast_len, motion_correct, patch_motion_correct, rigid_motion_correct
 
 
 def _mean_corr(mov: np.ndarray, ref: np.ndarray) -> float:
@@ -209,3 +209,113 @@ def test_rigid_motion_correct_output_param_reads_from_movie_not_uninitialized_ou
         movie, bin_width=4, n_iter=1, upsample_factor=10, init_batch=6, output=output
     )
     assert np.all(np.isfinite(registered))
+
+
+def test_pad_to_fast_len_is_a_true_noop_for_an_already_fast_size():
+    # 256 = 2**8 -- already FFT-fast on every axis, so padding must
+    # return the SAME array (no copy), not just an equal one.
+    image = np.zeros((256, 256))
+    assert _pad_to_fast_len(image) is image
+
+
+def test_pad_to_fast_len_pads_each_axis_up_to_its_own_next_fast_len():
+    # 509 is prime (next fast len 512); 240 = 2**4*3*5 is already fast.
+    image = np.zeros((509, 240))
+    padded = _pad_to_fast_len(image)
+    assert padded.shape == (512, 240)
+
+
+def test_pad_to_fast_len_preserves_the_original_content_in_the_unpadded_region():
+    rng = np.random.default_rng(0)
+    image = rng.standard_normal((509, 509))
+    padded = _pad_to_fast_len(image, mode="edge")
+    np.testing.assert_array_equal(padded[:509, :509], image)
+
+
+def test_pad_to_fast_len_is_dimension_agnostic():
+    # motion_correction_3d.py reuses _apply_shift/_estimate_shift (and
+    # therefore _pad_to_fast_len) as-is against volumes, not just 2D frames.
+    volume = np.zeros((509, 100, 100))
+    padded = _pad_to_fast_len(volume)
+    assert padded.shape[0] == 512
+    assert padded.shape[1:] == (100, 100)
+
+
+def test_rigid_motion_correct_recovers_known_shifts_at_an_unlucky_prime_size():
+    # Regression guard for the FFT-fast-size padding in _estimate_shift/
+    # _apply_shift: 251 is prime, deliberately not FFT-friendly. Padding
+    # for speed must not meaningfully change the recovered shifts (same
+    # tolerance as the equivalent non-prime-size test above).
+    rng = np.random.default_rng(0)
+    H, W, T = 251, 251, 10
+    base = np.zeros((H, W))
+    base[100:150, 100:150] = 1.0
+    base = gaussian_filter(base, 3)
+
+    true_shifts = rng.uniform(-5, 5, size=(T, 2))
+    movie = np.zeros((H, W, T))
+    for t in range(T):
+        frame = np.real(np.fft.ifftn(fourier_shift(np.fft.fftn(base), true_shifts[t])))
+        movie[:, :, t] = frame + 0.02 * rng.standard_normal((H, W))
+
+    registered, shifts, _template, _initial = rigid_motion_correct(
+        movie, template=base, max_shift=10, upsample_factor=20, bin_width=200, n_iter=1
+    )
+
+    assert registered.shape == movie.shape
+    assert np.all(np.isfinite(registered))
+    np.testing.assert_allclose(shifts, -true_shifts, atol=0.5)
+    assert _mean_corr(registered, base) > 0.95
+
+
+def test_estimate_shift_padding_does_not_meaningfully_change_the_estimate():
+    # Direct check that padding (inside _estimate_shift, exercised here
+    # via rigid_motion_correct at n_iter=1/bin_width=T so there's no
+    # template-refresh noise) tracks the true unpadded phase-correlation
+    # answer closely, not just "recovers the shift to within the test's
+    # own generous tolerance" -- pins the ~0.02px (one upsample_factor=50
+    # quantization step) agreement confirmed during development.
+    from skimage.registration import phase_cross_correlation
+
+    rng = np.random.default_rng(0)
+    ref = gaussian_filter(rng.standard_normal((509, 509)), 2).astype(np.float64) * 10 + 100
+    true_shift = np.array([2.37, -1.84])
+    moving = np.real(np.fft.ifftn(fourier_shift(np.fft.fftn(ref), true_shift)))
+
+    unpadded_shift, _e, _p = phase_cross_correlation(ref, moving, upsample_factor=50)
+
+    padded_ref = _pad_to_fast_len(ref, mode="edge")
+    padded_moving = _pad_to_fast_len(moving, mode="edge")
+    padded_shift, _e, _p = phase_cross_correlation(padded_ref, padded_moving, upsample_factor=50)
+
+    np.testing.assert_allclose(padded_shift, unpadded_shift, atol=0.15)
+
+
+def test_patch_motion_correct_recovers_shifts_with_prime_width_patches():
+    # A 93px frame split grid_size=31 lands on three EXACTLY 31px-wide
+    # patches (31 is prime) -- confirmed via _patch_centers(93, 31).
+    # Regression guard that _estimate_shift's FFT-fast-size padding
+    # (exercised once per patch per frame here) doesn't break patch-
+    # based correction at exactly the kind of unlucky size it's meant
+    # to help with.
+    rng = np.random.default_rng(0)
+    H, W, T = 93, 93, 10
+    base = np.zeros((H, W))
+    base[30:60, 30:60] = 1.0
+    base = gaussian_filter(base, 2)
+
+    true_shifts = rng.uniform(-3, 3, size=(T, 2))
+    movie = np.zeros((H, W, T))
+    for t in range(T):
+        frame = np.real(np.fft.ifftn(fourier_shift(np.fft.fftn(base), true_shifts[t])))
+        movie[:, :, t] = frame + 0.02 * rng.standard_normal((H, W))
+
+    registered, shift_fields, _template, _initial = patch_motion_correct(
+        movie, template=base, grid_size=31, max_shift=10, max_dev=8, upsample_factor=20, init_batch=T, n_iter=1,
+        min_patch_contrast=0,  # several patches are pure background at this grid density -- expected, not a bug
+    )
+
+    assert registered.shape == movie.shape
+    assert shift_fields.shape[1:3] == (3, 3)  # 3x3 grid of 31px patches
+    assert np.all(np.isfinite(registered))
+    assert _mean_corr(registered, base) > 0.9

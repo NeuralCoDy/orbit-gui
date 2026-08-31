@@ -1,6 +1,13 @@
 import numpy as np
+from scipy.signal import welch
 
-from orbit.cnmf_deconvolution import constrained_oasis_ar1, estimate_ar1_coefficient, estimate_noise_std, oasis_ar1
+from orbit.cnmf_deconvolution import (
+    _fast_welch_psd,
+    constrained_oasis_ar1,
+    estimate_ar1_coefficient,
+    estimate_noise_std,
+    oasis_ar1,
+)
 
 
 def test_oasis_ar1_recovers_a_single_isolated_spike_exactly():
@@ -88,3 +95,41 @@ def test_estimate_noise_std_scales_with_injected_noise():
     sn = estimate_noise_std(trace)
 
     assert 1.5 < sn < 2.5
+
+
+def test_fast_welch_psd_matches_scipy_welch_for_a_long_1d_trace():
+    rng = np.random.default_rng(4)
+    x = rng.standard_normal(2000)
+    nperseg = min(len(x), 256)
+
+    expected_freqs, expected_psd = welch(x, nperseg=nperseg)
+    freqs, psd = _fast_welch_psd(x, nperseg=nperseg)
+
+    assert np.allclose(freqs, expected_freqs)
+    assert np.allclose(psd, expected_psd, rtol=1e-10)
+
+
+def test_fast_welch_psd_matches_scipy_welch_when_nperseg_equals_n_samples():
+    # Edge case: a single segment, no real overlap -- exercises the
+    # n_segments = max(1, ...) floor.
+    rng = np.random.default_rng(5)
+    x = rng.standard_normal(100)
+    nperseg = min(len(x), 256)
+
+    expected_freqs, expected_psd = welch(x, nperseg=nperseg)
+    freqs, psd = _fast_welch_psd(x, nperseg=nperseg)
+
+    assert np.allclose(freqs, expected_freqs)
+    assert np.allclose(psd, expected_psd, rtol=1e-10)
+
+
+def test_fast_welch_psd_matches_scipy_welch_for_a_2d_batch():
+    rng = np.random.default_rng(6)
+    x = rng.standard_normal((10, 2000))
+    nperseg = min(x.shape[-1], 256)
+
+    expected_freqs, expected_psd = welch(x, nperseg=nperseg, axis=1)
+    freqs, psd = _fast_welch_psd(x, nperseg=nperseg)
+
+    assert np.allclose(freqs, expected_freqs)
+    assert np.allclose(psd, expected_psd, rtol=1e-10)

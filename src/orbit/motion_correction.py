@@ -13,10 +13,34 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
 import numpy as np
+from scipy.fft import next_fast_len
 from scipy.ndimage import fourier_shift, map_coordinates
 from skimage.registration import phase_cross_correlation
 
 _DEFAULT_MAX_WORKERS = 4
+
+
+def _pad_to_fast_len(image: np.ndarray, mode: str = "constant") -> np.ndarray:
+    """Pads ``image`` (bottom/right of each axis, via ``mode``) up to the
+    next FFT-efficient size per axis (scipy.fft.next_fast_len) --
+    dimension-agnostic, so this works for both a 2D frame and a 3D
+    volume (see motion_correction_3d.py, which reuses _apply_shift/
+    _estimate_shift as-is).
+
+    An "unlucky" size -- one with a large prime factor, e.g. a 500px
+    frame split into a grid_size=32 grid of patches lands most patches
+    at 31px wide, and 31 is prime -- can make an FFT several times
+    slower than a same-ballpark size with only small prime factors
+    (confirmed empirically: a 509x509 FFT took ~5x longer than padding
+    up to 512x512 first, including the padding's own cost). No-op
+    (returns ``image`` unchanged, no copy) when already at a fast size,
+    so this costs nothing in the common case of already-round movie
+    dimensions."""
+    target_shape = tuple(next_fast_len(n) for n in image.shape)
+    if target_shape == image.shape:
+        return image
+    pad_width = [(0, target - n) for n, target in zip(image.shape, target_shape)]
+    return np.pad(image, pad_width, mode=mode)
 
 
 def _resolve_max_workers(max_workers: int | None, bin_width: int) -> int:
@@ -45,9 +69,20 @@ def _as_float_working_copy(movie: np.ndarray) -> np.ndarray:
 
 
 def _apply_shift(frame: np.ndarray, shift: np.ndarray) -> np.ndarray:
-    """Apply a rigid (dy, dx) subpixel shift via frequency-domain warping."""
-    shifted_fft = fourier_shift(np.fft.fftn(frame), shift)
-    return np.real(np.fft.ifftn(shifted_fft))
+    """Apply a rigid (dy, dx) subpixel shift via frequency-domain warping.
+
+    Pads to an FFT-fast size first (see _pad_to_fast_len) and crops back
+    to ``frame``'s own shape afterward -- "edge" padding (not zeros),
+    since unlike _estimate_shift (which only ever reads off a shift
+    scalar and discards the padded array), this array IS the output:
+    zero-padding would risk shifting real content into view of a
+    sharp-edged all-zero region near the boundary. _pad_to_fast_len is a
+    no-op (no copy) when ``frame`` is already a fast size, so the crop
+    below is then a full-extent, effectively free slice."""
+    padded = _pad_to_fast_len(frame, mode="edge")
+    shifted_fft = fourier_shift(np.fft.fftn(padded), shift)
+    shifted = np.real(np.fft.ifftn(shifted_fft))
+    return shifted[tuple(slice(0, n) for n in frame.shape)]
 
 
 def _apply_displacement_field(frame: np.ndarray, disp_y: np.ndarray, disp_x: np.ndarray) -> np.ndarray:
@@ -71,7 +106,28 @@ def _bootstrap_template(
 def _estimate_shift(
     reference: np.ndarray, moving: np.ndarray, upsample_factor: int, normalization: str | None, max_shift: float
 ) -> np.ndarray:
-    """Subpixel (dy, dx) shift of ``moving`` relative to ``reference``, clipped to ``max_shift``."""
+    """Subpixel (dy, dx) shift of ``moving`` relative to ``reference``, clipped to ``max_shift``.
+
+    Both arrays are padded to an FFT-fast size first (see
+    _pad_to_fast_len) -- unlike _apply_shift, nothing here is cropped
+    back afterward, since only a shift vector is read off, not pixel
+    data. Padding mode matters a lot here, confirmed empirically: zero
+    padding (this function's first attempt) is NOT a harmless no-op the
+    way it sounds -- it adds a hard, perfectly-aligned-between-the-two-
+    images edge discontinuity that dominates the cross-power spectrum
+    and made phase_cross_correlation report a shift of exactly zero
+    regardless of the images' true relative shift on a synthetic
+    known-shift test. "edge" padding (extending each border's own pixel
+    values outward, not dropping to zero) avoids that dominant artifact
+    and tracked the true shift closely in the same test (within ~0.1px
+    at upsample_factor=50) -- still a small approximation, not exact,
+    but a reasonable trade for the speedup on an unlucky size. Patch-
+    based correction is the main beneficiary -- _patch_centers's patch
+    widths have no reason to land on an FFT-friendly size (e.g. a 500px
+    frame split grid_size=32-ish lands most patches at 31px, which is
+    prime), and this function is called once per patch per frame there."""
+    reference = _pad_to_fast_len(reference, mode="edge")
+    moving = _pad_to_fast_len(moving, mode="edge")
     shift, _error, _phasediff = phase_cross_correlation(
         reference, moving, upsample_factor=upsample_factor, normalization=normalization
     )

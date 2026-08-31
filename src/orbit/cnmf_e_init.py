@@ -20,10 +20,10 @@ projection and the corr*PNR combination/thresholding are new.
 from __future__ import annotations
 
 import numpy as np
-from scipy.signal import welch
 
 from ._masks import disk_mask
 from ._peak_picking import select_separated_pixels
+from .cnmf_deconvolution import _fast_welch_psd
 from .cnmf_init import finetune_component, gaussian_blur_movie
 from .projections import local_correlation_projection
 
@@ -31,12 +31,13 @@ from .projections import local_correlation_projection
 def noise_std_projection(movie: np.ndarray, freq_range: tuple[float, float] = (0.25, 0.5)) -> np.ndarray:
     """Per-pixel high-frequency-band noise estimate -- the same Welch-PSD
     formula as cnmf_deconvolution.estimate_noise_std, applied to every
-    pixel's trace at once via welch's own ``axis`` support instead of a
-    Python loop calling that function P times (confirmed numerically
-    identical to the per-trace function, output for output)."""
+    pixel's trace at once via _fast_welch_psd's own batched last-axis
+    support instead of a Python loop calling that function P times
+    (confirmed numerically identical to the per-trace function, output
+    for output)."""
     height, width, n_frames = movie.shape
     flat = np.ascontiguousarray(movie, dtype=np.float64).reshape(-1, n_frames)
-    freqs, psd = welch(flat, nperseg=min(n_frames, 256), axis=1)
+    freqs, psd = _fast_welch_psd(flat, nperseg=min(n_frames, 256))
     band = (freqs >= freq_range[0]) & (freqs <= freq_range[1])
     if not band.any():
         band = freqs >= freq_range[0]
