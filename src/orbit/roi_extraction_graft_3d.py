@@ -25,11 +25,14 @@ make this a direct, non-hacky use of the API rather than a workaround:
   needed, an arbitrary (but *saved*) voxel order is exactly as correct
   as any other.
 
-Merging across overlapping patches is a small, self-contained union-find
-here rather than a reuse of ``cnmf.merge_overlapping_components`` --
-that function is coupled to OASIS spike re-deconvolution, which has no
-GraFT equivalent (GraFT ROIs carry a measured trace only, same as the
-2D ``roi_extraction_graft.py``).
+Merging across overlapping patches shares its overlap+correlation
+grouping with ``cnmf.merge_overlapping_components`` (see
+``_merge.find_merge_groups``), but not that function's own
+post-grouping step -- ``cnmf``'s is coupled to OASIS spike
+re-deconvolution, which has no GraFT equivalent (GraFT ROIs carry a
+measured trace only, same as the 2D ``roi_extraction_graft.py``), so
+_merge_overlapping_masks_3d below does its own (simpler) mask-union +
+recomputed-trace collapse instead.
 """
 
 from __future__ import annotations
@@ -42,6 +45,7 @@ import graft
 import numpy as np
 
 from ._masks import threshold_footprint
+from ._merge import find_merge_groups
 from ._patches import make_patches_3d
 from .roi_extraction_graft import _DEFAULT_CORR_KERN, _MAX_PATCH_WORKERS
 
@@ -113,35 +117,17 @@ def _run_one_region(
 def _merge_overlapping_masks_3d(
     movie: np.ndarray, masks: list[np.ndarray], traces: list[np.ndarray], merge_thresh: float,
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
-    """Union-finds masks into merge groups wherever they overlap AND
-    traces are highly correlated (same criterion as
-    cnmf.merge_overlapping_components), then collapses each group into
-    the union of its masks with a trace recomputed from that union --
-    consistent with every other ROI's "trace = masked-mean over its own
-    final mask" convention, rather than averaging each patch's
-    already-computed (smaller-mask) trace."""
-    n = len(masks)
-    parent = list(range(n))
-
-    def find(i: int) -> int:
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
-    for i in range(n):
-        for j in range(i + 1, n):
-            if not np.any(masks[i] & masks[j]):
-                continue
-            if np.corrcoef(traces[i], traces[j])[0, 1] >= merge_thresh:
-                parent[find(i)] = find(j)
-
-    groups: dict[int, list[int]] = {}
-    for i in range(n):
-        groups.setdefault(find(i), []).append(i)
+    """Groups masks wherever they overlap AND traces are highly
+    correlated (see _merge.find_merge_groups, shared with
+    cnmf.merge_overlapping_components's identical criterion), then
+    collapses each group into the union of its masks with a trace
+    recomputed from that union -- consistent with every other ROI's
+    "trace = masked-mean over its own final mask" convention, rather
+    than averaging each patch's already-computed (smaller-mask) trace."""
+    groups = find_merge_groups(masks, traces, merge_thresh)
 
     merged_masks, merged_traces = [], []
-    for members in groups.values():
+    for members in groups:
         union_mask = np.logical_or.reduce([masks[i] for i in members])
         merged_masks.append(union_mask)
         merged_traces.append(_masked_mean_trace_3d(movie, union_mask))

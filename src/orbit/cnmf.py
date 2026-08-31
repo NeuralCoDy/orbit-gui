@@ -23,6 +23,7 @@ import numpy as np
 from graft import solvers as graft_solvers
 
 from ._masks import masked_mean_trace, threshold_footprint
+from ._merge import find_merge_groups
 from ._patches import make_patches_2d
 from .cnmf_deconvolution import constrained_oasis_ar1, estimate_ar1_coefficient, estimate_noise_std
 from .cnmf_init import estimate_background, greedy_roi_init
@@ -197,32 +198,15 @@ def merge_overlapping_components(
     footprints: np.ndarray, traces: np.ndarray, spike_traces: np.ndarray, g_list: list[float],
     merge_thresh: float = 0.8,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[float]]:
-    """Union-finds components into merge groups wherever footprints
-    overlap AND traces are highly correlated (CaImAn's own merge
-    criterion needs both), then collapses each group into one
-    footprint-weighted-mean trace, re-deconvolved via OASIS."""
-    n_components = len(footprints)
-    parent = list(range(n_components))
-
-    def find(i: int) -> int:
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
-    for i in range(n_components):
-        for j in range(i + 1, n_components):
-            if not np.any((footprints[i] > 0) & (footprints[j] > 0)):
-                continue
-            if np.corrcoef(traces[i], traces[j])[0, 1] >= merge_thresh:
-                parent[find(i)] = find(j)
-
-    groups: dict[int, list[int]] = {}
-    for i in range(n_components):
-        groups.setdefault(find(i), []).append(i)
+    """Groups components wherever footprints overlap AND traces are
+    highly correlated (CaImAn's own merge criterion needs both -- see
+    _merge.find_merge_groups, shared with volumetric GraFT's own merge
+    step), then collapses each group into one footprint-weighted-mean
+    trace, re-deconvolved via OASIS."""
+    groups = find_merge_groups([f > 0 for f in footprints], traces, merge_thresh)
 
     merged_footprints, merged_traces, merged_spikes, merged_g = [], [], [], []
-    for members in groups.values():
+    for members in groups:
         if len(members) == 1:
             (k,) = members
             merged_footprints.append(footprints[k])
