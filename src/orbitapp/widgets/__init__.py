@@ -8,6 +8,7 @@ from .movie_popout import show_movie_popout
 from .options_dialog import OptionsDialog
 from .parameters_dialog import ParametersDialog
 from .qc_panel import QCPlotGrid, add_location_markers, split_by_kind
+from .resource_monitor import add_resource_monitor
 from .roi_overlay import render_roi_overlay
 from .roi_review_panel import ROIReviewPanel
 from .spinbox import make_spinbox
@@ -36,4 +37,5 @@ __all__ = [
     "VolumetricLoadDialog",
     "OptionsDialog",
     "StepParamsDialog",
+    "add_resource_monitor",
 ]

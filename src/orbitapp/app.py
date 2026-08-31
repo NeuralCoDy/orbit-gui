@@ -37,7 +37,7 @@ from .tabs import (
     SourceExtractionTab,
 )
 from .theme import apply_dark_theme
-from .widgets import HeaderBar
+from .widgets import HeaderBar, add_resource_monitor
 from .workers import FunctionWorker
 
 _SPLASH_MIN_DISPLAY_S = 1.2
@@ -107,6 +107,12 @@ class MainWindow(QMainWindow):
         central_layout.addWidget(self.header)
         central_layout.addWidget(self.tabs)
         self.setCentralWidget(central)
+
+        # CPU (bottom-left) / RAM (bottom-right) usage, on the status
+        # bar's own native left/right line -- see resource_monitor.py's
+        # docstring for why these are system-wide rather than just this
+        # process's own footprint.
+        add_resource_monitor(self.statusBar())
 
         self.load_tab.data_loaded.connect(self._on_data_loaded)
         for tab in self._stage_tabs:

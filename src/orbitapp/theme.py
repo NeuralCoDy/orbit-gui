@@ -60,6 +60,14 @@ QMainWindow, QTabWidget::pane {{
     background-color: {BACKGROUND};
     border: 1px solid {ACCENT};
 }}
+QStatusBar {{
+    background-color: {PANEL_BACKGROUND};
+    color: {ACCENT};
+    border-top: 1px solid {ACCENT};
+}}
+QStatusBar::item {{
+    border: none;
+}}
 QTabBar::tab {{
     background-color: {PANEL_BACKGROUND};
     color: {ACCENT};

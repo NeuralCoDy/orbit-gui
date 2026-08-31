@@ -35,6 +35,7 @@ gui = [
     "roiapp>=0.1.0",
     "matplotlib>=3.7",
     "astropy>=5.3",
+    "psutil>=5.9",
 ]
 
 [project.scripts]
