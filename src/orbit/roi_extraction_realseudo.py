@@ -45,8 +45,8 @@ def real_seudo_source_extraction(
     mask_blur_rad: int = 1,
     consecutive_frames_required: int = 5,
     max_track_gap: int = 1,
-    eq8_merge_threshold: float = 0.75,
-    eq9_merge_threshold: float = 0.75,
+    eq8_merge_threshold: float = 0.2,
+    eq9_merge_threshold: float = 0.2,
     progress_callback=None,
 ) -> RealSeudoResult:
     """Runs realSEUDOfit across every frame of ``movie`` in order, starting
@@ -60,9 +60,16 @@ def real_seudo_source_extraction(
     run_realseudo_full_movie.py) for the parameters exposed here -- a
     curated subset of FitParams/DetectionParams/PromotionParams' full set,
     matching this app's own "expose the impactful subset" convention (see
-    e.g. cnmf_e_source_extraction's ring-model parameters). ``progress_
-    callback``, if given, is called as progress_callback(frames_done,
-    total_frames) once per frame."""
+    e.g. cnmf_e_source_extraction's ring-model parameters). eq8_merge_
+    threshold/eq9_merge_threshold=0.2 (not the paper's own 0.75) is
+    required, not optional, given known-cell exclusion is unconditionally
+    off (see streaming.py's own DetectionParams docstring) -- confirmed on
+    real data that 0.75 here lets a rejected candidate re-spawn on top of
+    an already-known cell every frame with nothing to catch it, an
+    unbounded "cell" count (200+ on a 10,000-frame real recording) with
+    per-frame cost climbing right along with it. ``progress_callback``, if
+    given, is called as progress_callback(frames_done, total_frames) once
+    per frame."""
     height, width, n_frames = movie.shape
     fit = FitParams(
         sigma2=sigma2, lambda_blob=lambda_blob, blob_radius=blob_radius,

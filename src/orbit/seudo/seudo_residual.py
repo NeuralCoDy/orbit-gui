@@ -54,7 +54,7 @@ def compute_seudo_residual_fractions(se, cell_id: int, ti: dict, **seudo_kwargs)
         this_frame = ti["shapes"][:, :, tt].reshape(-1)
         tc_lsq_frame, _fit_fancy, fit_x, _lsq_cost, _bob_cost = _solve_one_frame_cell(
             this_frame, setup["rois"], setup["rois_scaled"], setup["lambdas"], setup["norm_factors"], setup["k1"],
-            setup["k2"], setup["n_y"], setup["n_x"], one_blob, setup["operators"], params["solver_tol"],
+            setup["k2"], setup["n_y"], setup["n_x"], setup["blob_conv"], setup["operators"], params["solver_tol"],
             params["solver_max_iter"],
         )
         coef_lsq = tc_lsq_frame[idx]

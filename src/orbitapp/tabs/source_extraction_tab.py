@@ -285,8 +285,8 @@ class SourceExtractionTab(QWidget):
         self.real_seudo_mask_blur_rad_spin = make_spinbox(0, 50, 1)
         self.real_seudo_consecutive_frames_spin = make_spinbox(1, 1000, 5)
         self.real_seudo_max_track_gap_spin = make_spinbox(0, 100, 1)
-        self.real_seudo_eq8_merge_thresh_spin = make_spinbox(0.0, 1.0, 0.75, step=0.05, decimal=True)
-        self.real_seudo_eq9_merge_thresh_spin = make_spinbox(0.0, 1.0, 0.75, step=0.05, decimal=True)
+        self.real_seudo_eq8_merge_thresh_spin = make_spinbox(0.0, 1.0, 0.2, step=0.05, decimal=True)
+        self.real_seudo_eq9_merge_thresh_spin = make_spinbox(0.0, 1.0, 0.2, step=0.05, decimal=True)
 
         # Correlation click-to-add's own parameters live on the main screen
         # (see _build_correlation_rows), not in this dialog -- it's always

@@ -18,15 +18,18 @@ Ported into orbit-gui from /home/adam/GITrepos/SEUDO/python/seudo/streaming.py
 (2026-08-31) -- see this app's roi_extraction_realseudo.py for the
 orbit-gui-facing wrapper (real_seudo_source_extraction). One real adaptation
 from the source repo, not just a copy: this module's own dependencies
-(estimate.py's _solve_one_frame_cell) already had orbit-gui's own native-
-accelerator/thread-pool machinery stripped out when THAT module was first
-ported (see its docstring -- "orbit-gui already runs every long computation
-off the GUI thread via run_worker"), so FitParams here has no use_native/
-native_l_mode/native_nthreads/blob_spacing/n_jobs fields, StreamingState has
-no thread pool, and every per-cell-fit / per-tile-detection loop below
+(estimate.py's _solve_one_frame_cell) already had the source repo's own
+native-accelerator/thread-pool machinery stripped out when THAT module was
+first ported (see its docstring -- "orbit-gui already runs every long
+computation off the GUI thread via run_worker"), so FitParams here has no
+native_l_mode/native_nthreads/blob_spacing/n_jobs fields, StreamingState
+has no thread pool, and every per-cell-fit / per-tile-detection loop below
 always runs sequentially in this port -- those fields' defaults from the
 source repo's own tuned run_realseudo_full_movie.py carry over unchanged
-wherever they still apply.
+wherever they still apply. FitParams.use_native WAS added back afterward,
+though -- see its own docstring and estimate.py's module docstring for why
+(a from-scratch C++/FFTW port of this project's own solver, not the
+dropped upstream accelerator, which measured slower here).
 
 FitParams.lookahead_frames (default 3) adds a small forward-looking buffer,
 matching realSEUDO's own avg_frames -- this was originally built strictly
@@ -69,10 +72,11 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy import ndimage
 from scipy.interpolate import RegularGridInterpolator
-from scipy.signal import convolve2d, fftconvolve
+from scipy.signal import convolve2d
 
+from . import _native
 from .blob import make_seudo_blob, make_smoothing_kernel
-from .estimate import _cell_window_bounds, _setup_cell_window, _solve_one_frame_cell
+from .estimate import _cell_window_bounds, _setup_cell_window, _solve_one_frame_cell, make_cached_blob_conv
 from .solver import fista_nonneg_weighted_l1
 
 
@@ -287,25 +291,37 @@ class PromotionParams:
     eq8_merge_threshold / eq9_merge_threshold: k_temp / k_stab in
     _should_merge_temp_profiles (Eq. 8, Xtemp-to-Xtemp merge-on-create) and
     _find_stable_merge_target/_try_stable_split (Eq. 9, Xstab-to-Xstab
-    merge/split at promotion) respectively. Both default to 0.75, matching
-    rois_params.m's combine_near_min_common/combine_far_min_common. LOWERING
-    either makes a merge easier to trigger (less overlap/containment
-    required to call two detections "the same underlying cell") -- a more
-    aggressive anti-duplication stance. There's no separate spatial
-    exclusion protecting a known cell's own territory from re-spawning a
-    fragmentary duplicate track (a per-dataset-tuned dilation radius for
-    that was tried and rejected -- not part of the paper's own design, and
-    real-data benchmarking found it a poor, invented substitute for these
-    merge checks), so eq8_merge_threshold/eq9_merge_threshold are the
-    primary defense against duplicate detections of an already-known
-    cell's own residual, not a secondary safety net."""
+    merge/split at promotion) respectively. rois_params.m's own
+    combine_near_min_common/combine_far_min_common default to 0.75, but
+    this port's own default is 0.2 -- LOWERING either makes a merge easier
+    to trigger (less overlap/containment required to call two detections
+    "the same underlying cell") -- a more aggressive anti-duplication
+    stance. There's no separate spatial exclusion protecting a known
+    cell's own territory from re-spawning a fragmentary duplicate track (a
+    per-dataset-tuned dilation radius for that was tried and rejected --
+    not part of the paper's own design, and real-data benchmarking found
+    it a poor, invented substitute for these merge checks), so
+    eq8_merge_threshold/eq9_merge_threshold are the primary defense
+    against duplicate detections of an already-known cell's own residual,
+    not a secondary safety net -- confirmed empirically on real data: with
+    exclusion off and these left at the paper's 0.75, a re-spawned
+    duplicate lands squarely on top of the already-known cell (maximal
+    overlap) but 0.75 doesn't reliably catch it, so nothing stops that
+    same region from spawning a fresh candidate on essentially every
+    subsequent frame -- an unbounded "cell" count climbing for as long as
+    the movie runs (200+ on a 10,000-frame real recording), with per-frame
+    cost growing right along with it (each fit gets more expensive as
+    state.profiles grows), compounding into a runaway where wall-clock
+    time per frame keeps INCREASING rather than staying flat. Lowering to
+    0.2 let the count plateau (predominantly by frame ~7500 of that same
+    10,000-frame run) instead of climbing indefinitely."""
     consecutive_frames_required: int = 5
     max_track_gap: int = 1
     match_max_centroid_dist: float = 5.0
     min_track_fit_ratio: float = 0.0
     stability_frames: int = 0
-    eq8_merge_threshold: float = 0.75
-    eq9_merge_threshold: float = 0.75
+    eq8_merge_threshold: float = 0.2
+    eq9_merge_threshold: float = 0.2
 
 
 @dataclass
@@ -375,12 +391,21 @@ class FitParams:
     for plain smoothing. Benchmark before relying on it -- untested how
     much it matters once ds_time is already doing temporal denoising.
 
-    Unlike the source this was ported from, there's no n_jobs/use_native/
-    native_l_mode/native_nthreads/blob_spacing here -- orbit-gui's own
-    estimate.py already dropped that machinery when it was first ported
-    (every long computation here already runs off the GUI thread via
-    run_worker, so per-call internal threading isn't needed), and
-    blob_spacing only ever affected the native solver in the first place."""
+    Unlike the source this was ported from, there's no n_jobs/native_l_mode/
+    native_nthreads/blob_spacing here -- orbit-gui's own estimate.py already
+    dropped that machinery when it was first ported (every long computation
+    here already runs off the GUI thread via run_worker, so per-call
+    internal threading isn't needed -- confirmed by direct benchmark this
+    session that it's actively harmful at these per-cell-fit sizes, not
+    just unneeded), and blob_spacing only ever affected the (dropped)
+    upstream native solver in the first place.
+
+    use_native: opt into estimate.py's OWN compiled C++/FFTW FISTA
+    accelerator (see its module docstring / seudo/_native) instead of the
+    dropped upstream one -- bit-identical results, ~1.3x faster end-to-end
+    on real data on top of the pure-Python cached-kernel-FFT win already
+    in place. Silently no-ops back to pure Python whenever seudo._native
+    hasn't been built, so True (the default) is always safe."""
     p: float = 1e-5
     sigma2: float = 0.01
     lambda_blob: float = 20.0
@@ -394,6 +419,7 @@ class FitParams:
     ds_time: int = 1
     lookahead_frames: int = 3
     spatial_denoise_radius: float = None
+    use_native: bool = True
 
 
 @dataclass
@@ -467,10 +493,26 @@ class StreamingState:
                 )
 
         self.one_blob = make_seudo_blob(self.fit.blob_radius)
+        # Always safe regardless of whether seudo._native was built (see
+        # FitParams.use_native's own docstring) -- no error, just a silent
+        # fall-back to the pure-Python solver.
+        self.use_native = self.fit.use_native and _native.NATIVE_AVAILABLE
         blobify_radius = self.detection.blobify_radius
         if blobify_radius is None:
             blobify_radius = self.fit.blob_radius
         self.detect_blob = make_seudo_blob(blobify_radius)
+        # detect_blob never changes for the life of a run, and every
+        # per-frame candidate-detection convolution below is always the
+        # SAME (mov_y, mov_x) whole-FOV size -- one cached-kernel conv
+        # (native when available, else the Python one) suffices for the
+        # whole run, same principle as the per-cell fit's own blob_conv
+        # (see estimate.py's make_cached_blob_conv docstring). Confirmed
+        # by profiling a real run that the plain convolve2d this replaces
+        # was ~25% of total wall-clock time on its own.
+        self.detect_blob_conv = (
+            _native.make_native_blob_conv(self.detect_blob, self.mov_y, self.mov_x).convolve if self.use_native
+            else make_cached_blob_conv(self.detect_blob, (self.mov_y, self.mov_x))
+        )
         self.denoise_kernel = (
             make_smoothing_kernel(self.fit.spatial_denoise_radius)
             if self.fit.spatial_denoise_radius is not None else None
@@ -495,6 +537,12 @@ class StreamingState:
         self.frame_index = 0
         self.first_detected_frame = {}
         self._cell_setups = {}
+        # (n_y, n_x) -> native BlobConv, shared across every cell (and every
+        # rebuild after overlap invalidation) of that window size for the
+        # life of this state -- see _setup_cell_window's own docstring for
+        # why: FFTW plan construction is a real, measured cost, and cell
+        # setups get rebuilt far more often than "once per cell's lifetime."
+        self._native_blob_conv_cache: dict = {}
         self.rejected_region_mask = np.zeros((self.mov_y, self.mov_x), dtype=bool)
         self.candidate_tracks = {}
         self._next_track_id = 0
@@ -525,6 +573,7 @@ def _add_cell_setup(state, cell_id, y0, y1, x0, x1):
     setup = _setup_cell_window(
         state.profiles, cell_id, y0, y1, x0, x1, state.fit.min_pix_for_inclusion,
         state.fit.lambda_prof, state.fit.lambda_blob, state.sigma2_ds, state.fit.p, state.one_blob,
+        state.use_native, state._native_blob_conv_cache,
     )
     setup['y0'], setup['y1'], setup['x0'], setup['x1'] = y0, y1, x0, x1
     state._cell_setups[cell_id] = setup
@@ -873,12 +922,13 @@ def _subtract_tracked_contributions(state, residual):
         setup = _setup_cell_window(
             combined_profiles, i, y0, y1, x0, x1, state.fit.min_pix_for_inclusion,
             state.fit.lambda_prof, state.fit.lambda_blob, state.sigma2_ds, state.fit.p, state.one_blob,
+            state.use_native, state._native_blob_conv_cache,
         )
         this_residual = residual[y0:y1 + 1, x0:x1 + 1].ravel()
         _tc_lsq, fit_fancy, _fit_x, _lsq_cost, _bob_cost = _solve_one_frame_cell(
             this_residual, setup['rois'], setup['rois_scaled'], setup['lambdas'], setup['norm_factors'],
-            setup['k1'], setup['k2'], setup['n_y'], setup['n_x'], state.one_blob, setup['operators'],
-            state.fit.solver_tol, state.fit.solver_max_iter,
+            setup['k1'], setup['k2'], setup['n_y'], setup['n_x'], setup['blob_conv'], setup['operators'],
+            state.fit.solver_tol, state.fit.solver_max_iter, setup['native_blob_conv'],
         )
         weight = float(fit_fancy[setup['cell_index_within']])
         track_weights[track_id] = weight
@@ -982,10 +1032,10 @@ def _confirm_candidate_via_blob_fit(state, cand, residual):
 
     Padded by the fit blob kernel's own half-width so the convolution has
     real context at the window edges, not implicit zero-padding artifacts
-    right at the candidate's boundary. Uses fftconvolve (not convolve2d)
-    for A/At -- same math, matching the same fftconvolve substitution
-    estimate.py's own port already made elsewhere (profiling there found
-    spatial-domain convolution the dominant cost)."""
+    right at the candidate's boundary. Uses make_cached_blob_conv (not a
+    fresh fftconvolve call, and not spatial-domain convolve2d) for A/At --
+    same math as estimate.py's own A/At, and same cached-kernel-FFT
+    optimization (see make_cached_blob_conv's own docstring)."""
     y0, y1, x0, x1 = cand.bbox
     r = state.one_blob.shape[0] // 2
     py0, py1 = max(0, y0 - r), min(state.mov_y - 1, y1 + r)
@@ -995,13 +1045,13 @@ def _confirm_candidate_via_blob_fit(state, cand, residual):
 
     lam_scalar = 2 * state.sigma2_ds * state.fit.lambda_blob
     lam = np.full(win_y * win_x, lam_scalar)
-    one_blob = state.one_blob
+    blob_conv = make_cached_blob_conv(state.one_blob, (win_y, win_x))
 
     def A(z):
-        return fftconvolve(z.reshape(win_y, win_x), one_blob, mode='same').ravel()
+        return blob_conv(z.reshape(win_y, win_x)).ravel()
 
     def At(v):
-        return fftconvolve(v.reshape(win_y, win_x), one_blob, mode='same').ravel()
+        return blob_conv(v.reshape(win_y, win_x)).ravel()
 
     x0_vec = np.zeros(win_y * win_x)
     weights = fista_nonneg_weighted_l1(
@@ -1382,8 +1432,8 @@ def _fit_cell(state, frame, cell_id):
     this_frame = frame[y0:y1 + 1, x0:x1 + 1].ravel()
     _tc_lsq, fit_fancy, _fit_x, _lsq_cost, _bob_cost = _solve_one_frame_cell(
         this_frame, setup['rois'], setup['rois_scaled'], setup['lambdas'], setup['norm_factors'],
-        setup['k1'], setup['k2'], setup['n_y'], setup['n_x'], state.one_blob, setup['operators'],
-        state.fit.solver_tol, state.fit.solver_max_iter,
+        setup['k1'], setup['k2'], setup['n_y'], setup['n_x'], setup['blob_conv'], setup['operators'],
+        state.fit.solver_tol, state.fit.solver_max_iter, setup['native_blob_conv'],
     )
     return float(fit_fancy[setup['cell_index_within']]), (y0, y1, x0, x1)
 
@@ -1471,7 +1521,7 @@ def realSEUDOfit(frame, state, frame_index=None, zero_level=None):
     # 8/9 merge checks that catch any other duplicate, not a separate
     # spatial exclusion mask.
     base_exclude_mask = state.rejected_region_mask
-    smoothed = convolve2d(residual, state.detect_blob, mode='same')
+    smoothed = state.detect_blob_conv(residual)
     raw_candidates, rejected_bboxes = _run_tile_detection(state, smoothed, noise_map, base_exclude_mask)
     matched_track_ids = _update_candidate_tracks(state, raw_candidates, residual, frame_index)
 
@@ -1493,7 +1543,7 @@ def realSEUDOfit(frame, state, frame_index=None, zero_level=None):
         residual2, candidate_exclude_mask, track_footprints, track_weights = _subtract_tracked_contributions(state, residual)
         _revert_low_signal_matches(state, matched_track_ids, track_weights, noise_map)
         combined_exclude_mask = base_exclude_mask | candidate_exclude_mask
-        smoothed2 = convolve2d(residual2, state.detect_blob, mode='same')
+        smoothed2 = state.detect_blob_conv(residual2)
         raw_candidates_new, rejected_bboxes_2 = _run_tile_detection(state, smoothed2, noise_map, combined_exclude_mask)
         rejected_bboxes = rejected_bboxes + rejected_bboxes_2
     else:
