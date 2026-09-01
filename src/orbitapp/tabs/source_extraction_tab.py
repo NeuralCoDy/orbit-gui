@@ -728,22 +728,44 @@ class SourceExtractionTab(QWidget):
             on_success=_on_success, on_failure=self._on_failed, **kwargs,
         )
 
+    def _capped_worker_movie(
+        self, movie: np.ndarray | None, n_frames_limit: int | None, memmap_preview_fn=None, time_axis: int = -1,
+    ) -> tuple[np.ndarray | None, str]:
+        """Resolves the (worker_movie, message suffix) pair every batch
+        method's _on_run_*_clicked needs -- shared since all of them
+        (PCA-ICA, CNMF, CNMF-E, GraFT, GraFT-3D) apply the exact same two
+        rules: ``n_frames_limit`` (run_test_btn) always wins, slicing
+        straight to that many frames regardless of memmap status -- it's
+        already a much smaller/faster slice than any memmap preview below.
+        Otherwise, ``memmap_preview_fn`` (preview_slice/
+        preview_slice_volumetric, or None for a method that's already
+        memmap-safe by construction -- Real-SEUDO fits one frame at a time,
+        so it needs no preview cap at all for a full run) is applied if the
+        movie is a memmap, so a huge recording isn't read fully into RAM
+        just to fit against it. ``time_axis`` is 0 for a volumetric
+        (T, L, W, D) movie, -1 (the last axis) for a 2D (H, W, T) one --
+        the capped-slice's own axis differs between them, so this is the
+        one thing every call site still has to tell this helper."""
+        if movie is None:
+            return None, ""
+        if n_frames_limit is not None:
+            worker_movie = movie[:n_frames_limit] if time_axis == 0 else movie[:, :, :n_frames_limit]
+            return worker_movie, f" (first {n_frames_limit} frames)"
+        if memmap_preview_fn is not None and is_memmap(movie):
+            return memmap_preview_fn(movie), ""
+        return None, ""
+
     def _on_run_pca_ica_clicked(self, n_frames_limit: int | None = None) -> None:
         movie = self.state.active_data()
         self._pending_batch_params = dict(
             n_pca_components=self.n_pca_components_spin.value(), n_ica_components=self.n_ica_components_spin.value(),
         )
-        if n_frames_limit is not None:
-            # run_test_btn -- capped to a fixed prefix regardless of memmap,
-            # a much smaller/faster slice than even the memmap preview below.
-            worker_movie = movie[:, :, :n_frames_limit] if movie is not None else None
-        else:
-            # PCA/ICA decomposes the whole (P, T) movie at once -- no
-            # patch-based equivalent exists for it, so a memmap movie is
-            # always capped to the same 5000-frame preview Apply uses
-            # elsewhere in the app, rather than materializing the whole thing.
-            worker_movie = preview_slice(movie) if movie is not None and is_memmap(movie) else None
-        message = "Running PCA-ICA..." if n_frames_limit is None else f"Running PCA-ICA (first {n_frames_limit} frames)..."
+        # PCA/ICA decomposes the whole (P, T) movie at once -- no
+        # patch-based equivalent exists for it, so a memmap movie is always
+        # capped to the same 5000-frame preview Apply uses elsewhere in the
+        # app, rather than materializing the whole thing.
+        worker_movie, suffix = self._capped_worker_movie(movie, n_frames_limit, preview_slice)
+        message = f"Running PCA-ICA{suffix}..."
         self._run_batch_method(
             message, pca_ica_source_extraction, self._on_pca_ica_finished,
             worker_movie=worker_movie, extra_fingerprint=n_frames_limit, **self._pending_batch_params,
@@ -778,19 +800,15 @@ class SourceExtractionTab(QWidget):
         # attempts regardless of patch mode.
         if n_frames_limit is None and self._refuse_if_memmap_without_patch(memmap_input, self.cnmf_patch_check, "CNMF"):
             return
-        if n_frames_limit is not None:
-            worker_movie = movie[:, :, :n_frames_limit] if movie is not None else None
-        else:
-            # Both CNMF modes are capped to the same 5000-frame preview for a
-            # memmap movie: patch-based CNMF is already bounded by patch
-            # size regardless of frame count, but at the sizes memmap users
-            # are dealing with it's still much faster to fit against a
-            # representative sample than the whole recording. _commit()
-            # re-extracts every accepted ROI's trace from the full movie
-            # afterward, so this doesn't leave traces reflecting only the
-            # preview in the committed result.
-            worker_movie = preview_slice(movie) if memmap_input else None
-        suffix = "" if n_frames_limit is None else f" (first {n_frames_limit} frames)"
+        # Both CNMF modes are capped to the same 5000-frame preview for a
+        # memmap movie: patch-based CNMF is already bounded by patch size
+        # regardless of frame count, but at the sizes memmap users are
+        # dealing with it's still much faster to fit against a
+        # representative sample than the whole recording. _commit()
+        # re-extracts every accepted ROI's trace from the full movie
+        # afterward, so this doesn't leave traces reflecting only the
+        # preview in the committed result.
+        worker_movie, suffix = self._capped_worker_movie(movie, n_frames_limit, preview_slice)
 
         if self.cnmf_patch_check.isChecked():
             patch = self.cnmf_patch_size_spin.value()
@@ -827,14 +845,10 @@ class SourceExtractionTab(QWidget):
         memmap_input = movie is not None and is_memmap(movie)
         if n_frames_limit is None and self._refuse_if_memmap_without_patch(memmap_input, self.cnmf_e_patch_check, "CNMF-E"):
             return
-        if n_frames_limit is not None:
-            worker_movie = movie[:, :, :n_frames_limit] if movie is not None else None
-        else:
-            # Same reasoning as _on_run_cnmf_clicked: capped to the 5000-frame
-            # preview for a memmap movie either way; _commit() re-extracts
-            # every accepted ROI's trace from the full movie afterward.
-            worker_movie = preview_slice(movie) if memmap_input else None
-        suffix = "" if n_frames_limit is None else f" (first {n_frames_limit} frames)"
+        # Same reasoning as _on_run_cnmf_clicked: capped to the 5000-frame
+        # preview for a memmap movie either way; _commit() re-extracts every
+        # accepted ROI's trace from the full movie afterward.
+        worker_movie, suffix = self._capped_worker_movie(movie, n_frames_limit, preview_slice)
 
         # search_radius/min_corr/min_pnr/ring_* are common to both modes
         # (whole-FOV takes them directly; patch mode forwards them as
@@ -900,16 +914,12 @@ class SourceExtractionTab(QWidget):
         memmap_input = movie is not None and is_memmap(movie)
         if n_frames_limit is None and self._refuse_if_memmap_without_patch(memmap_input, self.graft_patch_check, "GraFT"):
             return
-        if n_frames_limit is not None:
-            worker_movie = movie[:, :, :n_frames_limit] if movie is not None else None
-        else:
-            # Same reasoning as _on_run_cnmf_clicked: capped to the 5000-frame
-            # preview for a memmap movie either way (patch-based GraFT is
-            # already memmap-safe regardless, but fitting against the whole
-            # recording is unnecessarily slow at the sizes memmap users deal
-            # with) -- _commit() re-extracts traces from the full movie after.
-            worker_movie = preview_slice(movie) if memmap_input else None
-        suffix = "" if n_frames_limit is None else f" (first {n_frames_limit} frames)"
+        # Same reasoning as _on_run_cnmf_clicked: capped to the 5000-frame
+        # preview for a memmap movie either way (patch-based GraFT is
+        # already memmap-safe regardless, but fitting against the whole
+        # recording is unnecessarily slow at the sizes memmap users deal
+        # with) -- _commit() re-extracts traces from the full movie after.
+        worker_movie, suffix = self._capped_worker_movie(movie, n_frames_limit, preview_slice)
 
         if self.graft_patch_check.isChecked():
             patch = self.graft_patch_size_spin.value()
@@ -949,11 +959,9 @@ class SourceExtractionTab(QWidget):
         memmap_input = movie is not None and is_memmap(movie)
         if n_frames_limit is None and self._refuse_if_memmap_without_patch(memmap_input, self.graft_patch_check, "GraFT"):
             return
-        if n_frames_limit is not None:
-            worker_movie = movie[:n_frames_limit] if movie is not None else None  # time is axis 0 for (T, L, W, D)
-        else:
-            worker_movie = preview_slice_volumetric(movie) if memmap_input else None
-        suffix = "" if n_frames_limit is None else f" (first {n_frames_limit} frames)"
+        # time is axis 0 for a volumetric (T, L, W, D) movie, unlike the 2D
+        # (H, W, T) path above.
+        worker_movie, suffix = self._capped_worker_movie(movie, n_frames_limit, preview_slice_volumetric, time_axis=0)
 
         # mask is bound into the callable itself (functools.partial) rather
         # than passed as a kwarg -- _run_batch_method's "already ran with
@@ -1008,11 +1016,13 @@ class SourceExtractionTab(QWidget):
             eq8_merge_threshold=self.real_seudo_eq8_merge_thresh_spin.value(),
             eq9_merge_threshold=self.real_seudo_eq9_merge_thresh_spin.value(),
         )
-        worker_movie = movie[:, :, :n_frames_limit] if n_frames_limit is not None and movie is not None else None
-        message = (
-            "Running Real-SEUDO (this can take a while)..." if n_frames_limit is None
-            else f"Running Real-SEUDO (first {n_frames_limit} frames)..."
-        )
+        # memmap_preview_fn=None: no preview cap for a full run, matching
+        # this method's own memmap-safety -- see the comment above.
+        worker_movie, suffix = self._capped_worker_movie(movie, n_frames_limit, memmap_preview_fn=None)
+        # "(this can take a while)" only for an uncapped run -- a
+        # run_test_btn-capped one is fast almost by definition, that's the
+        # whole point of "Run N-frame test".
+        message = "Running Real-SEUDO (this can take a while)..." if n_frames_limit is None else f"Running Real-SEUDO{suffix}..."
         self._run_batch_method(
             message, real_seudo_source_extraction, self._on_real_seudo_finished,
             worker_movie=worker_movie, extra_fingerprint=n_frames_limit, **self._pending_batch_params,
