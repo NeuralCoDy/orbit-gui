@@ -49,6 +49,34 @@ def test_histogram_plot_legend_labels_the_mean_median_mode_lines():
     assert labels == {"mean", "median", "mode"}
 
 
+def test_histogram_plot_legend_renders_without_crashing():
+    # Regression test for a real, reproducible segfault: _plot_histogram
+    # used to add its InfiniteLine stat markers directly to the legend
+    # (legend.addItem(line, stat)). pyqtgraph's LegendItem assumes every
+    # entry is a PlotDataItem/BarGraphItem/ScatterPlotItem (all of which
+    # carry an `.opts` dict) -- InfiniteLine has no `.opts` at all, so the
+    # instant Qt actually painted that legend swatch, LegendItem.paint()'s
+    # unconditional `self.item.opts` raised an AttributeError a Qt
+    # paintEvent can't recover from, crashing the whole process. Merely
+    # checking legend.items (as the test above does) never renders
+    # anything, so it can't catch this -- only an actual paint can.
+    from PySide6.QtGui import QPainter, QPixmap
+
+    tab = NormalizationTab(AppState())
+    plot = tab.hist_grid.left_rows[0][0]
+    hist = {"edges": np.linspace(0, 1, 6), "counts": np.array([1, 2, 3, 2, 1]), "mean": 0.5, "median": 0.4, "mode": 0.3}
+    _plot_histogram(plot, hist, "r")
+    plot.show()
+    QApplication.instance().processEvents()
+
+    pixmap = QPixmap(plot.size())
+    painter = QPainter(pixmap)
+    try:
+        plot.render(painter)  # a real paint -- this segfaulted the whole process pre-fix, not just raised
+    finally:
+        painter.end()
+
+
 def _tab_with_loaded_movie() -> tuple[AppState, NormalizationTab]:
     state = AppState()
     state.load("movie.tif", np.zeros((4, 4, 5)))

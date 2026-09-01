@@ -4,8 +4,9 @@ from orbit.neuropil import compute_neuropil_traces, neuropil_ring_mask
 
 
 class _StubROI:
-    def __init__(self, mask):
+    def __init__(self, mask, trace):
         self.mask = mask
+        self.trace = trace
         self.neuropil_trace = None
 
 
@@ -51,8 +52,8 @@ def test_compute_neuropil_traces_excludes_pixels_claimed_by_other_rois():
     mask_b = np.zeros((height, width), dtype=bool)
     mask_b[16, 16] = True
 
-    roi_a = _StubROI(mask_a)
-    roi_b = _StubROI(mask_b)
+    roi_a = _StubROI(mask_a, trace=np.ones(n_frames))
+    roi_b = _StubROI(mask_b, trace=np.full(n_frames, 100.0))
     compute_neuropil_traces(movie, [roi_a, roi_b], inner_radius=0, outer_radius=2)
 
     # roi_a's ring would otherwise include (16,16), which is roi_b's own
@@ -64,3 +65,26 @@ def test_compute_neuropil_traces_excludes_pixels_claimed_by_other_rois():
 
 def test_compute_neuropil_traces_is_a_noop_for_empty_list():
     compute_neuropil_traces(np.zeros((5, 5, 3)), [])  # must not raise
+
+
+def test_compute_neuropil_traces_matches_a_frame_capped_roi_traces_own_length():
+    # Regression test: an ROI from a frame-capped run (memmap preview, or
+    # the "Run <N>-frame test" button) has a SHORTER trace than the full
+    # movie -- neuropil_trace must match that same (shorter) length, not
+    # silently take on the full movie's frame count, or anything comparing
+    # the two (e.g. ROIReviewPanel's trace - neuropil_trace diff plot)
+    # breaks with a shape mismatch.
+    height, width, n_frames = 30, 30, 10
+    n_capped = 4
+    movie = np.zeros((height, width, n_frames))
+    movie[:, :, :] = 1.0
+
+    mask = np.zeros((height, width), dtype=bool)
+    mask[15, 15] = True
+    roi = _StubROI(mask, trace=np.ones(n_capped))
+
+    compute_neuropil_traces(movie, [roi], inner_radius=0, outer_radius=2)
+
+    assert roi.neuropil_trace is not None
+    assert len(roi.neuropil_trace) == n_capped
+    assert len(roi.neuropil_trace) == len(roi.trace)
