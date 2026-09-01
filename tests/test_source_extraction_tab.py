@@ -5,7 +5,10 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
-from orbit.roi_extraction_pca_ica import pca_ica_source_extraction  # noqa: E402
+from orbit.cnmf import CNMFResult  # noqa: E402
+from orbit.roi_extraction_graft import GraFTResult  # noqa: E402
+from orbit.roi_extraction_pca_ica import PCAICAResult, pca_ica_source_extraction  # noqa: E402
+from orbit.roi_extraction_realseudo import RealSeudoResult  # noqa: E402
 from orbitapp.state import AppState  # noqa: E402
 from orbitapp.tabs.source_extraction_tab import SourceExtractionTab  # noqa: E402
 
@@ -1352,6 +1355,68 @@ def test_on_run_test_clicked_dispatches_to_whichever_method_is_selected(monkeypa
         ("pca_ica", _TEST_N_FRAMES), ("cnmf", _TEST_N_FRAMES), ("cnmf_e", _TEST_N_FRAMES),
         ("graft", _TEST_N_FRAMES), ("real_seudo", _TEST_N_FRAMES),
     ]
+
+
+def test_clicking_a_run_button_for_real_uses_the_full_movie_not_zero_frames(monkeypatch):
+    # Regression test for a real bug: QPushButton.clicked always emits its
+    # own `checked: bool` argument. _add_run_action used to connect it
+    # straight to slot (btn.clicked.connect(slot)), and every
+    # _on_run_*_clicked has an optional n_frames_limit *first* parameter
+    # (for run_test_btn's use) -- so a REAL click bound n_frames_limit=False
+    # (Qt's checked state), and since False is not None, the code took the
+    # "capped" branch and sliced movie[:, :, :False] == 0 frames. Every
+    # other test in this file calls the slot directly in Python
+    # (tab._on_run_graft_clicked()), which always correctly defaults
+    # n_frames_limit to None -- only an actual button.click() (a real Qt
+    # signal emission, matching what a user's mouse click produces)
+    # reproduces the bug, which is why it went undetected until a user hit
+    # it live. Covers all five buttons since they share _add_run_action.
+    n_frames = 60
+    state = AppState()
+    state.load("movie.tif", _synthetic_movie(n_frames=n_frames))
+    tab = SourceExtractionTab(state)
+    tab.on_data_loaded()
+    _wait_for_worker(tab)
+
+    seen_shapes = {}
+
+    def _stub(name, result):
+        def _fn(movie, **kw):
+            seen_shapes[name] = movie.shape
+            return result
+        return _fn
+
+    monkeypatch.setattr(
+        "orbitapp.tabs.source_extraction_tab.pca_ica_source_extraction",
+        _stub("pca_ica", PCAICAResult(masks=[], traces=[])),
+    )
+    monkeypatch.setattr(
+        "orbitapp.tabs.source_extraction_tab.cnmf_source_extraction",
+        _stub("cnmf", CNMFResult(masks=[], traces=[], spike_traces=[])),
+    )
+    monkeypatch.setattr(
+        "orbitapp.tabs.source_extraction_tab.cnmf_e_source_extraction",
+        _stub("cnmf_e", CNMFResult(masks=[], traces=[], spike_traces=[])),
+    )
+    monkeypatch.setattr(
+        "orbitapp.tabs.source_extraction_tab.graft_source_extraction",
+        _stub("graft", GraFTResult(masks=[], traces=[])),
+    )
+    monkeypatch.setattr(
+        "orbitapp.tabs.source_extraction_tab.real_seudo_source_extraction",
+        _stub("real_seudo", RealSeudoResult(masks=[], traces=[])),
+    )
+
+    for btn_name in (
+        "run_pca_ica_btn", "run_cnmf_btn", "run_cnmf_e_btn", "run_graft_btn", "run_real_seudo_btn",
+    ):
+        getattr(tab, btn_name).click()  # a REAL Qt signal emission, unlike calling _on_run_*_clicked() directly
+        _wait_for_worker(tab)
+
+    assert seen_shapes == {
+        "pca_ica": (30, 30, n_frames), "cnmf": (30, 30, n_frames), "cnmf_e": (30, 30, n_frames),
+        "graft": (30, 30, n_frames), "real_seudo": (30, 30, n_frames),
+    }
 
 
 def test_run_test_btn_caps_pca_ica_to_the_requested_frame_count(monkeypatch):

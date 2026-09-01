@@ -445,12 +445,28 @@ class SourceExtractionTab(QWidget):
     def _add_run_action(self, label: str, slot) -> QPushButton:
         """One "Run <Method>" button in its own action_stack page --
         shared by every batch method (PCA-ICA, CNMF, ...) so adding a
-        future method doesn't need its own near-identical builder."""
+        future method doesn't need its own near-identical builder.
+
+        ``btn.clicked.connect(lambda: slot())``, NOT ``btn.clicked.connect(slot)``
+        directly: QPushButton.clicked always emits its own ``checked: bool``
+        argument, which a direct connection would land on ``slot``'s first
+        parameter -- every ``_on_run_*_clicked`` takes an optional
+        ``n_frames_limit`` there (for run_test_btn's capped-frame-count
+        re-dispatch), so a real button click was silently passing
+        ``n_frames_limit=False`` instead of the intended default ``None``.
+        Since ``False is not None``, that took the "capped" branch and
+        sliced the movie down to ``movie[:, :, :False]`` == 0 frames --
+        confirmed via a real user report (GraFT failing with "Found array
+        with 0 feature(s)") and reproduced with instrumented logging
+        showing exactly this. The lambda discards the unwanted argument,
+        calling ``slot()`` with none at all, matching how run_test_btn's
+        own ``_on_run_test_clicked`` (which takes no parameters) was never
+        affected."""
         widget = QWidget()
         row = QHBoxLayout(widget)
         row.setContentsMargins(0, 0, 0, 0)
         btn = QPushButton(label)
-        btn.clicked.connect(slot)
+        btn.clicked.connect(lambda: slot())
         row.addWidget(btn)
         self.action_stack.addWidget(widget)
         return btn

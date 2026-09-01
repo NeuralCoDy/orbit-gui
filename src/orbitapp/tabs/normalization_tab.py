@@ -62,10 +62,22 @@ def _plot_histogram(plot: pg.PlotWidget, hist: dict, color: str) -> None:
     plot.addItem(pg.BarGraphItem(x=centers, height=hist["counts"], width=(edges[1] - edges[0]) * 0.9, brush=color))
     legend = plot.plotItem.legend  # from QCPlotGrid's own add_legend=True default -- see qc_panel.py
     for stat, style in _STAT_LINE_STYLES.items():
-        line = pg.InfiniteLine(pos=hist[stat], angle=90, pen=pg.mkPen(color, style=style, width=1.5))
+        pen = pg.mkPen(color, style=style, width=1.5)
+        line = pg.InfiniteLine(pos=hist[stat], angle=90, pen=pen)
         plot.addItem(line)
         if legend is not None:
-            legend.addItem(line, stat)
+            # NOT legend.addItem(line, stat) -- pyqtgraph's LegendItem
+            # assumes every entry is a PlotDataItem/BarGraphItem/
+            # ScatterPlotItem (all of which carry an `.opts` dict);
+            # InfiniteLine has no `.opts` at all. That's not a subtle
+            # edge case: a minimal repro (one InfiniteLine added to a
+            # legend, then rendered once) segfaults immediately --
+            # LegendItem's paint() does `self.item.opts` unconditionally,
+            # an AttributeError that a Qt paintEvent can't recover from.
+            # A standalone PlotDataItem with the same pen, never added to
+            # the plot itself, gives the legend swatch something with a
+            # real `.opts` to read, with an identical-looking line.
+            legend.addItem(pg.PlotDataItem(pen=pen), stat)
 
 
 def _plot_histograms(plots: list[pg.PlotWidget], sample: dict) -> None:

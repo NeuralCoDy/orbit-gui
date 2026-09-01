@@ -52,12 +52,24 @@ def compute_neuropil_traces(movie: np.ndarray, rois: list, inner_radius: int = I
     around its own mask, excluding pixels claimed by any OTHER ROI in
     ``rois``. Call this whenever the ROI set changes (one is added or
     removed) -- adding/removing an ROI can change every other ROI's ring.
-    ``rois`` is duck-typed (each needs ``.mask`` and a settable
-    ``.neuropil_trace``) rather than orbitapp.state.ROI directly, since
-    orbit/ has no dependency on the Qt-layer package."""
+    ``rois`` is duck-typed (each needs ``.mask``, ``.trace``, and a
+    settable ``.neuropil_trace``) rather than orbitapp.state.ROI directly,
+    since orbit/ has no dependency on the Qt-layer package. ``.trace`` is
+    only read for its length, matched exactly by the computed
+    ``neuropil_trace`` (see the frame_limit note below) -- callers with a
+    mix of full-length and frame-capped ROIs (e.g. some from a memmap
+    preview or a "Run <N>-frame test" run, some not) in the same list are
+    handled correctly, each against its own length."""
     if not rois:
         return
     full_union = np.logical_or.reduce([roi.mask for roi in rois])
     for roi in rois:
         ring = neuropil_ring_mask(roi.mask, inner_radius, outer_radius, exclusion_mask=full_union)
-        roi.neuropil_trace = masked_mean_trace(movie, ring)
+        # frame_limit=len(roi.trace), not the full movie: an ROI whose own
+        # trace came from a frame-capped run (memmap preview, or the
+        # "Run <N>-frame test" button) is shorter than movie's own frame
+        # count -- computing neuropil_trace against the full movie instead
+        # would silently give it a different length than roi.trace,
+        # breaking anything that compares the two (e.g. ROIReviewPanel's
+        # trace - neuropil_trace diff plot).
+        roi.neuropil_trace = masked_mean_trace(movie, ring, frame_limit=len(roi.trace))
