@@ -84,25 +84,30 @@ public:
         kernel_fft_ = (fftw_complex *)fftw_malloc(sizeof(fftw_complex) * fh_ * fw_c_);
         out_real_ = (double *)fftw_malloc(sizeof(double) * fh_ * fw_);
 
-        // FFTW_MEASURE, not FFTW_ESTIMATE: tried ESTIMATE first (much
-        // cheaper to plan, ~15x on a synthetic varying-size benchmark) on
-        // the theory that a cell's window gets rebuilt far more often in
-        // practice than "once per cell's lifetime" (overlap invalidation
-        // rebuilds nearby cells' setups too). Real-data profiling told a
-        // different story: once construction is properly memoized by
-        // window size (see StreamingState._native_blob_conv_cache and
-        // _setup_cell_window's own docstring -- the actual fix for the
-        // rebuild-frequency problem), constructions become rare (a few
-        // hundred) while EXECUTIONS dominate (fista_native's inner solve
-        // calls this thousands of times per construction) -- and measured
-        // on a real 3000-frame run, ESTIMATE's chosen plan was
-        // meaningfully SLOWER per-execute for real data's actual window
-        // sizes (fista_native's own cumulative time rose from 32.5s to
-        // 42.7s switching to ESTIMATE, swamping the ~14.5s construction
-        // savings). MEASURE's higher one-time construction cost is worth
-        // paying now that the cache makes it rare.
-        plan_fwd_ = fftw_plan_dft_r2c_2d(fh_, fw_, buf_real_, buf_cplx_, FFTW_MEASURE);
-        plan_inv_ = fftw_plan_dft_c2r_2d(fh_, fw_, buf_cplx_, out_real_, FFTW_MEASURE);
+        // FFTW_ESTIMATE, not FFTW_MEASURE. History: tried ESTIMATE first,
+        // then switched to MEASURE (its own per-execute speed measured
+        // faster on real data -- but BEFORE the 5-smooth-length padding
+        // above existed, a stale comparison, since bad prime-factor
+        // lengths were the actual culprit, not ESTIMATE itself). Once
+        // padding was added, MEASURE's own construction cost turned out
+        // wildly bimodal in the real streaming context -- instrumented
+        // per-call timing found a ~0.1-0.2ms median but occasional
+        // 50-235ms outliers (mean 19ms/call), while isolated, out-of-
+        // context timing of the exact same real window sizes showed
+        // ~0.1ms consistently. MEASURE literally runs and TIMES candidate
+        // algorithm variants to pick the fastest, so its planning cost is
+        // itself vulnerable to scheduling noise (a context switch landing
+        // mid-measurement); ESTIMATE picks a plan heuristically with no
+        // timed trials at all, so it can't have this failure mode.
+        // Re-measured ESTIMATE vs MEASURE per-execute speed with padding
+        // in place, back-to-back on the same real data to rule out
+        // machine-load noise: statistically indistinguishable (both
+        // ~24s on a real 3000-frame run). ESTIMATE strictly dominates --
+        // same execute speed, no outlier-prone construction cost, and a
+        // real ~57x reduction in aggregate construction time (5321ms ->
+        // 92.5ms on that same run).
+        plan_fwd_ = fftw_plan_dft_r2c_2d(fh_, fw_, buf_real_, buf_cplx_, FFTW_ESTIMATE);
+        plan_inv_ = fftw_plan_dft_c2r_2d(fh_, fw_, buf_cplx_, out_real_, FFTW_ESTIMATE);
 
         // Transform the fixed kernel once, zero-padded to (fh_, fw_).
         std::memset(buf_real_, 0, sizeof(double) * fh_ * fw_);
@@ -217,7 +222,17 @@ static void apply_At(const std::vector<double> &v, const std::vector<double> &ro
 
 // Direct port of fista_nonneg_weighted_l1 (solver.py): minimize_{x>=0}
 // 0.5*||Ax-b||^2 + lam.x via backtracking FISTA. Same algorithm, same
-// stopping criterion, same default l0. Returns (weights, n_iter).
+// stopping criterion, same default l0. Returns (weights, n_iter, L) --
+// L (the final backtracking step-size/Lipschitz estimate) is worth
+// capturing and passing back in as the NEXT call's l0 whenever the
+// operator A doesn't change between calls (e.g. the same known cell's
+// window, frame to frame): L only ever grows within a single solve, and
+// the true Lipschitz constant of a fixed quadratic operator is the same
+// every time, so restarting from l0=1.0 every frame forces the
+// backtracking search to rediscover the SAME L from scratch every single
+// frame. Confirmed on real data: this rediscovery was over half of all
+// forward-operator evaluations in the streaming (short, ~2.4-iteration)
+// regime -- see StreamingState's own per-cell L cache.
 static py::tuple fista_native(
     CachedBlobConv &conv,
     py::array_t<double, py::array::c_style | py::array::forcecast> rois_in,
@@ -297,7 +312,7 @@ static py::tuple fista_native(
 
     py::array_t<double> out(n_total);
     std::memcpy(out.request().ptr, x.data(), sizeof(double) * n_total);
-    return py::make_tuple(out, n_iter);
+    return py::make_tuple(out, n_iter, L);
 }
 
 PYBIND11_MODULE(_fista_native, m)
@@ -325,5 +340,7 @@ PYBIND11_MODULE(_fista_native, m)
         py::arg("conv"), py::arg("rois"), py::arg("b"), py::arg("lam"),
         py::arg("tol"), py::arg("max_iter"), py::arg("l0") = 1.0,
         "Solve minimize_{x>=0} 0.5*||Ax-b||^2 + lam.x, given a pre-built BlobConv. "
-        "Returns (weights, n_iter).");
+        "Returns (weights, n_iter, L) -- pass L back in as the next call's l0 "
+        "when the operator doesn't change between calls, to skip rediscovering "
+        "the same backtracking step size from scratch every time.");
 }

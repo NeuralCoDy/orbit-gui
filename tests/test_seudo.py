@@ -89,7 +89,7 @@ def test_fista_nonneg_weighted_l1_recovers_a_sparse_nonneg_solution():
     b = A(x_true)
     lam = np.full(n, 0.01)  # tiny penalty -- recover x_true closely
 
-    x_hat = fista_nonneg_weighted_l1(A, At, b, lam, np.zeros(n), tol=1e-6, max_iter=2000)
+    x_hat, _n_iter, _L = fista_nonneg_weighted_l1(A, At, b, lam, np.zeros(n), tol=1e-6, max_iter=2000)
 
     assert (x_hat >= -1e-8).all()
     assert np.allclose(x_hat, x_true, atol=0.05)

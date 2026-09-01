@@ -103,10 +103,10 @@ def test_native_fista_matches_python_fista_on_synthetic_problem():
     b = A(true_weights) + rng.normal(scale=0.02, size=n_y * n_x)
 
     x0 = np.zeros(n_cells + n_y * n_x)
-    w_py = fista_nonneg_weighted_l1(A, At, b, lam, x0, tol=0.01, max_iter=1000)
+    w_py, _n_iter, _L = fista_nonneg_weighted_l1(A, At, b, lam, x0, tol=0.01, max_iter=1000)
 
     native_conv = _native.make_native_blob_conv(kernel, n_y, n_x)
-    w_native, _n_iter = _native.fista_native(native_conv, rois, b, lam, 0.01, 1000, 1.0)
+    w_native, _n_iter, _L_native = _native.fista_native(native_conv, rois, b, lam, 0.01, 1000, 1.0)
 
     r_py = A(w_py) - b
     r_native = A(w_native) - b

@@ -211,8 +211,8 @@ def _setup_cell_window(
 def _solve_one_frame_cell(
     this_frame: np.ndarray, rois: np.ndarray, rois_scaled: np.ndarray, lambdas: np.ndarray, norm_factors: np.ndarray,
     k1: np.ndarray, k2: float, n_y: int, n_x: int, blob_conv, operators: tuple, solver_tol: float,
-    solver_max_iter: int, native_blob_conv=None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float]:
+    solver_max_iter: int, native_blob_conv=None, l0: float = 1.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float, float]:
     """Solve one (frame, cell) pair -- independent of every other frame and cell.
     ``blob_conv`` (see make_cached_blob_conv) is the same cached "convolve
     with one_blob" closure A/At already use internally -- reused here for
@@ -227,19 +227,31 @@ def _solve_one_frame_cell(
     runs at all once native is active (profiling a real run found this
     leftover Python fftconvolve call was still ~14% of total time even
     with the solve itself already native). None (the default) always
-    falls back to the Python path for both."""
+    falls back to the Python path for both.
+
+    ``l0``, the backtracking search's starting step-size/Lipschitz
+    estimate, and the returned final ``L`` exist so a caller solving the
+    SAME operator (rois_scaled, blob kernel/window) repeatedly -- e.g. one
+    known cell across many consecutive frames -- can pass this call's
+    final L back in as the next call's l0, skipping the backtracking
+    search's rediscovery of the same L from scratch every time (see
+    fista_native.cpp / fista_nonneg_weighted_l1's own docstrings for why
+    this is safe: L only ever grows within one solve, and a fixed
+    quadratic operator's true Lipschitz constant doesn't change between
+    calls). l0=1.0 (the default) matches the original always-restart
+    behavior for callers that don't have a persistent per-operator cache."""
     n_cells_window = rois.shape[1]
     tc_lsq_frame = np.linalg.solve(rois.T @ rois, rois.T @ this_frame)
 
     if native_blob_conv is not None:
-        fit_weights, _n_iter = _native.fista_native(
-            native_blob_conv, rois_scaled, this_frame, lambdas, solver_tol, solver_max_iter,
+        fit_weights, _n_iter, l_final = _native.fista_native(
+            native_blob_conv, rois_scaled, this_frame, lambdas, solver_tol, solver_max_iter, l0,
         )
     else:
         A, At = operators
         x0 = np.zeros(n_cells_window + n_y * n_x)
-        fit_weights = fista_nonneg_weighted_l1(
-            A, At, this_frame, lambdas, x0, tol=solver_tol, max_iter=solver_max_iter,
+        fit_weights, _n_iter, l_final = fista_nonneg_weighted_l1(
+            A, At, this_frame, lambdas, x0, tol=solver_tol, max_iter=solver_max_iter, l0=l0,
         )
     fit_weights = fit_weights / norm_factors
     fit_x = fit_weights[:n_cells_window]
@@ -260,7 +272,7 @@ def _solve_one_frame_cell(
     else:
         fit_fancy = fit_x
 
-    return tc_lsq_frame, fit_fancy, fit_x, lsq_cost, bob_cost
+    return tc_lsq_frame, fit_fancy, fit_x, lsq_cost, bob_cost, l_final
 
 
 def _merge_frame_blocks(blocks: list[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -371,6 +383,14 @@ def estimate_time_courses_with_seudo(
         # ds_time-1 frames) -- reset at the start of each block rather
         # than blending across the (possibly large) gap between blocks.
         sliding_window = np.full((mov_y * mov_x, ds_time), np.nan)
+        # Per-cell backtracking step-size (L) carried across consecutive
+        # frames within this block -- the operator (rois_scaled, blob
+        # kernel/window) is the same every frame for a given cell, so the
+        # correct L doesn't need rediscovering from scratch every single
+        # frame (see _solve_one_frame_cell's own l0/L docstring). Reset
+        # per block, same "don't blend across a possibly-large gap"
+        # reasoning as sliding_window above.
+        l0_list = [1.0] * n_cells_analyzed
         for ff in range(block_start, block_end + 1):
             local_ff = ff - block_start
             frame_flat = _get_frame(movie, ff, zero_level).reshape(-1)
@@ -383,10 +403,10 @@ def estimate_time_courses_with_seudo(
 
             for cc in range(n_cells_analyzed):
                 this_frame = frame_full[which_pixels[:, cc]]
-                tc_lsq_frame, fit_fancy, fit_x, lsq_cost, bob_cost = _solve_one_frame_cell(
+                tc_lsq_frame, fit_fancy, fit_x, lsq_cost, bob_cost, l0_list[cc] = _solve_one_frame_cell(
                     this_frame, rois_list[cc], rois_scaled_list[cc], lambdas_list[cc], norm_factors_list[cc],
                     k1_list[cc], k2_list[cc], n_y_list[cc], n_x_list[cc], blob_conv_list[cc], operators[cc],
-                    solver_tol, solver_max_iter, native_blob_conv_list[cc],
+                    solver_tol, solver_max_iter, native_blob_conv_list[cc], l0_list[cc],
                 )
                 idx_within = cell_index_within_list[cc]
                 tc_seudo[ff, cc] = fit_fancy[idx_within]

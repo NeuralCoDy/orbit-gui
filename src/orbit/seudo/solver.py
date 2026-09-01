@@ -23,19 +23,31 @@ def fista_nonneg_weighted_l1(
     tol: float = 0.01,
     max_iter: int = 1000,
     l0: float = 1.0,
-) -> np.ndarray:
+) -> tuple[np.ndarray, int, float]:
     """Minimize 0.5*||A(x) - b||^2 + lam^T x over x >= 0. A/At: forward and
     adjoint linear operators. lam: per-coordinate L1 weight, >= 0. Returns
-    the solution vector."""
+    (x, n_iter, L) -- L (the final backtracking step-size/Lipschitz
+    estimate) is worth passing back in as the NEXT call's l0 whenever A
+    doesn't change between calls (e.g. the same known cell's window,
+    frame to frame): L only ever grows within one solve, and the true
+    Lipschitz constant of a fixed quadratic operator is the same every
+    time, so restarting from l0=1.0 every call forces the backtracking
+    search to rediscover the SAME L from scratch every time -- confirmed
+    on real data this was over half of all forward-operator evaluations
+    in the streaming (short, ~2.4-iteration) regime. See fista_native.cpp
+    (seudo/_native) for the same optimization on the compiled path, and
+    StreamingState's own per-cell L cache for how it's threaded through."""
     x = np.array(x0, dtype=float, copy=True)
     y = x.copy()
     t = 1.0
     L = l0
+    n_iter = 0
 
     Ax = A(x)
     f_prev = 0.5 * np.dot(Ax - b, Ax - b) + np.dot(lam, x)
 
     for _ in range(max_iter):
+        n_iter += 1
         Ay = A(y)
         resid = Ay - b
         grad = At(resid)
@@ -62,4 +74,4 @@ def fista_nonneg_weighted_l1(
         if rel_change < tol:
             break
 
-    return x
+    return x, n_iter, L
