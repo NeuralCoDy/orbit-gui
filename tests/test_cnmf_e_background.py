@@ -1,7 +1,9 @@
 import numpy as np
 
 from orbit.cnmf_e_background import (
+    _ZOOM_CHUNK_ELEMENTS,
     RingModel,
+    _zoom_chunk_frames,
     fit_ring_model,
     fit_ring_weights,
     predict_ring_background,
@@ -9,6 +11,35 @@ from orbit.cnmf_e_background import (
     ring_model_background,
     ring_offsets,
 )
+
+
+def test_zoom_chunk_frames_keeps_the_temporarys_own_size_roughly_constant_across_fov_sizes():
+    # predict_ring_model_background's own upsample processes a chunk of
+    # frames at a time so its temporary's own memory stays bounded
+    # regardless of field-of-view size (H * width_ds * chunk_size held
+    # near _ZOOM_CHUNK_ELEMENTS, the exact configuration profiling
+    # measured -- see that constant's own comment) -- a much bigger FOV
+    # should get a proportionally SMALLER chunk automatically, not the
+    # same chunk size (which would make the temporary itself grow
+    # unbounded with FOV size instead).
+    small = _zoom_chunk_frames(height=128, width_ds=32)
+    baseline = _zoom_chunk_frames(height=256, width_ds=64)
+    large = _zoom_chunk_frames(height=1024, width_ds=256)
+
+    assert baseline == 50  # the exact profiled/measured configuration
+    assert small > baseline > large
+    # each dimension is held near _ZOOM_CHUNK_ELEMENTS, not exactly equal
+    # to it (integer division), so allow a small amount of slack either
+    # side rather than requiring an exact match.
+    for height, width_ds, chunk in ((128, 32, small), (256, 64, baseline), (1024, 256, large)):
+        assert abs(height * width_ds * chunk - _ZOOM_CHUNK_ELEMENTS) <= height * width_ds
+
+
+def test_zoom_chunk_frames_never_returns_less_than_one():
+    # An enormous field of view shouldn't make this divide down to 0 --
+    # a chunk size of 0 would make predict_ring_model_background's own
+    # loop never advance.
+    assert _zoom_chunk_frames(height=100_000, width_ds=100_000) >= 1
 
 
 def test_ring_offsets_excludes_inner_disk_and_includes_only_up_to_outer_radius():
