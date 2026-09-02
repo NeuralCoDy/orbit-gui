@@ -21,6 +21,7 @@ from dataclasses import dataclass
 import graft
 import numpy as np
 
+from ._concurrency import limited_native_threads
 from ._masks import masked_mean_trace, threshold_footprint
 
 # The corr_kern graftapp's own GUI actually uses (graftapp/workers.py) --
@@ -39,6 +40,32 @@ _DEFAULT_CORR_KERN = {"corrType": "embedding", "reduce_dim": True, "w_time": 0}
 # (verified crash-free at this same repro) is safer than trying to
 # compute "how many is too many" for an unknown machine.
 _MAX_PATCH_WORKERS = 4
+
+# GraFT's native solver defaults to using every core it can find (see
+# _concurrency.limited_native_threads' own docstring for the measured
+# problem this solves: an 80-core machine driven to ~54 cores of CPU use
+# by one whole-FOV call, for only a ~30% speed benefit over a 16-thread
+# cap). 16 was reliably the fastest cap actually measured (8 was
+# consistently slower: ~4.3s vs 16's ~3.2s on a real 150x150x150 test,
+# repeated runs each way), comfortably below the crash zone an
+# uncapped/too-high thread count can reach -- see that docstring. Peak
+# memory turned out to have substantial run-to-run variance at every
+# cap tried (roughly 900MB-2GB on a real 250x250x150 test regardless of
+# 8 vs 16 vs 32), too noisy on this machine to treat as a factor in
+# choosing between them -- picked on the reliable (speed, safety)
+# signal instead, not because a memory difference was established.
+_WHOLE_FOV_MAX_THREADS = 16
+
+# patch_graft_source_extraction runs _MAX_PATCH_WORKERS (4) of these
+# concurrently, each with its OWN OpenMP pool -- confirmed the same
+# per-call default (every core) applies per worker too, measured driving
+# ~36 cores of CPU use. 8 (4 workers x 8 threads = 32 total, comfortably
+# below the crash zone) was measurably faster than 4 (10.5s vs 15.0s on
+# a real 200x200x150 test) with peak memory staying close either way
+# (~1050MB at 4, 8, or 16 per-worker threads, on the same test) --
+# unlike whole-FOV's own noisy memory picture above, this one repeated
+# consistently, though still only measured at one movie size.
+_PATCH_MAX_THREADS_PER_WORKER = 8
 
 
 @dataclass
@@ -73,10 +100,12 @@ def graft_source_extraction(
     ``lambda``) -- see ``graft.core._GRAFT_DEFAULTS`` for the full set;
     only ``n_dict`` is exposed as a named parameter here since it's the
     one every other extraction method in this app also surfaces directly
-    (component count)."""
-    _dict_temporal, spatial, _extras = graft.graft(
-        movie, corr_kern=_DEFAULT_CORR_KERN, params={"n_dict": n_dict, **graft_params}, rng=rng,
-    )
+    (component count). Caps GraFT's own native-solver thread count --
+    see ``_WHOLE_FOV_MAX_THREADS``'s own comment."""
+    with limited_native_threads(_WHOLE_FOV_MAX_THREADS):
+        _dict_temporal, spatial, _extras = graft.graft(
+            movie, corr_kern=_DEFAULT_CORR_KERN, params={"n_dict": n_dict, **graft_params}, rng=rng,
+        )
     return _finalize(movie, spatial)
 
 
@@ -106,10 +135,18 @@ def patch_graft_source_extraction(
     size rather than the whole movie -- this is why patch-based GraFT is
     required (not just offered) for a memmap-backed movie in the UI,
     same as patch-based CNMF.
+
+    Each concurrent patch worker also gets its own native-solver thread
+    count capped -- see ``_PATCH_MAX_THREADS_PER_WORKER``'s own comment;
+    set once, here, since patches run as THREADS (not separate
+    processes) within this same call, so they all see this same cap
+    (threadpoolctl's own thread-pool handles are process-wide, not
+    per-thread).
     """
     patches = graft.construct_patches(movie.shape[:2], patch_size, overlap)
-    _dict_temporal, spatial, _extras = graft.patch_graft(
-        movie, n_dict=n_dict_per_patch, patches=patches, corr_kern=_DEFAULT_CORR_KERN, params=graft_params,
-        rng=rng, max_workers=max_workers,
-    )
+    with limited_native_threads(_PATCH_MAX_THREADS_PER_WORKER):
+        _dict_temporal, spatial, _extras = graft.patch_graft(
+            movie, n_dict=n_dict_per_patch, patches=patches, corr_kern=_DEFAULT_CORR_KERN, params=graft_params,
+            rng=rng, max_workers=max_workers,
+        )
     return _finalize(movie, spatial)

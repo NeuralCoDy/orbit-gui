@@ -17,6 +17,10 @@ dependencies = [
     "scikit-learn>=1.3",
     "opencv-python-headless>=4.8",
     "PyWavelets>=1.4",
+    # scikit-learn's own dependency already, so effectively always present --
+    # listed explicitly since orbit._concurrency.limited_native_threads calls
+    # its API directly, not just benefiting from scikit-learn's internal use.
+    "threadpoolctl>=3.1",
     # orbit.cnmf's spatial update and orbit.roi_extraction_graft both import
     # graft (this package's algorithm module, not its GUI) unconditionally --
     # a base dependency, not gui-only, even though most other GraFT-adjacent

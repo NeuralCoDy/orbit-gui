@@ -195,6 +195,20 @@ def test_patch_cnmf_source_extraction_peak_memory_is_bounded():
     assert peak_mb < 1700, f"patch-based CNMF peak RSS {peak_mb:.0f}MB exceeds bound"
 
 
+def test_graft_source_extraction_peak_memory_is_bounded():
+    # Whole-FOV GraFT's own compiled solver has a comparable fixed
+    # overhead to the patch-based path below, but with substantially
+    # more run-to-run variance measured at this movie size (repeated
+    # runs ranged roughly 900MB-2GB regardless of which thread cap was
+    # used -- see roi_extraction_graft.py's own _WHOLE_FOV_MAX_THREADS
+    # comment) -- the bound here is wider than patch GraFT's own to
+    # accommodate that noise without flaking, while still catching a
+    # real regression (e.g. several times that, from an accidentally
+    # materialized full-FOV-sized extra copy).
+    peak_mb = _peak_rss_mb("graft", 250, 250, 150, "float32", timeout=120.0)
+    assert peak_mb < 2500, f"whole-FOV GraFT peak RSS {peak_mb:.0f}MB exceeds bound"
+
+
 def test_patch_graft_source_extraction_peak_memory_is_bounded():
     # Same reasoning as patch-based CNMF above. GraFT's own compiled
     # solver has a higher fixed overhead per patch-worker than CNMF's

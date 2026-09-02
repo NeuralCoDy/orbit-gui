@@ -5,7 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from orbit._concurrency import available_cpu_count
+import numpy as np
+import threadpoolctl
+
+from orbit._concurrency import available_cpu_count, limited_native_threads
 
 _SRC = str(Path(__file__).resolve().parent.parent / "src")
 
@@ -51,3 +54,44 @@ def test_available_cpu_count_falls_back_to_cpu_count_when_neither_newer_api_is_p
     monkeypatch.delattr("os.sched_getaffinity", raising=False)
     monkeypatch.setattr("orbit._concurrency.os.cpu_count", lambda: 7)
     assert available_cpu_count() == 7
+
+
+def _blas_thread_counts() -> list[int]:
+    """threadpoolctl's own view of every currently-loaded native
+    threading library's thread count -- used to confirm
+    limited_native_threads actually reaches already-loaded libraries
+    (e.g. NumPy's own BLAS, guaranteed loaded by the time this module's
+    own `import numpy` above has run), not just an env var no library
+    is still reading."""
+    return [info["num_threads"] for info in threadpoolctl.threadpool_info()]
+
+
+def test_limited_native_threads_caps_already_loaded_libraries():
+    # NOT an os.environ check: an env var is only read at a native
+    # library's OWN first initialization, so it wouldn't prove anything
+    # was actually capped for a library (like NumPy's BLAS here) that's
+    # already been initialized by the time this runs -- confirmed via a
+    # real crash that changing env vars this way is actively unsafe once
+    # a library's thread pool is already live, not just ineffective (see
+    # limited_native_threads' own docstring).
+    _ = np.linalg.svd(np.random.default_rng(0).standard_normal((50, 50)))  # ensure BLAS is loaded
+    with limited_native_threads(2):
+        assert all(n == 2 for n in _blas_thread_counts())
+
+
+def test_limited_native_threads_restores_previous_counts_on_exit():
+    _ = np.linalg.svd(np.random.default_rng(0).standard_normal((50, 50)))
+    before = _blas_thread_counts()
+    with limited_native_threads(2):
+        pass
+    assert _blas_thread_counts() == before
+
+
+def test_limited_native_threads_restores_even_if_the_body_raises():
+    _ = np.linalg.svd(np.random.default_rng(0).standard_normal((50, 50)))
+    before = _blas_thread_counts()
+    with pytest.raises(ValueError):
+        with limited_native_threads(2):
+            assert all(n == 2 for n in _blas_thread_counts())
+            raise ValueError("boom")
+    assert _blas_thread_counts() == before

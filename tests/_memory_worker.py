@@ -61,6 +61,10 @@ def _run(stage: str, height: int, width: int, n_frames: int, dtype: str, n_stage
         patch_cnmf_source_extraction(
             movie.astype(np.float64), patch_size=(80, 80), overlap=20, n_components_per_patch=6, n_iterations=1
         )
+    elif stage == "graft":
+        from orbit.roi_extraction_graft import graft_source_extraction
+
+        graft_source_extraction(movie.astype(np.float64), n_dict=10)
     elif stage == "patch_graft":
         from orbit.roi_extraction_graft import patch_graft_source_extraction
 
