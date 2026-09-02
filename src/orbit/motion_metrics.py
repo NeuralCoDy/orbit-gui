@@ -86,10 +86,15 @@ def spatiotemporal_svd(movie: np.ndarray, n_components: int = 30) -> tuple[np.nd
     Uses ``scipy.sparse.linalg.svds`` (ARPACK) rather than a full SVD,
     since only the top few components are needed and a full SVD of a
     (H*W, T) matrix is prohibitively expensive for realistic movie sizes.
+    Stays in float64: ARPACK's iteration can fail to converge in float32
+    when ``k`` approaches ``min(shape)`` (a short movie asking for nearly
+    every component), so the narrower dtype isn't safe here -- the
+    in-place mean-centering below already halves this function's own
+    scratch (one (H*W, T) copy, not two).
     """
     height, width, n_frames = movie.shape
-    flat = movie.reshape(-1, n_frames).astype(np.float64)
-    flat = flat - flat.mean(axis=1, keepdims=True)
+    flat = movie.reshape(-1, n_frames).astype(np.float64)  # .astype always copies -- safe to mutate below
+    flat -= flat.mean(axis=1, keepdims=True)
 
     k = min(n_components, min(flat.shape) - 1)
     u, s, _vt = svds(flat, k=k)

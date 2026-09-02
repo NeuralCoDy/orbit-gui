@@ -124,9 +124,9 @@ def _peak_rss_mb(
 
 
 def test_rigid_motion_correction_peak_memory_is_bounded():
-    # A raw uint16 movie forces a float64 working copy internally (~4x);
-    # peak should stay close to that one copy plus a fixed baseline, not
-    # blow up with extra full-movie temporaries.
+    # A raw uint16 movie forces one float32 working copy internally (~2x
+    # its raw size); peak should stay close to that one copy plus a fixed
+    # baseline, not blow up with extra full-movie temporaries.
     peak_mb = _peak_rss_mb("motion_rigid", 300, 300, 400, "uint16")
     assert peak_mb < 1000, f"rigid motion correction peak RSS {peak_mb:.0f}MB exceeds bound"
 

@@ -28,9 +28,14 @@ def _bootstrap_template_3d(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Starting reference volume: ``template`` if supplied, else the
     median of the first ``init_batch`` volumes. Returns ``(template,
-    initial_template)``."""
+    initial_template)``.
+
+    Median in float32 -- see _bootstrap_template (the 2D version) for
+    why: keeps the bootstrap template identical between the in-RAM and
+    ``output=`` paths."""
     if template is None:
-        template = np.median(movie[: min(init_batch, movie.shape[0])], axis=0)
+        batch = np.asarray(movie[: min(init_batch, movie.shape[0])], dtype=np.float32)
+        template = np.median(batch, axis=0)
     return template, template.copy()
 
 
@@ -80,7 +85,7 @@ def _setup_registration_3d(
         movie = _as_float_working_copy(movie)
         T = movie.shape[0]
         template, initial_template = _bootstrap_template_3d(movie, template, init_batch)
-        registered = movie  # movie is already a private float64 copy -- no second copy needed
+        registered = movie  # movie is already a private float32 copy -- no second copy needed
         initial_read_source = None
     workers = _resolve_max_workers(max_workers, bin_width)
     return registered, initial_read_source, template, initial_template, T, workers
@@ -123,7 +128,12 @@ def rigid_motion_correct_3d(
         source = read_source if read_source is not None else registered
 
         def _process_one(t: int, chunk_template: np.ndarray, _source: np.ndarray = source) -> tuple[np.ndarray, np.ndarray]:
-            volume = _source[t]
+            # float32 per volume -- a no-op view when _source is the
+            # float32 working copy, but when it's the caller's raw
+            # (uint16/float32 memmap) movie -- the ``output=`` path --
+            # this bounds each worker's whole-volume FFT transient to one
+            # float32 volume rather than one complex128 one.
+            volume = np.asarray(_source[t], dtype=np.float32)
             shift = _estimate_shift(chunk_template, volume, upsample_factor, normalization, max_shift)
             return _apply_shift(volume, shift), shift
 

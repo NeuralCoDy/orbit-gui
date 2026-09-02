@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
 import numpy as np
-from scipy.fft import next_fast_len
+from scipy.fft import fftn, ifftn, next_fast_len
 from scipy.ndimage import fourier_shift, map_coordinates
 from skimage.registration import phase_cross_correlation
 
@@ -51,22 +51,32 @@ def _resolve_max_workers(max_workers: int | None, bin_width: int) -> int:
 
 
 def _as_float_working_copy(movie: np.ndarray) -> np.ndarray:
-    """A float64 (H, W, T) array this function owns and can register
+    """A float32 (H, W, T) array this function owns and can register
     into in place, without mutating whatever the caller passed in.
 
-    np.asarray(movie, dtype=float) already allocates a fresh, private
-    array whenever a dtype conversion is needed (the common case: raw
-    microscopy movies are usually uint16 or float32) -- calling .copy()
-    on top of that in every case, regardless of whether a conversion
-    happened, doubled peak memory for exactly the inputs most likely to
-    be large (measured: ~13x a uint16 movie's raw size, vs ~7x once this
-    redundant copy is skipped). Only allocate the extra copy when
-    asarray returned the caller's own array unchanged (dtype was already
-    float64), since that's the one case where skipping it would let
-    per-frame registration mutate data the caller still holds a
-    reference to."""
-    converted = np.asarray(movie, dtype=float)
-    return converted if converted is not movie else converted.copy()
+    float32, not float64: phase-correlation shift estimates are
+    unaffected by the narrower mantissa at realistic upsample_factors
+    (20-50), and raw microscopy movies -- usually uint16 or float32 --
+    are exactly the inputs large enough for a float64 working copy to
+    matter (a uint16 volume becomes a 4x-larger array as float64 vs 2x
+    as float32, with the original still referenced alongside it). Matches
+    the float32 FITS memmap the chunked-Commit path already writes into
+    (see _setup_registration's ``output``).
+
+    A dtype conversion (the common case: raw movies are uint16 or, when
+    already float, usually float64) already allocates a fresh, private,
+    writable array -- calling .copy() on top of that in every case
+    doubled peak memory for exactly the inputs most likely to be large
+    (measured: ~13x a uint16 movie's raw size, vs ~7x once this
+    redundant copy is skipped). So the explicit copy is made only when
+    the input is *already* float32, the one case where np.asarray would
+    hand back something backed by the caller's data. That test is on the
+    dtype, not on object identity: np.asarray of a float32 np.memmap
+    returns a plain-ndarray *view* (fails ``is``) that is also read-only,
+    and registering into that raises rather than copying."""
+    if movie.dtype == np.float32:
+        return np.array(movie, dtype=np.float32)  # our own writable copy
+    return np.asarray(movie, dtype=np.float32)  # conversion already made a fresh, writable array
 
 
 def _apply_shift(frame: np.ndarray, shift: np.ndarray) -> np.ndarray:
@@ -79,11 +89,17 @@ def _apply_shift(frame: np.ndarray, shift: np.ndarray) -> np.ndarray:
     zero-padding would risk shifting real content into view of a
     sharp-edged all-zero region near the boundary. _pad_to_fast_len is a
     no-op (no copy) when ``frame`` is already a fast size, so the crop
-    below is then a full-extent, effectively free slice."""
+    below is then a full-extent, effectively free slice.
+
+    scipy.fft (not np.fft) so a float32 ``frame`` -- the working dtype
+    since _as_float_working_copy -- stays complex64 through the
+    transform rather than being upcast to complex128, halving the
+    transient a whole-volume 3D FFT costs (see motion_correction_3d.py,
+    which reuses this unchanged)."""
     padded = _pad_to_fast_len(frame, mode="edge")
-    shifted_fft = fourier_shift(np.fft.fftn(padded), shift)
-    shifted = np.real(np.fft.ifftn(shifted_fft))
-    return shifted[tuple(slice(0, n) for n in frame.shape)]
+    shifted_fft = fourier_shift(fftn(padded), shift)
+    shifted = np.real(ifftn(shifted_fft))
+    return shifted[tuple(slice(0, n) for n in frame.shape)].astype(frame.dtype, copy=False)
 
 
 def _apply_displacement_field(frame: np.ndarray, disp_y: np.ndarray, disp_x: np.ndarray) -> np.ndarray:
@@ -98,9 +114,16 @@ def _bootstrap_template(
     movie: np.ndarray, template: np.ndarray | None, init_batch: int
 ) -> tuple[np.ndarray, np.ndarray]:
     """Starting reference image: ``template`` if supplied, else the median
-    of the first ``init_batch`` frames. Returns ``(template, initial_template)``."""
+    of the first ``init_batch`` frames. Returns ``(template, initial_template)``.
+
+    The median is taken in float32 so the bootstrap template is
+    identical whether the movie has already been converted to the
+    float32 working copy (the in-RAM path) or is still the caller's raw
+    array (the ``output=`` path, which reads frames straight from it) --
+    a no-op view in the former case."""
     if template is None:
-        template = np.median(movie[:, :, : min(init_batch, movie.shape[-1])], axis=2)
+        batch = np.asarray(movie[:, :, : min(init_batch, movie.shape[-1])], dtype=np.float32)
+        template = np.median(batch, axis=2)
     return template, template.copy()
 
 
@@ -192,7 +215,7 @@ def _setup_registration(
         movie = _as_float_working_copy(movie)
         T = movie.shape[-1]
         template, initial_template = _bootstrap_template(movie, template, init_batch)
-        registered = movie  # movie is already a private float64 copy -- no second copy needed
+        registered = movie  # movie is already a private float32 copy -- no second copy needed
         initial_read_source = None
     workers = _resolve_max_workers(max_workers, bin_width)
     return registered, initial_read_source, template, initial_template, T, workers
@@ -235,7 +258,12 @@ def rigid_motion_correct(
         source = read_source if read_source is not None else registered
 
         def _process_one(t: int, chunk_template: np.ndarray, _source: np.ndarray = source) -> tuple[np.ndarray, np.ndarray]:
-            frame = _source[:, :, t]
+            # float32 per frame -- a no-op view when _source is already
+            # the float32 working copy, but when it's the caller's raw
+            # (uint16/float32 memmap) movie -- the ``output=`` path --
+            # this bounds each worker's FFT transient to one float32
+            # frame rather than one complex128 one.
+            frame = np.asarray(_source[:, :, t], dtype=np.float32)
             shift = _estimate_shift(chunk_template, frame, upsample_factor, normalization, max_shift)
             return _apply_shift(frame, shift), shift
 
@@ -380,7 +408,7 @@ def patch_motion_correct(
         source = read_source if read_source is not None else registered
 
         def _process_one(t: int, chunk_template: np.ndarray, _source: np.ndarray = source) -> tuple[np.ndarray, np.ndarray]:
-            frame = _source[:, :, t]
+            frame = np.asarray(_source[:, :, t], dtype=np.float32)  # see rigid_motion_correct's _process_one
             rigid_shift = _estimate_shift(chunk_template, frame, upsample_factor, normalization, max_shift)
             patch_shift = _estimate_patch_shift_field(
                 chunk_template, frame, y_edges, x_edges, rigid_shift, max_dev, upsample_factor, normalization

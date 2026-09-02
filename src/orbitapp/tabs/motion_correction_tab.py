@@ -45,17 +45,27 @@ _METHOD_LABELS = {"rigid": "Rigid", "patch": "Patch-based", "patchwarp": "Patch 
 
 def _run_and_assess(movie: np.ndarray, method: str, n_components: int, **kwargs) -> dict:
     """Runs off the GUI thread: registration plus every metric needed to
-    populate the tab, packaged into one dict."""
-    registered, shifts, template, initial_template = motion_correct(movie, method=method, **kwargs)
+    populate the tab, packaged into one dict.
+
+    Every metric that depends only on the input movie (sv_before,
+    mcm_before) is computed *before* motion_correct allocates its
+    float32 working copy, so the SVD's own scratch array and that copy
+    never coexist -- keeps Apply's peak near one working copy rather
+    than two-plus."""
     sv_before, _pc_before = spatiotemporal_svd(movie, n_components=n_components)
+    mcm_before = mean_correlation_to_reference(movie)
+
+    registered, shifts, template, initial_template = motion_correct(movie, method=method, **kwargs)
+
+    mmd = mean_max_intensity_difference(movie, registered)
     sv_after, pc_after = spatiotemporal_svd(registered, n_components=n_components)
     return {
         "registered": registered,
         "shifts": shifts,
         "template": template,
         "initial_template": initial_template,
-        "mmd": mean_max_intensity_difference(movie, registered),
-        "mcm_before": mean_correlation_to_reference(movie),
+        "mmd": mmd,
+        "mcm_before": mcm_before,
         "mcm_after": mean_correlation_to_reference(registered),
         "ecc": enhanced_correlation_coefficient(initial_template, template),
         "sv_before": sv_before,
@@ -72,10 +82,20 @@ def _run_and_assess_3d(movie: np.ndarray, n_components: int, **kwargs) -> dict:
     than duplicated in 3D (see orbit._volumetric.depth_project). ECC
     compares the raw (L, W, D) templates directly instead -- it's just a
     flattened Pearson correlation, already dimension-agnostic."""
-    registered, shifts, template, initial_template = rigid_motion_correct_3d(movie, **kwargs)
+    # Everything derived from the input volume is computed (and its
+    # scratch freed) before rigid_motion_correct_3d allocates the
+    # full-size float32 registered volume, so the depth projection, the
+    # SVD's own working copy, and that registered volume don't all pile
+    # up at once.
     projected_before = depth_project(movie)
-    projected_after = depth_project(registered)
     sv_before, _pc_before = spatiotemporal_svd(projected_before, n_components=n_components)
+    mcm_before = mean_correlation_to_reference(projected_before)
+
+    registered, shifts, template, initial_template = rigid_motion_correct_3d(movie, **kwargs)
+
+    projected_after = depth_project(registered)
+    mmd = mean_max_intensity_difference(projected_before, projected_after)
+    del projected_before
     sv_after, pc_after = spatiotemporal_svd(projected_after, n_components=n_components)
     return {
         "registered": projected_after,  # (L, W, T) -- for display/metrics only
@@ -83,8 +103,8 @@ def _run_and_assess_3d(movie: np.ndarray, n_components: int, **kwargs) -> dict:
         "shifts": shifts,
         "template": template,
         "initial_template": initial_template,
-        "mmd": mean_max_intensity_difference(projected_before, projected_after),
-        "mcm_before": mean_correlation_to_reference(projected_before),
+        "mmd": mmd,
+        "mcm_before": mcm_before,
         "mcm_after": mean_correlation_to_reference(projected_after),
         "ecc": enhanced_correlation_coefficient(initial_template, template),
         "sv_before": sv_before,

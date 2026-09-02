@@ -84,15 +84,18 @@ def test_rigid_motion_correct_3d_output_param_matches_default_in_ram_path():
     reg_default, shifts_default, tmpl_default, init_default = rigid_motion_correct_3d(
         movie, bin_width=7, n_iter=2, upsample_factor=10, init_batch=10
     )
-    output = np.zeros_like(movie)
+    output = np.zeros(movie.shape, dtype=np.float32)  # matches the real FITS memmap sink
     reg_output, shifts_output, tmpl_output, init_output = rigid_motion_correct_3d(
         movie, bin_width=7, n_iter=2, upsample_factor=10, init_batch=10, output=output
     )
 
     assert reg_output is output
-    np.testing.assert_allclose(reg_default, reg_output)
-    np.testing.assert_allclose(shifts_default, shifts_output)
-    np.testing.assert_allclose(tmpl_default, tmpl_output)
+    # float32-scale, not exact: registration works in float32 and the
+    # default vs output= paths round intermediates slightly differently
+    # -- see the 2D test of the same name in test_motion_correction.py.
+    np.testing.assert_allclose(reg_default, reg_output, rtol=1e-4, atol=1e-5)
+    np.testing.assert_allclose(shifts_default, shifts_output, rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(tmpl_default, tmpl_output, rtol=1e-4, atol=1e-5)
     np.testing.assert_array_equal(init_default, init_output)
 
 
