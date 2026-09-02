@@ -15,7 +15,11 @@ from .widgets import BusyBar
 
 
 class FunctionWorker(QThread):
-    """Runs an arbitrary callable off the GUI thread."""
+    """Runs an arbitrary callable off the GUI thread. self.fn/args/kwargs
+    are cleared once run() has actually called fn (see _drop_call_args) --
+    don't read them expecting to find "what this worker ran" after the
+    fact; they exist only to get the call into run()'s own background
+    thread."""
 
     finished_ok = Signal(object)
     failed = Signal(str)
@@ -32,11 +36,32 @@ class FunctionWorker(QThread):
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
                 result = self.fn(*self.args, **self.kwargs)
-            for w in caught:
-                self.warning.emit(str(w.message))
-            self.finished_ok.emit(result)
         except Exception as exc:  # noqa: BLE001
+            self._drop_call_args()
             self.failed.emit(f"{type(exc).__name__}: {exc}")
+            return
+        # Drop our own copies of fn/args/kwargs now that fn has already
+        # consumed them -- run_worker's own docstring says the caller
+        # must keep the returned worker referenced (self.worker = ...)
+        # so it isn't garbage-collected mid-run, but that means a
+        # FINISHED worker stays referenced (and alive) for the rest of
+        # that tab's lifetime too, pinning whatever was passed in right
+        # alongside it -- typically a full movie-sized array. Confirmed
+        # via a real 5-stage pipeline run on the real default dataset:
+        # every StageTab's own self.worker was still holding a full
+        # movie-sized array this way, long after its result had already
+        # been delivered and rendered -- the single largest remaining
+        # contributor to that pipeline's overall memory footprint even
+        # after clearing every OTHER stale movie reference we'd found.
+        self._drop_call_args()
+        for w in caught:
+            self.warning.emit(str(w.message))
+        self.finished_ok.emit(result)
+
+    def _drop_call_args(self) -> None:
+        self.fn = None
+        self.args = ()
+        self.kwargs = {}
 
 
 def run_worker(

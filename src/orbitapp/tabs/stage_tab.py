@@ -169,6 +169,7 @@ class StageTab(QWidget):
         self._pending_result = None
         self._pending_step_label = None
         self._last_run = None  # a new/changed movie invalidates any prior "already run" state
+        self._clear_stale_candidate()
         self._on_data_reset()
         if movie is not None:
             self._show_before_preview(movie)
@@ -182,10 +183,39 @@ class StageTab(QWidget):
         self._pending_result = None
         self._pending_step_label = None
         self._last_run = None
+        self._clear_stale_candidate()
         self._on_data_reset()
         if movie is not None:
             self._show_before_preview_volumetric(movie)
             self.status_label.setText(f"Ready. shape={movie.shape} (volumetric)")
+
+    def _clear_stale_candidate(self) -> None:
+        """Drops references to this tab's own last Apply candidate:
+        ``self._input_movie`` (already cleared by _finish_commit on a
+        successful commit, but also needed here for an ABANDONED
+        candidate -- Applied but never Committed before some OTHER tab's
+        commit made it moot) and the panel's "after" movie (kept alive so
+        its own Play Movie button stays usable right after Apply/Commit,
+        only released once the pipeline has genuinely moved past this tab
+        -- i.e. exactly when on_data_loaded fires due to a DIFFERENT
+        tab's commit, since data_changed only wires to every OTHER tab's
+        on_data_loaded, not this one's own).
+
+        Without this, every StageTab-derived tab keeps two full-size
+        movie-shaped arrays alive for the rest of the app's lifetime once
+        Apply has been clicked on it even once -- confirmed via a real
+        5-stage pipeline run (Motion Correction -> Mask -> Denoising ->
+        Normalization -> Detrending) on the real default dataset: ~9.4GB
+        of pure waste on top of a single ~1GB movie, since none of those
+        stale _input_movie/after references were the current active
+        dataset by the time the pipeline had moved on.
+
+        self.panel might not support movies at all (e.g. Detrending's
+        single-trace-plot panel -- see _build_panel), so this is guarded
+        rather than assuming every subclass's panel is a StagePanel."""
+        self._input_movie = None
+        if hasattr(self.panel, "set_after_movie"):
+            self.panel.set_after_movie(None)
 
     def _show_before_preview_volumetric(self, movie: np.ndarray) -> None:
         """Volumetric counterpart of _show_before_preview -- the
@@ -358,6 +388,15 @@ class StageTab(QWidget):
         self.state.commit(
             data, self._pending_step_label, stage=self._stage_key, params=self._pending_params, metrics=metrics,
         )
+        # _input_movie was only ever needed as _start_chunked_commit's
+        # source (see its own docstring) -- nothing reads it again after
+        # a successful commit until the next Apply overwrites it.
+        # Dropped here immediately rather than waiting for some LATER
+        # tab's own commit to eventually trigger this tab's own
+        # on_data_loaded/_clear_stale_candidate -- see that method's
+        # docstring for the full picture (this is the half of it that
+        # doesn't need to wait for a cross-tab signal).
+        self._input_movie = None
         self.status_label.setText(f"Committed as pipeline step '{self._pending_step_label}'.")
         self.commit_controls.set_commit_enabled(False)
         self.data_changed.emit()

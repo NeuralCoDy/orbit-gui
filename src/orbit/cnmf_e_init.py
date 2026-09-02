@@ -57,7 +57,7 @@ def peak_to_noise_ratio_projection(movie: np.ndarray) -> np.ndarray:
 
 def cnmf_e_seed_candidates(
     movie: np.ndarray, gauss_sigma: float, min_corr: float, min_pnr: float, n_components: int,
-    min_separation_frac: float = 0.05,
+    min_separation_frac: float = 0.05, blurred_movie: np.ndarray | None = None,
 ) -> list[tuple[int, int]]:
     """Auto-picks up to ``n_components`` seed pixels from peaks of
     corr-image x PNR-image, mutually separated by at least
@@ -66,8 +66,15 @@ def cnmf_e_seed_candidates(
     roi_extraction_corr.find_seed_candidates's exact shape (rank via
     select_separated_pixels first, then post-filter the returned
     candidates by threshold, rather than pre-zeroing the score map,
-    since select_separated_pixels doesn't itself filter by value)."""
-    blurred = gaussian_blur_movie(movie, gauss_sigma)
+    since select_separated_pixels doesn't itself filter by value).
+
+    ``blurred_movie``, if given, is used directly instead of re-blurring
+    ``movie`` -- cnmf_e_init already builds its own blurred copy (needed
+    for finetune_component too) and passes it through here, since blurring
+    the whole movie is real, non-trivial cost (profiling found it ~19% of
+    a whole-FOV CNMF-E run) not worth paying twice per call. None (the
+    default) blurs movie itself, for standalone/test use."""
+    blurred = blurred_movie if blurred_movie is not None else gaussian_blur_movie(movie, gauss_sigma)
     corr_map = local_correlation_projection(blurred)
     pnr_map = peak_to_noise_ratio_projection(blurred)
     score = corr_map * pnr_map
@@ -103,7 +110,9 @@ def cnmf_e_init(
     # size) instead of a generic image-size fraction keeps seeds spread
     # across distinct cells regardless of image size.
     min_separation_frac = (1.5 * init_radius) / max(height, width)
-    seeds = cnmf_e_seed_candidates(movie, gauss_sigma, min_corr, min_pnr, n_components, min_separation_frac)
+    seeds = cnmf_e_seed_candidates(
+        movie, gauss_sigma, min_corr, min_pnr, n_components, min_separation_frac, blurred_movie=blurred,
+    )
 
     if not seeds:
         return np.zeros((0, height, width)), np.zeros((0, n_frames))

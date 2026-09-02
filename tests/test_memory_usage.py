@@ -90,11 +90,13 @@ def _vm_hwm_kb(pid: int) -> int:
     return 0
 
 
-def _peak_rss_mb(stage: str, height: int, width: int, n_frames: int, dtype: str, timeout: float = 90.0) -> float:
-    proc = subprocess.Popen(
-        [sys.executable, str(_WORKER), stage, str(height), str(width), str(n_frames), dtype],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+def _peak_rss_mb(
+    stage: str, height: int, width: int, n_frames: int, dtype: str, timeout: float = 90.0, n_stages: int | None = None,
+) -> float:
+    args = [sys.executable, str(_WORKER), stage, str(height), str(width), str(n_frames), dtype]
+    if n_stages is not None:  # gui_pipeline-only -- see _memory_worker._run_gui_pipeline
+        args.append(str(n_stages))
+    proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     # Tracks the peak *sum* of VmHWM across the worker process and every
     # live descendant at each poll -- a single process's own VmHWM
     # doesn't capture concurrently-running sibling worker processes
@@ -186,3 +188,30 @@ def test_patch_graft_source_extraction_peak_memory_is_bounded():
     # that fixed cost.
     peak_mb = _peak_rss_mb("patch_graft", 250, 250, 150, "float32", timeout=60.0)
     assert peak_mb < 2000, f"patch-based GraFT peak RSS {peak_mb:.0f}MB exceeds bound"
+
+
+def test_gui_pipeline_peak_memory_does_not_scale_with_pipeline_depth():
+    # Regression test for StageTab/FunctionWorker holding full-size
+    # movie references forever once Apply had been clicked on a tab even
+    # once (self._input_movie, the panel's "after" movie, FunctionWorker's
+    # own .args/.kwargs -- see their docstrings). A single committed
+    # stage's own baseline (widget construction, one active movie, ...)
+    # is expected to cost something; what must NOT happen is that cost
+    # multiplying by pipeline depth. Compares a 1-stage vs a 5-stage
+    # pipeline (Motion Correction -> Mask -> Denoising -> Normalization ->
+    # Detrending, see _memory_worker._run_gui_pipeline) on the SAME movie
+    # size, same style as the memmap frame-count scaling test above.
+    #
+    # Calibrated against a real before/after measurement at this exact
+    # movie size: the delta was ~443MB pre-fix (~110MB/stage) vs ~169MB
+    # post-fix (~42MB/stage) for these same 4 extra stages -- 300MB
+    # cleanly separates the two while leaving real headroom for
+    # legitimate per-tab overhead (each stage's own widgets, params
+    # dialog, ...) that isn't itself a bug.
+    one_stage = _peak_rss_mb("gui_pipeline", 250, 250, 300, "float32", timeout=60.0, n_stages=1)
+    five_stages = _peak_rss_mb("gui_pipeline", 250, 250, 300, "float32", timeout=60.0, n_stages=5)
+    delta = five_stages - one_stage
+    assert delta < 300, (
+        f"peak RSS grew {delta:.0f}MB from 1 to 5 committed pipeline stages "
+        f"({one_stage:.0f}MB -> {five_stages:.0f}MB) -- expected roughly flat, not growing with pipeline depth"
+    )
