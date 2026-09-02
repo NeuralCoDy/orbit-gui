@@ -159,6 +159,23 @@ def test_patch_motion_correction_peak_memory_is_bounded():
     assert peak_mb < 750, f"patch motion correction peak RSS {peak_mb:.0f}MB exceeds bound"
 
 
+def test_patchwarp_motion_correct_peak_memory_is_bounded():
+    # patchwarp_motion_correct used to keep two extra full-movie-sized
+    # buffers alive through its whole thread-pool stage on top of
+    # rigid_motion_correct's own output (a float32 copy of the entire
+    # movie, converted up front rather than one frame at a time, and a
+    # separate output array rather than writing back in place). A
+    # smaller test movie doesn't show this clearly (the fixed baseline
+    # cost of imports/thread-pool setup dominates at small sizes,
+    # confirmed by trying 200x200x80 first: pre- and post-fix peaks were
+    # only ~26MB apart there, too close to bound reliably) -- this size
+    # was chosen because the gap is large enough to actually catch a
+    # regression: measured ~1005MB pre-fix vs ~864MB post-fix (~14%
+    # less) on this exact movie.
+    peak_mb = _peak_rss_mb("patchwarp", 300, 300, 300, "uint16", timeout=90.0)
+    assert peak_mb < 950, f"patchwarp_motion_correct peak RSS {peak_mb:.0f}MB exceeds bound"
+
+
 def test_cnmf_source_extraction_peak_memory_is_bounded():
     peak_mb = _peak_rss_mb("cnmf", 180, 180, 200, "float32")
     assert peak_mb < 700, f"CNMF peak RSS {peak_mb:.0f}MB exceeds bound"

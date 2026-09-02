@@ -69,6 +69,10 @@ def _run(stage: str, height: int, width: int, n_frames: int, dtype: str, n_stage
         )
     elif stage == "gui_pipeline":
         _run_gui_pipeline(movie, n_stages)
+    elif stage == "patchwarp":
+        from orbit.patchwarp import patchwarp_motion_correct
+
+        patchwarp_motion_correct(movie.astype(np.float64), grid_size=2, ecc_iterations=20, max_workers=4)
     else:
         raise ValueError(f"unknown stage: {stage!r}")
 
