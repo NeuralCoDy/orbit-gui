@@ -26,16 +26,16 @@ warm-starting exists to help with.
 
 from __future__ import annotations
 
-import os
 from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 import numpy as np
 
+from ._concurrency import available_cpu_count
 from .motion_correction import rigid_motion_correct
 
-_DEFAULT_MAX_WORKERS = 32  # min()'d against os.cpu_count() below, so this only matters on a many-core
-# machine. Each patch's ECC fit/warp (cv2.findTransformECC/cv2.warpAffine) releases the GIL for its own
+_DEFAULT_MAX_WORKERS = 32  # min()'d against available_cpu_count() below, so this only matters on a
+# many-core machine. Each patch's ECC fit/warp (cv2.findTransformECC/cv2.warpAffine) releases the GIL for its own
 # C++ execution and shares no mutable state across frames, so -- unlike CNMF's own process-pool
 # _DEFAULT_MAX_WORKERS (kept small specifically to avoid oversubscribing each worker's OWN BLAS thread
 # pool) -- there's no equivalent oversubscription risk here to cap this against. Measured directly on an
@@ -157,7 +157,7 @@ def patchwarp_motion_correct(
     Frames are registered against the same (rigid-corrected) template
     independently, so they run concurrently in a thread pool (OpenCV's
     C++ routines release the GIL); ``max_workers`` defaults to
-    ``min(32, os.cpu_count())`` -- see _DEFAULT_MAX_WORKERS' own comment.
+    ``min(32, available_cpu_count())`` -- see _DEFAULT_MAX_WORKERS' own comment.
     """
     rigid_registered, _shifts, rigid_template, initial_template = rigid_motion_correct(
         movie, template=template, max_shift=rigid_max_shift, n_iter=rigid_n_iter, init_batch=movie.shape[-1]
@@ -174,7 +174,7 @@ def patchwarp_motion_correct(
     # for the entire thread-pool stage on top of rigid_registered itself.
     # Each worker converts only its own frame instead.
     template_f32 = rigid_template.astype(np.float32)
-    workers = max_workers if max_workers is not None else min(_DEFAULT_MAX_WORKERS, os.cpu_count() or 1)
+    workers = max_workers if max_workers is not None else min(_DEFAULT_MAX_WORKERS, available_cpu_count())
 
     affine_matrices = np.zeros((T, ny, nx, 2, 3), dtype=np.float32)
 

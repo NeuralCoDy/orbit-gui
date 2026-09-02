@@ -7,7 +7,6 @@ notes -- unchanged here, just relocated.
 
 from __future__ import annotations
 
-import os
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
@@ -16,6 +15,8 @@ import numpy as np
 from scipy.fft import next_fast_len
 from scipy.ndimage import fourier_shift, map_coordinates
 from skimage.registration import phase_cross_correlation
+
+from ._concurrency import available_cpu_count
 
 _DEFAULT_MAX_WORKERS = 4
 
@@ -46,7 +47,7 @@ def _pad_to_fast_len(image: np.ndarray, mode: str = "constant") -> np.ndarray:
 def _resolve_max_workers(max_workers: int | None, bin_width: int) -> int:
     if max_workers is not None:
         return max_workers
-    return min(_DEFAULT_MAX_WORKERS, os.cpu_count() or 1, bin_width)
+    return min(_DEFAULT_MAX_WORKERS, available_cpu_count(), bin_width)
 
 
 def _as_float_working_copy(movie: np.ndarray) -> np.ndarray:

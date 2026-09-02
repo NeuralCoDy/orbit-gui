@@ -37,13 +37,13 @@ recomputed-trace collapse instead.
 
 from __future__ import annotations
 
-import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import graft
 import numpy as np
 
+from ._concurrency import available_cpu_count
 from ._masks import threshold_footprint
 from ._merge import find_merge_groups
 from ._patches import make_patches_3d
@@ -176,7 +176,7 @@ def patch_graft_source_extraction_3d(
     _require_mask(mask)
     L, W, D = movie.shape[1:]
     regions = make_patches_3d(L, W, D, patch_size, overlap)
-    workers = max_workers if max_workers is not None else min(_MAX_PATCH_WORKERS, os.cpu_count() or 1, len(regions))
+    workers = max_workers if max_workers is not None else min(_MAX_PATCH_WORKERS, available_cpu_count(), len(regions))
 
     all_masks: list[np.ndarray] = []
     all_traces: list[np.ndarray] = []

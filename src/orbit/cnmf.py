@@ -22,6 +22,7 @@ from typing import Callable
 import numpy as np
 from graft import solvers as graft_solvers
 
+from ._concurrency import available_cpu_count
 from ._masks import masked_mean_trace, threshold_footprint
 from ._merge import find_merge_groups
 from ._patches import make_patches_2d
@@ -30,8 +31,8 @@ from .cnmf_init import estimate_background, greedy_roi_init
 
 # Patches run in separate processes (not threads): a patch's own OASIS
 # step is pure-Python/GIL-bound, so threads wouldn't overlap it. Capped
-# at a small constant, not os.cpu_count(), to avoid oversubscribing
-# against each patch's own BLAS-threaded solves -- see
+# at a small constant, not the machine's own core count, to avoid
+# oversubscribing against each patch's own BLAS-threaded solves -- see
 # _single_threaded_blas_for_children below for the measured impact.
 _DEFAULT_MAX_WORKERS = 4
 
@@ -366,12 +367,12 @@ def _run_patches_and_merge(
     once per patch, in patch order, as each patch's result becomes
     available (patches themselves may finish out of order across worker
     processes). max_workers caps how many patches run concurrently --
-    None falls back to min(_DEFAULT_MAX_WORKERS, os.cpu_count(),
+    None falls back to min(_DEFAULT_MAX_WORKERS, available_cpu_count(),
     len(patches)); see _DEFAULT_MAX_WORKERS' comment for why that stays
-    a small constant rather than just os.cpu_count()."""
+    a small constant rather than just the machine's own core count."""
     height, width, _n_frames = movie.shape
     patches = make_patches_2d(height, width, patch_size, overlap)
-    workers = max_workers if max_workers is not None else min(_DEFAULT_MAX_WORKERS, os.cpu_count() or 1, len(patches))
+    workers = max_workers if max_workers is not None else min(_DEFAULT_MAX_WORKERS, available_cpu_count(), len(patches))
 
     all_footprints, all_traces, all_spikes, all_g = [], [], [], []
     with _single_threaded_blas_for_children(), ProcessPoolExecutor(max_workers=workers, mp_context=_MP_CONTEXT) as pool:
