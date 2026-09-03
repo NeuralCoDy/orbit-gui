@@ -70,6 +70,7 @@ def test_volume_3d_entry_renders_and_click_drag_rotates():
     state.volumetric = True
     state.original_data = (np.random.default_rng(2).random((4, 20, 24, 10)) * 255).astype(np.uint8)
     tab = ProjectionsTab(state)
+    tab.show()  # prep is deferred until the VolumeView is visible
     tab.on_data_loaded()
     _drain(tab)
 

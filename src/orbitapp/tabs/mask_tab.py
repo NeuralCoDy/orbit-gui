@@ -221,12 +221,13 @@ class MaskTab(StageTab):
 
     def _render_result(self, result: dict) -> None:
         if self.state.volumetric:
-            before = depth_project(preview_slice_volumetric(self._input_movie))
+            self.panel.set_before_volume(preview_slice_volumetric(self._input_movie))
+            self.panel.set_after_volume(result[self._result_key_3d])
         else:
             before = preview_slice(self._input_movie)
-        self.panel.before_view.setImage(before.mean(axis=2))
-        self.panel.after_view.setImage(result["masked"].mean(axis=2))
-        self.panel.set_after_movie(result["masked"])
+            self.panel.before_view.setImage(before.mean(axis=2))
+            self.panel.after_view.setImage(result["masked"].mean(axis=2))
+            self.panel.set_after_movie(result["masked"])
 
         mask = result["mask"]
         pct = 100 * result["fraction_kept"]

@@ -425,12 +425,13 @@ class DenoisingTab(StageTab):
 
     def _render_result(self, result: dict) -> None:
         if self.state.volumetric:
-            before = depth_project(preview_slice_volumetric(self._input_movie))
+            self.panel.set_before_volume(preview_slice_volumetric(self._input_movie))
+            self.panel.set_after_volume(result[self._result_key_3d])
         else:
             before = preview_slice(self._input_movie)
-        self.panel.before_view.setImage(before.mean(axis=2))
-        self.panel.after_view.setImage(result["denoised"].mean(axis=2))
-        self.panel.set_after_movie(result["denoised"])
+            self.panel.before_view.setImage(before.mean(axis=2))
+            self.panel.after_view.setImage(result["denoised"].mean(axis=2))
+            self.panel.set_after_movie(result["denoised"])
         self.panel.set_movie("residual", result["residual"])
 
         ljung_box_pct = 100 * result["ljung_box_failed"] / result["ljung_box_total"] if result["ljung_box_total"] else 0.0
@@ -443,11 +444,12 @@ class DenoisingTab(StageTab):
         )
 
         qc_traces = result["qc_traces"]
-        marker_xs, marker_ys = pixels_to_data_pos(
-            self.panel.before_view.getImageItem(),
-            [s["row"] + 0.5 for s in qc_traces], [s["col"] + 0.5 for s in qc_traces],
-        )
-        self._location_markers.setData(marker_xs, marker_ys)
+        if not self.state.volumetric:  # markers sit on the 2D before_view, hidden in 3D mode
+            marker_xs, marker_ys = pixels_to_data_pos(
+                self.panel.before_view.getImageItem(),
+                [s["row"] + 0.5 for s in qc_traces], [s["col"] + 0.5 for s in qc_traces],
+            )
+            self._location_markers.setData(marker_xs, marker_ys)
         peak_samples, low_samples = split_by_kind(qc_traces)
         self.trace_grid.fill(peak_samples, low_samples, _plot_trace)
 

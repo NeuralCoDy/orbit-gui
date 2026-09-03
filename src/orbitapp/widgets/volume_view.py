@@ -45,10 +45,12 @@ def _colormapped(scalar: np.ndarray, cmap_name: str) -> QImage:
 
 
 class VolumeView(QWidget):
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, placeholder: str = "Load volumetric data to see the 3D view.") -> None:
         super().__init__(parent)
+        self._placeholder = placeholder
         self._full: np.ndarray | None = None
         self._preview: np.ndarray | None = None
+        self._pending_movie: np.ndarray | None = None  # set but not yet prepped (widget not visible)
         self._az, self._el = _DEFAULT_AZ, _DEFAULT_EL
         self._drag_origin: tuple[int, int, float, float] | None = None
         self._last_scalar: np.ndarray | None = None
@@ -76,7 +78,7 @@ class VolumeView(QWidget):
         controls.addWidget(reset)
         controls.addStretch()
 
-        self.hint = QLabel("Load volumetric data to see the 3D view.")
+        self.hint = QLabel(self._placeholder)
 
         layout = QVBoxLayout(self)
         layout.addLayout(controls)
@@ -93,26 +95,43 @@ class VolumeView(QWidget):
 
     def set_volume(self, movie: np.ndarray) -> None:
         """``movie``: a volumetric (T, L, W, D) array (mean-projected
-        over time here) or an already-3D (L, W, D) volume. Downsampled
-        once, then rendered.
+        over time here) or an already-3D (L, W, D) volume.
 
-        Downsampling happens in the native (L, W, D) layout -- which is
-        C-contiguous -- *before* the moveaxis to (D, L, W); doing it
-        after would force a strided read of the whole full-res volume
-        (measured ~17s on a 150x3200x530 movie vs a fraction of a
-        second this way)."""
+        The mean + downsample (a few seconds on a real movie) is
+        deferred until the widget is actually visible -- several stage
+        tabs each hold a VolumeView and all get set_volume on data load,
+        but only the one the user is looking at needs to prep. See
+        showEvent / _consume_pending."""
+        self._pending_movie = movie
+        if self.isVisible():
+            self._consume_pending()
+
+    def _consume_pending(self) -> None:
+        movie, self._pending_movie = self._pending_movie, None
+        if movie is None:
+            return
+        self.hint.setText("Preparing 3D view...")
+        # Downsample in the native (L, W, D) layout -- C-contiguous --
+        # *before* the moveaxis to (D, L, W); doing it after forces a
+        # strided read of the whole full-res volume (~17s on a
+        # 150x3200x530 movie vs a fraction of a second this way).
         lwd = movie.mean(axis=0, dtype=np.float32) if movie.ndim == 4 else np.asarray(movie, dtype=np.float32)
-        lwd = downsample_volume(lwd, _FULL_MAX_AXIS)  # (L', W', D'), contiguous reshape+mean
+        lwd = downsample_volume(lwd, _FULL_MAX_AXIS)
         self._full = normalize_volume(np.moveaxis(lwd, -1, 0))  # (D', L', W'): depth is the view axis
         self._preview = downsample_volume(self._full, _PREVIEW_MAX_AXIS)
         self._az, self._el = _DEFAULT_AZ, _DEFAULT_EL
         self.hint.setText("Click-drag to rotate  ·  horizontal = azimuth, vertical = elevation")
         self._render_full()
 
+    def showEvent(self, event):  # noqa: N802
+        super().showEvent(event)
+        if self._pending_movie is not None:
+            self._consume_pending()
+
     def clear(self) -> None:
-        self._full = self._preview = self._last_scalar = None
+        self._full = self._preview = self._last_scalar = self._pending_movie = None
         self.image.clear()
-        self.hint.setText("Load volumetric data to see the 3D view.")
+        self.hint.setText(self._placeholder)
 
     # -- rotation via drag --------------------------------------------
 

@@ -288,12 +288,13 @@ class MotionCorrectionTab(StageTab):
         # whole thing, and a full mean over that would force a full read just
         # to draw the "before" thumbnail.
         if self.state.volumetric:
-            before = depth_project(preview_slice_volumetric(self._input_movie))
+            self.panel.set_before_volume(preview_slice_volumetric(self._input_movie))
+            self.panel.set_after_volume(result[self._result_key_3d])
         else:
             before = preview_slice(self._input_movie)
-        self.panel.before_view.setImage(before.mean(axis=2))
-        self.panel.after_view.setImage(result["registered"].mean(axis=2))
-        self.panel.set_after_movie(result["registered"])
+            self.panel.before_view.setImage(before.mean(axis=2))
+            self.panel.after_view.setImage(result["registered"].mean(axis=2))
+            self.panel.set_after_movie(result["registered"])
 
         self.metrics_label.setText(
             f"mMD: {result['mmd']:.2f}\n"

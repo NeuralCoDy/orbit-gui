@@ -68,8 +68,6 @@ import numpy as np
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QMessageBox, QVBoxLayout, QWidget
 
-from orbit._volumetric import depth_project
-
 from ..io import is_memmap, preview_slice
 from ..state import AppState
 from ..volumetric_io import preview_slice_volumetric
@@ -171,6 +169,8 @@ class StageTab(QWidget):
         self._last_run = None  # a new/changed movie invalidates any prior "already run" state
         self._clear_stale_candidate()
         self._on_data_reset()
+        if hasattr(self.panel, "set_volumetric"):
+            self.panel.set_volumetric(False)
         if movie is not None:
             self._show_before_preview(movie)
             self.status_label.setText(f"Ready. shape={movie.shape}")
@@ -185,6 +185,8 @@ class StageTab(QWidget):
         self._last_run = None
         self._clear_stale_candidate()
         self._on_data_reset()
+        if hasattr(self.panel, "set_volumetric"):
+            self.panel.set_volumetric(True)
         if movie is not None:
             self._show_before_preview_volumetric(movie)
             self.status_label.setText(f"Ready. shape={movie.shape} (volumetric)")
@@ -216,20 +218,18 @@ class StageTab(QWidget):
         self._input_movie = None
         if hasattr(self.panel, "set_after_movie"):
             self.panel.set_after_movie(None)
+        if hasattr(self.panel, "set_after_volume"):
+            self.panel.set_after_volume(None)
 
     def _show_before_preview_volumetric(self, movie: np.ndarray) -> None:
-        """Volumetric counterpart of _show_before_preview -- the
-        before-preview defaults to a depth projection of the (T, L, W, D)
-        volume (see orbit._volumetric.depth_project), since self.panel's
-        images are inherently 2D. Default assumes self.panel is a
-        StagePanel, same caveat as _show_before_preview; override
-        alongside _build_panel/_show_before_preview for a stage whose
-        main figure isn't a pair of images (see DetrendingTab, whose
-        volumetric preview is a 1D per-volume trace, not an image at
-        all -- no depth projection needed there)."""
-        projected = depth_project(preview_slice_volumetric(movie))
-        self.panel.before_view.setImage(projected.mean(axis=2))
-        self.panel.set_before_movie(projected)
+        """Volumetric counterpart of _show_before_preview -- shows the
+        (T, L, W, D) volume's time-mean in the StagePanel's 3D VolumeView
+        (see StagePanel.set_volumetric). Default assumes self.panel is a
+        StagePanel; override alongside _build_panel/_show_before_preview
+        for a stage whose main figure isn't a pair of images (see
+        DetrendingTab, whose volumetric preview is a 1D per-volume trace,
+        not an image at all)."""
+        self.panel.set_before_volume(preview_slice_volumetric(movie))
 
     def _current_fingerprint(self) -> dict:
         """Named snapshot of every widget value that affects the
