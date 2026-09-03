@@ -27,11 +27,16 @@ from .normalization import describe_normalization, normalize_movie, pixel_value_
 from .patchwarp import patchwarp_motion_correct
 from .projections import (
     fano_factor_projection,
+    fano_factor_projection_volumetric,
     local_correlation_projection,
     mean_projection,
+    mean_projection_volumetric,
     median_projection,
+    median_projection_volumetric,
     mode_projection,
+    mode_projection_volumetric,
     variance_projection,
+    variance_projection_volumetric,
 )
 from .qc_traces import qc_trace_samples
 from .roi_extraction_corr import CorrMaskResult, find_seed_candidates, roi_from_seed
@@ -44,6 +49,11 @@ __all__ = [
     "fano_factor_projection",
     "local_correlation_projection",
     "mode_projection",
+    "mean_projection_volumetric",
+    "median_projection_volumetric",
+    "variance_projection_volumetric",
+    "fano_factor_projection_volumetric",
+    "mode_projection_volumetric",
     "rigid_motion_correct",
     "patch_motion_correct",
     "patchwarp_motion_correct",

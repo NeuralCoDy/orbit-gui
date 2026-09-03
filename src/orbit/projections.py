@@ -90,6 +90,48 @@ def mode_projection(movie: np.ndarray) -> np.ndarray:
     return np.apply_along_axis(_half_sample_mode_1d, 2, movie)
 
 
+def mean_projection_volumetric(movie: np.ndarray) -> np.ndarray:
+    """Per-voxel mean across time -- (T, L, W, D) -> (L, W, D). The
+    volumetric analog of mean_projection: the reduction is over the time
+    axis (axis 0), not a spatial one. Every 2D projection here has
+    ``axis=2`` baked in for the (H, W, T) convention, which on a
+    (T, L, W, D) volume would silently average over width instead."""
+    return movie.mean(axis=0)
+
+
+def median_projection_volumetric(movie: np.ndarray) -> np.ndarray:
+    """Per-voxel median across time -- (T, L, W, D) -> (L, W, D). See
+    mean_projection_volumetric."""
+    return np.median(movie, axis=0)
+
+
+def variance_projection_volumetric(movie: np.ndarray) -> np.ndarray:
+    """Per-voxel variance across time -- (T, L, W, D) -> (L, W, D). See
+    mean_projection_volumetric."""
+    return movie.var(axis=0)
+
+
+def fano_factor_projection_volumetric(movie: np.ndarray) -> np.ndarray:
+    """Per-voxel Fano factor across time -- (T, L, W, D) -> (L, W, D).
+    See mean_projection_volumetric."""
+    mean = movie.mean(axis=0)
+    var = movie.var(axis=0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(mean > 0, var / mean, 0.0)
+
+
+def mode_projection_volumetric(movie: np.ndarray) -> np.ndarray:
+    """Per-voxel half-sample mode across time -- (T, L, W, D) -> (L, W, D).
+
+    mode_projection reduces its array's last axis, so the volume is laid
+    out as (L, W*D, T) for the call (time last, the two remaining
+    spatial axes merged -- the per-trace mode is independent per voxel,
+    so merging W and D is harmless) and the result reshaped back."""
+    T, L, W, D = movie.shape
+    as_traces = np.moveaxis(movie, 0, -1).reshape(L, W * D, T)
+    return mode_projection(as_traces).reshape(L, W, D)
+
+
 def local_correlation_projection(movie: np.ndarray) -> np.ndarray:
     """Correlation of each pixel's trace with the mean trace of its up to
     8 neighbors -- surfaces cell footprints (co-varying pixels) against

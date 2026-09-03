@@ -4,11 +4,16 @@ import pytest
 import orbit._native as _native
 from orbit.projections import (
     fano_factor_projection,
+    fano_factor_projection_volumetric,
     local_correlation_projection,
     mean_projection,
+    mean_projection_volumetric,
     median_projection,
+    median_projection_volumetric,
     mode_projection,
+    mode_projection_volumetric,
     variance_projection,
+    variance_projection_volumetric,
 )
 
 
@@ -134,6 +139,45 @@ def test_local_correlation_native_matches_numpy_fallback(monkeypatch):
     numpy_result = local_correlation_projection(movie)
 
     assert np.allclose(native_result, numpy_result, atol=1e-4)
+
+
+def test_volumetric_projections_reduce_over_time_not_space():
+    # (T, L, W, D): a voxel whose value ramps over time, everything else
+    # constant. Reducing over time must give an (L, W, D) volume where
+    # only that voxel differs -- reducing over a space axis (the bug this
+    # guards against) would smear it across a whole row/column.
+    T, L, W, D = 8, 3, 4, 2
+    vol = np.zeros((T, L, W, D))
+    vol[:, 1, 2, 0] = np.arange(T)
+
+    for fn in (
+        mean_projection_volumetric,
+        median_projection_volumetric,
+        variance_projection_volumetric,
+        fano_factor_projection_volumetric,
+        mode_projection_volumetric,
+    ):
+        proj = fn(vol)
+        assert proj.shape == (L, W, D)
+        nonzero = np.argwhere(proj != 0)
+        assert nonzero.tolist() == [[1, 2, 0]], f"{fn.__name__} smeared beyond the one active voxel"
+
+    np.testing.assert_allclose(mean_projection_volumetric(vol), vol.mean(axis=0))
+    np.testing.assert_allclose(variance_projection_volumetric(vol), vol.var(axis=0))
+
+
+def test_mode_projection_volumetric_matches_per_voxel_2d_mode():
+    rng = np.random.default_rng(7)
+    vol = rng.standard_normal((20, 3, 5, 4)).astype(np.float32)
+
+    got = mode_projection_volumetric(vol)
+
+    expected = np.empty((3, 5, 4), dtype=np.float32)
+    for i in range(3):
+        for j in range(5):
+            for k in range(4):
+                expected[i, j, k] = mode_projection(vol[:, i, j, k].reshape(1, 1, -1))[0, 0]
+    np.testing.assert_allclose(got, expected, atol=1e-5)
 
 
 @pytest.mark.skipif(not _native.NATIVE_AVAILABLE, reason="native extension not built -- run orbit/_native/build_native.sh")

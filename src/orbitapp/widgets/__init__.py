@@ -14,6 +14,7 @@ from .roi_review_panel import ROIReviewPanel
 from .spinbox import make_spinbox
 from .stage_panel import StagePanel
 from .step_params_dialog import StepParamsDialog
+from .volume_view import VolumeView
 from .volumetric_load_dialog import VolumetricLoadDialog
 
 __all__ = [
@@ -35,6 +36,7 @@ __all__ = [
     "show_movie_popout",
     "confirm_recompute",
     "VolumetricLoadDialog",
+    "VolumeView",
     "OptionsDialog",
     "StepParamsDialog",
     "add_resource_monitor",
