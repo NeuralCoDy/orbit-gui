@@ -1,5 +1,6 @@
 import numpy as np
 
+from orbit import denoising as _denoising
 from orbit.denoising import (
     denoise_gaussian,
     denoise_median,
@@ -155,6 +156,25 @@ def test_residual_energy_fraction_partial_removal():
     movie = np.ones((2, 2, 5))
     half = movie * 0.5
     assert np.isclose(residual_energy_fraction(movie, half), 0.25)
+
+
+def test_residual_energy_fraction_is_block_size_independent(monkeypatch):
+    # Both sums are accumulated a slab at a time along axis 0 (see
+    # orbit._blocks); the ratio must not depend on the slab size.
+    rng = np.random.default_rng(9)
+    before = (rng.standard_normal((30, 8, 12)) * 40 + 100).astype(np.float32)
+    after = before + 0.2 * rng.standard_normal(before.shape)
+
+    whole = residual_energy_fraction(before, after)
+
+    def _rows_of_5(shape, axis, **_):
+        for start in range(0, shape[axis], 5):
+            yield slice(start, min(start + 5, shape[axis]))
+
+    monkeypatch.setattr(_denoising, "iter_axis_slices", _rows_of_5)
+    chunked = residual_energy_fraction(before, after)
+
+    assert np.isclose(whole, chunked, rtol=1e-6, atol=1e-10)
 
 
 def test_residual_autocorrelation_failures_zero_for_a_perfect_denoise():

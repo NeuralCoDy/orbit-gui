@@ -91,11 +91,13 @@ def _vm_hwm_kb(pid: int) -> int:
 
 
 def _peak_rss_mb(
-    stage: str, height: int, width: int, n_frames: int, dtype: str, timeout: float = 90.0, n_stages: int | None = None,
+    stage: str, height: int, width: int, n_frames: int, dtype: str, timeout: float = 90.0,
+    n_stages: int | None = None, depth: int | None = None,
 ) -> float:
     args = [sys.executable, str(_WORKER), stage, str(height), str(width), str(n_frames), dtype]
-    if n_stages is not None:  # gui_pipeline-only -- see _memory_worker._run_gui_pipeline
-        args.append(str(n_stages))
+    trailing = n_stages if n_stages is not None else depth  # gui_pipeline: stage count; motion_rigid_3d: depth D
+    if trailing is not None:
+        args.append(str(trailing))
     proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     # Tracks the peak *sum* of VmHWM across the worker process and every
     # live descendant at each poll -- a single process's own VmHWM
@@ -129,6 +131,19 @@ def test_rigid_motion_correction_peak_memory_is_bounded():
     # baseline, not blow up with extra full-movie temporaries.
     peak_mb = _peak_rss_mb("motion_rigid", 300, 300, 400, "uint16")
     assert peak_mb < 1000, f"rigid motion correction peak RSS {peak_mb:.0f}MB exceeds bound"
+
+
+def test_rigid_3d_motion_correction_peak_memory_is_bounded():
+    # Volumetric (T, L, W, D) rigid registration -- the path that
+    # OOM-crashed a real session by mapping the whole volume to float64.
+    # A raw uint16 volume forces one float32 working copy (~2x its raw
+    # size); the bound guards against a regression back to float64 (~4x)
+    # or an extra full-volume temporary. ~52MB raw here (128*128*160*10
+    # uint16); measured ~545MB peak (working copy + per-worker complex64
+    # FFT transients + the scipy/skimage import baseline), bounded loosely
+    # like the others.
+    peak_mb = _peak_rss_mb("motion_rigid_3d", 128, 128, 160, "uint16", depth=10)
+    assert peak_mb < 1100, f"3D rigid motion correction peak RSS {peak_mb:.0f}MB exceeds bound"
 
 
 def test_rigid_motion_correction_memmap_commit_scales_sublinearly_with_frame_count():

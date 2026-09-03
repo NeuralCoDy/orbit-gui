@@ -15,6 +15,8 @@ from __future__ import annotations
 import numpy as np
 from scipy.sparse.linalg import svds
 
+from ._blocks import iter_axis_slices
+
 
 def _downsampled_max_projection(movie: np.ndarray, bin_size: int = 50) -> np.ndarray:
     """Max-intensity projection after averaging consecutive frames in
@@ -62,13 +64,31 @@ def mean_correlation_to_reference(movie: np.ndarray, reference: np.ndarray | Non
     ``reference`` defaults to the movie's own mean projection ("self-mCM");
     pass e.g. a registration ``template`` for "cross-mCM". Higher means
     frames more consistently resemble the reference (better registration).
-    """
-    if reference is None:
-        reference = movie.mean(axis=2)
 
-    flat = movie.reshape(-1, movie.shape[-1]).astype(np.float64)
-    ref = reference.ravel().astype(np.float64)
-    return float(_pearson_correlations(ref, flat).mean())
+    The per-frame correlations are computed a frame-block at a time (see
+    orbit._blocks) and folded straight into a running sum -- the same
+    arithmetic as ``_pearson_correlations(ref, whole_movie)`` (the
+    reference is mean-centered, so ``ref_c . (col - col.mean()) ==
+    ref_c . col``), but a large (volumetric) movie never has a
+    whole-array float64 copy held at once."""
+    n_frames = movie.shape[-1]
+    if reference is None:
+        reference = movie.mean(axis=-1)
+
+    ref_c = reference.ravel().astype(np.float64)
+    ref_c -= ref_c.mean()
+    ref_ss = float(ref_c @ ref_c)
+    n_pix = ref_c.size
+
+    total = 0.0
+    for s in iter_axis_slices(movie.shape, axis=movie.ndim - 1):
+        block = movie[..., s].astype(np.float64).reshape(n_pix, -1)  # (n_pix, frames-in-block), one copy
+        block_c = block - block.mean(axis=0, keepdims=True)
+        numer = ref_c @ block
+        denom = np.sqrt(ref_ss * np.einsum("ij,ij->j", block_c, block_c))
+        corr = np.divide(numer, denom, out=np.zeros(block.shape[1]), where=denom > 0)
+        total += float(corr.sum())
+    return total / n_frames
 
 
 def spatiotemporal_svd(movie: np.ndarray, n_components: int = 30) -> tuple[np.ndarray, np.ndarray]:

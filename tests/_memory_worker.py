@@ -24,7 +24,25 @@ def _make_movie(height: int, width: int, n_frames: int, dtype: str) -> np.ndarra
     return (rng.standard_normal((height, width, n_frames)).astype(dtype) * 100 + 500)
 
 
+def _make_volume(n_frames: int, length: int, width: int, depth: int, dtype: str) -> np.ndarray:
+    rng = np.random.default_rng(0)
+    if np.issubdtype(np.dtype(dtype), np.integer):
+        return rng.integers(0, 4000, size=(n_frames, length, width, depth), dtype=dtype)
+    return (rng.standard_normal((n_frames, length, width, depth)).astype(dtype) * 100 + 500)
+
+
 def _run(stage: str, height: int, width: int, n_frames: int, dtype: str, n_stages: int = 5) -> None:
+    if stage == "motion_rigid_3d":
+        # Whole-volume 3D rigid registration on a (T, L, W, D) movie --
+        # like "motion_rigid" but for volumetric data, which OOM-crashed
+        # a real session when the whole volume was mapped to float64.
+        # The trailing arg (n_stages' slot) is the depth D here.
+        from orbit.motion_correction_3d import rigid_motion_correct_3d
+
+        volume = _make_volume(n_frames, height, width, n_stages, dtype)
+        rigid_motion_correct_3d(volume, bin_width=200, n_iter=1)
+        return
+
     movie = _make_movie(height, width, n_frames, dtype)
 
     if stage == "motion_rigid":
@@ -148,9 +166,9 @@ def _run_gui_pipeline(movie: np.ndarray, n_stages: int) -> None:
 
 if __name__ == "__main__":
     _stage, _h, _w, _t, _dtype = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
-    # optional trailing arg, "gui_pipeline"-only: how many StageTab
-    # commits to drive (see _run_gui_pipeline) -- every other stage
-    # ignores it.
+    # optional trailing arg: number of StageTab commits to drive for
+    # "gui_pipeline" (see _run_gui_pipeline), or the depth D for
+    # "motion_rigid_3d" -- every other stage ignores it.
     _n_stages = int(sys.argv[6]) if len(sys.argv) > 6 else 5
     _run(_stage, _h, _w, _t, _dtype, _n_stages)
     # ru_maxrss is KB on Linux, bytes on macOS -- this repo's CI/dev target is Linux.
