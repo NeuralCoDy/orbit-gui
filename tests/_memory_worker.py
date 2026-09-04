@@ -46,6 +46,35 @@ def _run(stage: str, height: int, width: int, n_frames: int, dtype: str, n_stage
         rigid_motion_correct_3d(volume, bin_width=200, n_iter=1, init_batch=min(n_frames, 30))
         return
 
+    _PROJECTIONS_3D = {
+        "proj_mean_3d": "mean_projection_volumetric",
+        "proj_median_3d": "median_projection_volumetric",
+        "proj_variance_3d": "variance_projection_volumetric",
+        "proj_fano_3d": "fano_factor_projection_volumetric",
+        "proj_mode_3d": "mode_projection_volumetric",
+    }
+    if stage in _PROJECTIONS_3D:
+        import orbit.projections as projections
+
+        volume = _make_volume(n_frames, height, width, n_stages, dtype)
+        getattr(projections, _PROJECTIONS_3D[stage])(volume)
+        return
+
+    _PROJECTIONS_2D = {
+        "proj_mean": "mean_projection",
+        "proj_median": "median_projection",
+        "proj_variance": "variance_projection",
+        "proj_fano": "fano_factor_projection",
+        "proj_local_corr": "local_correlation_projection",
+        "proj_mode": "mode_projection",
+    }
+    if stage in _PROJECTIONS_2D:
+        import orbit.projections as projections
+
+        movie = _make_movie(height, width, n_frames, dtype)
+        getattr(projections, _PROJECTIONS_2D[stage])(movie)
+        return
+
     movie = _make_movie(height, width, n_frames, dtype)
 
     if stage == "motion_rigid":

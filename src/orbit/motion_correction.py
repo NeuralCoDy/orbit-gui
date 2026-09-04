@@ -15,7 +15,7 @@ import numpy as np
 from scipy.fft import fftn, ifftn, next_fast_len
 from scipy.ndimage import fourier_shift, map_coordinates
 
-from ._blocks import iter_axis_slices
+from ._blocks import chunked_median, iter_axis_slices
 from ._concurrency import available_cpu_count
 
 _DEFAULT_MAX_WORKERS = 4
@@ -70,22 +70,19 @@ def _resolve_max_workers(max_workers: int | None, bin_width: int, default: int =
 
 def _median_over_axis(arr: np.ndarray, axis: int) -> np.ndarray:
     """``np.median(arr.astype(float32), axis=axis)``, computed one
-    spatial slab at a time.
+    spatial slab at a time -- a thin wrapper around
+    orbit._blocks.chunked_median (the one shared chunked-median
+    implementation; see that module's docstring) that keeps this
+    call site's two long-standing choices: always float32 output
+    (motion correction never needs more precision, even from an
+    integer/float64 input) and no hard pixel cap on top of the byte
+    budget (unlike orbit.projections' median_projection, a chunk here
+    can otherwise span thousands of pixels while safely staying under
+    ``_MEDIAN_SLAB_BYTES``, and capping it lower would just mean more,
+    smaller np.median calls for no memory benefit).
 
-    np.median makes an internal partition copy the size of its input; on
-    the whole registered movie (the template refresh) or a batch of raw
-    volumes (the bootstrap) that copy is a second multi-GB array. Each
-    ~``_MEDIAN_SLAB_BYTES`` slab is copied to float32 and medianed in
-    place instead, so neither that partition copy nor a full float
-    materialization of ``arr`` ever happens -- ``arr`` may be a raw
-    (uint8/uint16) memmap and is never mutated. Element-wise identical
-    to ``np.median`` on the float32 cast."""
-    moved = np.moveaxis(arr, axis, 0)  # reduction axis -> 0 (a view)
-    out = np.empty(moved.shape[1:], dtype=np.float32)
-    for sl in iter_axis_slices(moved.shape, 1, target_bytes=_MEDIAN_SLAB_BYTES, itemsize=4):
-        slab = np.array(moved[:, sl], dtype=np.float32)  # own float32 copy -- safe to overwrite
-        out[sl] = np.median(slab, axis=0, overwrite_input=True)
-    return out
+    ``arr`` may be a raw (uint8/uint16) memmap and is never mutated."""
+    return chunked_median(arr, axis, out_dtype=np.float32, target_bytes=_MEDIAN_SLAB_BYTES)
 
 
 def _as_float_working_copy(movie: np.ndarray) -> np.ndarray:

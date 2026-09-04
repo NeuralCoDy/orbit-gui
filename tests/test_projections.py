@@ -1,8 +1,11 @@
+import tracemalloc
+
 import numpy as np
 import pytest
 
 import orbit._native as _native
 from orbit.projections import (
+    _BLOCK_PIXELS,
     fano_factor_projection,
     fano_factor_projection_volumetric,
     local_correlation_projection,
@@ -36,6 +39,134 @@ def test_median_projection_robust_to_outlier():
     movie[0, 0, :] = [1, 1, 1, 1, 100]
     proj = median_projection(movie)
     assert proj[0, 0] == 1.0
+
+
+@pytest.mark.parametrize("dtype", [np.uint8, np.uint16, np.float32, np.float64])
+def test_median_projection_matches_plain_numpy_across_a_chunk_boundary(dtype):
+    # H well past _BLOCK_PIXELS so the chunked loop actually runs
+    # more than one block, and per numpy's own dtype rule (int/float32-
+    # under-float64 -> float64, float64 stays float64) the dtype must
+    # match too.
+    rng = np.random.default_rng(0)
+    H = _BLOCK_PIXELS * 2 + 7
+    movie = (rng.random((H, 3, 11)) * 200).astype(dtype)
+
+    got = median_projection(movie)
+    want = np.median(movie, axis=2)
+
+    assert got.dtype == want.dtype
+    np.testing.assert_array_equal(got, want)
+
+
+def test_median_projection_volumetric_matches_plain_numpy_across_a_chunk_boundary():
+    rng = np.random.default_rng(1)
+    L = _BLOCK_PIXELS * 2 + 7
+    vol = (rng.random((6, L, 3, 2)) * 200).astype(np.uint16)
+
+    got = median_projection_volumetric(vol)
+    want = np.median(vol, axis=0)
+
+    assert got.dtype == want.dtype
+    np.testing.assert_array_equal(got, want)
+
+
+def test_median_projection_peak_memory_stays_near_one_block_not_the_whole_movie():
+    # A large-enough H (many multiples of _BLOCK_PIXELS) that a
+    # whole-array np.median partition copy would dwarf one block's --
+    # confirms the chunking is actually bounding the transient, not
+    # just matching output by accident.
+    rng = np.random.default_rng(2)
+    H, W, T = _BLOCK_PIXELS * 40, 8, 25
+    movie = (rng.random((H, W, T)) * 200).astype(np.float32)
+    whole_array_partition_bytes = movie.nbytes  # np.median's internal copy, unchunked
+
+    tracemalloc.start()
+    median_projection(movie)
+    _current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert peak < whole_array_partition_bytes / 10
+
+
+@pytest.mark.parametrize("dtype", [np.uint8, np.uint16, np.float32, np.float64])
+def test_variance_projection_matches_plain_numpy_across_a_chunk_boundary(dtype):
+    rng = np.random.default_rng(6)
+    H = _BLOCK_PIXELS * 2 + 7
+    movie = (rng.random((H, 3, 11)) * 200).astype(dtype)
+
+    got = variance_projection(movie)
+    want = movie.var(axis=2)
+
+    assert got.dtype == want.dtype
+    np.testing.assert_allclose(got, want, rtol=1e-10)
+
+
+def test_variance_projection_volumetric_matches_plain_numpy_across_a_chunk_boundary():
+    rng = np.random.default_rng(7)
+    L = _BLOCK_PIXELS * 2 + 7
+    vol = (rng.random((6, L, 3, 2)) * 200).astype(np.uint16)
+
+    got = variance_projection_volumetric(vol)
+    want = vol.var(axis=0)
+
+    assert got.dtype == want.dtype
+    np.testing.assert_allclose(got, want, rtol=1e-10)
+
+
+def test_fano_factor_projection_matches_plain_numpy_across_a_chunk_boundary():
+    rng = np.random.default_rng(8)
+    H = _BLOCK_PIXELS * 2 + 7
+    movie = (rng.random((H, 3, 11)) * 200).astype(np.uint16)
+
+    got = fano_factor_projection(movie)
+
+    mean = movie.mean(axis=2)
+    var = movie.var(axis=2)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        want = np.where(mean > 0, var / mean, 0.0)
+    np.testing.assert_allclose(got, want, rtol=1e-10)
+
+
+def test_variance_projection_peak_memory_stays_near_one_block_not_the_whole_movie():
+    # ndarray.var() builds a full centered `arr - mean` array before
+    # squaring/summing it -- unchunked, that's a second, float64-sized
+    # (often larger than the input) transient. Confirms chunking bounds
+    # it to one block instead.
+    rng = np.random.default_rng(9)
+    H, W, T = _BLOCK_PIXELS * 40, 8, 25
+    movie = (rng.random((H, W, T)) * 200).astype(np.float32)
+    whole_array_centered_bytes = movie.nbytes  # what an unchunked .var() would copy, at minimum
+
+    tracemalloc.start()
+    variance_projection(movie)
+    _current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert peak < whole_array_centered_bytes / 10
+
+
+def test_fano_factor_projection_combine_step_avoids_extra_full_size_temporaries():
+    # A large enough (H, W) OUTPUT (not just a large movie) that
+    # `var / mean` + `np.where`'s two extra full-size temporaries would
+    # show up clearly -- confirms fano_factor_projection's in-place
+    # divide-into-var doesn't allocate them. H*W matters here, not T.
+    rng = np.random.default_rng(10)
+    H, W, T = 4000, 4000, 3
+    movie = (rng.random((H, W, T)) * 200).astype(np.float32)
+    one_output_array_bytes = H * W * 4  # movie is float32, so mean/var stay float32 (np.mean/np.var's own promotion rule)
+
+    tracemalloc.start()
+    fano_factor_projection(movie)
+    _current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    # mean + var (both float32, (H, W)) must coexist to compute their
+    # ratio -- that's the necessary floor, plus a couple of small bool
+    # masks (~0.25x each) for the positive-mean selection -- measured
+    # ~2.5x with the in-place fix. A reintroduced `var / mean` +
+    # `np.where` would add two more full-size buffers (~2x more, ~4.5x
+    # total) -- clearly over this bound.
+    assert peak < one_output_array_bytes * 3.5
 
 
 def test_variance_projection_constant_pixel_is_zero():

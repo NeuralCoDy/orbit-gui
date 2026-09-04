@@ -14,6 +14,23 @@ def test_robust_std_resistant_to_outliers():
     assert robust_std(x) < 1.0  # a plain std would be blown up by the outlier
 
 
+def test_robust_std_accepts_a_multi_axis_tuple():
+    # orbit.denoising's wavelet shrinkage calls robust_std with a
+    # multi-axis tuple (e.g. axis=(-2, -1), reducing one subband's two
+    # spatial axes at once, keeping the batch/frame axis) -- the chunked
+    # single-axis fast path must not be taken here, since np.moveaxis
+    # can't map a 2-element axis tuple onto a single destination axis.
+    rng = np.random.default_rng(0)
+    x = rng.random((5, 8, 6)) * 100
+
+    got = robust_std(x, axis=(-2, -1), keepdims=True)
+
+    centered = x - np.median(x, axis=(-2, -1), keepdims=True)
+    want = np.median(np.abs(centered), axis=(-2, -1), keepdims=True) / 0.6741891400433162
+    assert got.shape == (5, 1, 1)
+    np.testing.assert_allclose(got, want, rtol=1e-10)
+
+
 def test_normalize_movie_min_centering_makes_minimum_zero():
     movie = np.array([[[1.0, 2.0, 3.0]]])
     result = normalize_movie(movie, center=True, normalize=False, center_baseline="min")
@@ -27,6 +44,27 @@ def test_normalize_movie_pixelwise_min_centering():
     result = normalize_movie(movie, center=True, normalize=False, center_baseline="min", pixel_center=True)
     assert np.allclose(result[0, 0, :], [0, 1, 2])
     assert np.allclose(result[1, 0, :], [0, 10, 20])
+
+
+def test_normalize_movie_pixelwise_median_centering_matches_plain_numpy_across_a_chunk_boundary():
+    # H=340 spans multiple chunked_median blocks (150-pixel cap) -- confirms
+    # the chunked pixel-wise median baseline matches an unchunked np.median.
+    rng = np.random.default_rng(2)
+    movie = rng.random((340, 3, 11)) * 100
+    result = normalize_movie(movie, center=True, normalize=False, center_baseline="median", pixel_center=True)
+    expected = movie - np.median(movie, axis=2, keepdims=True)
+    np.testing.assert_allclose(result, expected)
+
+
+def test_robust_std_pixelwise_matches_unchunked_formula_across_a_chunk_boundary():
+    rng = np.random.default_rng(3)
+    movie = rng.random((340, 3, 11)) * 100
+
+    got = robust_std(movie, axis=2, keepdims=True)
+
+    centered = movie - np.median(movie, axis=2, keepdims=True)
+    want = np.median(np.abs(centered), axis=2, keepdims=True) / 0.6741891400433162
+    np.testing.assert_allclose(got, want, rtol=1e-10)
 
 
 def test_normalize_movie_mode_baseline_matches_mode_projection():
