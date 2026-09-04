@@ -203,14 +203,34 @@ class ROIValidationTab(QWidget):
 
         main_row.addLayout(self._build_center_panel(), 1)
 
-        right_widget = QWidget()
-        right_widget.setLayout(self._build_right_sidebar_panel())
-        right_scroll = QScrollArea()
-        right_scroll.setWidget(right_widget)
-        right_scroll.setWidgetResizable(True)
-        right_scroll.setMaximumWidth(300)
-        right_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        main_row.addWidget(right_scroll, 0)
+        self._right_widget = QWidget()
+        self._right_widget.setLayout(self._build_right_sidebar_panel())
+        self._right_scroll = QScrollArea()
+        self._right_scroll.setWidget(self._right_widget)
+        self._right_scroll.setWidgetResizable(True)
+        # No fixed cap here (unlike left_scroll's 350px, which fits the
+        # image-heavy left panel's content at any reasonable font size):
+        # this panel's content is almost entirely labels/spinboxes/combo
+        # boxes, whose sizeHint grows directly with the app's text-size
+        # setting. QScrollArea.sizeHint() only reflects the contained
+        # widget's sizeHint at the moment setWidget() is called, not on
+        # later changes (confirmed empirically: right_widget's own
+        # sizeHint/minimumWidth updated correctly on a font change, but
+        # right_scroll's own sizeHint/width didn't move at all) -- so
+        # with the horizontal scrollbar off, a widened right_widget was
+        # simply clipped by the still-unchanged viewport, with no
+        # scrollbar to reach the rest. _sync_right_panel_min_width
+        # explicitly re-widens right_scroll itself (not just
+        # right_widget) to match, so main_row's QHBoxLayout actually
+        # gives it the space -- the center panel (which already has its
+        # own zoom/pan for exactly this kind of "doesn't all fit"
+        # situation) absorbs the squeeze instead. Kept in sync with the
+        # live text-size slider via the FontChange event caught in
+        # eventFilter below.
+        self._right_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        main_row.addWidget(self._right_scroll, 0)
+        self._right_widget.installEventFilter(self)
+        self._sync_right_panel_min_width()
 
         outer.addLayout(main_row, 1)
         outer.addLayout(self._build_cell_nav_bar())
@@ -218,6 +238,30 @@ class ROIValidationTab(QWidget):
         QShortcut(QtCore.Qt.Key.Key_PageDown, self, self._scroll_thumbnails_page_down)
         QShortcut(QtCore.Qt.Key.Key_PageUp, self, self._scroll_thumbnails_page_up)
         QShortcut(QtCore.Qt.Key.Key_A, self, self._toggle_artifact_shortcut)
+
+    def _sync_right_panel_min_width(self) -> None:
+        """Pins both the right sidebar and its scroll area to the
+        sidebar's own current sizeHint width -- see _build_ui's comment
+        on why both (not just right_widget) need it. Re-run on every
+        FontChange (see eventFilter) so the panel keeps tracking the
+        text-size slider live, not just at construction."""
+        content_width = self._right_widget.sizeHint().width()
+        self._right_widget.setMinimumWidth(content_width)
+        frame = self._right_scroll.frameWidth() * 2
+        vbar = self._right_scroll.verticalScrollBar()
+        scrollbar_width = vbar.sizeHint().width() if vbar.isVisible() else 0
+        self._right_scroll.setMinimumWidth(content_width + frame + scrollbar_width)
+
+    def eventFilter(self, watched, event) -> bool:
+        if watched is self._right_widget and event.type() == QtCore.QEvent.Type.FontChange:
+            # Deferred: set_font_size_scale sets every reachable widget's
+            # font in one loop (see theme.py), so right_widget's own
+            # FontChange can fire before all of its children have
+            # actually picked up the new font -- reading sizeHint() right
+            # now would undercount. Queuing to the next event-loop pass
+            # lets that whole loop finish first.
+            QtCore.QTimer.singleShot(0, self._sync_right_panel_min_width)
+        return super().eventFilter(watched, event)
 
     def _build_counts_panel(self) -> QGroupBox:
         group = QGroupBox("Classification counts")
