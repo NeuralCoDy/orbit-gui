@@ -84,6 +84,12 @@ class StageTab(QWidget):
     _stage_key = "stage"  # lowercase identifier recorded in AppState.steps / session_io.py
     _chunk_frames = 500  # time-chunk size for a memmap input's chunked Commit
     _supports_volumetric = False  # set True by subclasses with a real *_volumetric implementation (see below)
+    # Voxel budget for a volumetric Apply preview. Registration converts
+    # the preview to float32 (4x for uint8) and holds gigabyte-scale FFT
+    # buffers per volume, so the whole-volume-set preview a per-timepoint
+    # cap would allow is not survivable -- ~2e9 voxels keeps the working
+    # set to tens of GB. Commit still runs the full movie, chunked.
+    _volumetric_preview_max_voxels = 2_000_000_000
 
     def __init__(
         self,
@@ -315,7 +321,13 @@ class StageTab(QWidget):
         self._input_movie = movie
         self.commit_controls.set_apply_enabled(False)
         self.commit_controls.set_commit_enabled(False)
-        self._start_worker_volumetric(preview_slice_volumetric(movie))
+        preview = preview_slice_volumetric(movie, max_voxels=self._volumetric_preview_max_voxels)
+        if preview.shape[0] < movie.shape[0]:
+            self.status_label.setText(
+                f"Preview: first {preview.shape[0]} of {movie.shape[0]} timepoints "
+                "(Commit runs the whole movie, chunked)."
+            )
+        self._start_worker_volumetric(preview)
 
     def _render_result(self, result: dict) -> None:
         """Updates the panel images/movies and self.metrics_label (plus

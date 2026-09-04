@@ -38,6 +38,11 @@ from .stage_tab import StageTab
 
 _DEFAULT_N_COMPONENTS = 20
 
+# Volumes to median for the bootstrap template. Each volume carries far
+# more signal than a 2D frame, so a small batch is plenty -- and the
+# median of the whole set would be another multi-GB transient.
+_INIT_BATCH_3D = 30
+
 # Short, pipeline-breadcrumb-friendly names per method -- "Patch Warp"
 # matches how the user refers to it, not the combo box's longer label.
 _METHOD_LABELS = {"rigid": "Rigid", "patch": "Patch-based", "patchwarp": "Patch Warp"}
@@ -344,7 +349,7 @@ class MotionCorrectionTab(StageTab):
             self.busy_bar, "Running 3D motion correction and metrics (this can take a while)...",
             _run_and_assess_3d, movie, self.pc_count_spin.value(),
             max_shift=self.max_shift_spin.value(), upsample_factor=self.upsample_spin.value(),
-            n_iter=self.n_iter_spin.value(), init_batch=movie.shape[0],
+            n_iter=self.n_iter_spin.value(), init_batch=min(movie.shape[0], _INIT_BATCH_3D),
             on_success=self._on_finished, on_failure=self._on_failed,
         )
 
@@ -353,7 +358,7 @@ class MotionCorrectionTab(StageTab):
         rigid_motion_correct_3d(
             source, output=output, bin_width=self._chunk_frames,
             max_shift=self.max_shift_spin.value(), upsample_factor=self.upsample_spin.value(),
-            n_iter=self.n_iter_spin.value(), init_batch=min(source.shape[0], 5000),
+            n_iter=self.n_iter_spin.value(), init_batch=min(source.shape[0], _INIT_BATCH_3D),
         )
         output.flush()
         return output

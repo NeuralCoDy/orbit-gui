@@ -20,7 +20,20 @@ from typing import Callable
 
 import numpy as np
 
-from .motion_correction import _apply_shift, _as_float_working_copy, _estimate_shift, _resolve_max_workers
+from .motion_correction import (
+    _apply_shift,
+    _as_float_working_copy,
+    _estimate_shift,
+    _median_over_axis,
+    _resolve_max_workers,
+)
+
+# One whole-volume FFT buffer is complex64 the size of the volume
+# (gigabytes at realistic sizes), and phase_cross_correlation holds
+# several at once -- concurrent workers multiply that, the single
+# largest transient in the 3D path. So it defaults to serial; callers
+# with RAM headroom can pass ``max_workers`` explicitly.
+_DEFAULT_MAX_WORKERS_3D = 1
 
 
 def _bootstrap_template_3d(
@@ -30,12 +43,13 @@ def _bootstrap_template_3d(
     median of the first ``init_batch`` volumes. Returns ``(template,
     initial_template)``.
 
-    Median in float32 -- see _bootstrap_template (the 2D version) for
-    why: keeps the bootstrap template identical between the in-RAM and
-    ``output=`` paths."""
+    _median_over_axis casts to float32 a spatial slab at a time -- see
+    _bootstrap_template (2D). It reads straight from ``movie``, so a
+    batch of ``init_batch`` raw volumes is never materialized as float32
+    (that would be another ~4x the raw uint8 movie, gigabytes on a real
+    set)."""
     if template is None:
-        batch = np.asarray(movie[: min(init_batch, movie.shape[0])], dtype=np.float32)
-        template = np.median(batch, axis=0)
+        template = _median_over_axis(movie[: min(init_batch, movie.shape[0])], axis=0)
     return template, template.copy()
 
 
@@ -64,7 +78,7 @@ def _register_in_chunks_3d(
                 registered[t] = reg_vol
                 accum[t] += delta
 
-        template = np.median(registered[chunk_start:chunk_end], axis=0)
+        template = _median_over_axis(registered[chunk_start:chunk_end], axis=0)
 
     return template
 
@@ -87,7 +101,7 @@ def _setup_registration_3d(
         template, initial_template = _bootstrap_template_3d(movie, template, init_batch)
         registered = movie  # movie is already a private float32 copy -- no second copy needed
         initial_read_source = None
-    workers = _resolve_max_workers(max_workers, bin_width)
+    workers = _resolve_max_workers(max_workers, bin_width, default=_DEFAULT_MAX_WORKERS_3D)
     return registered, initial_read_source, template, initial_template, T, workers
 
 

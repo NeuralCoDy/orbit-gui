@@ -17,30 +17,33 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import numpy as np  # noqa: E402
 
 
-def _make_movie(height: int, width: int, n_frames: int, dtype: str) -> np.ndarray:
+def _random(shape: tuple[int, ...], dtype: str) -> np.ndarray:
     rng = np.random.default_rng(0)
     if np.issubdtype(np.dtype(dtype), np.integer):
-        return rng.integers(0, 4000, size=(height, width, n_frames), dtype=dtype)
-    return (rng.standard_normal((height, width, n_frames)).astype(dtype) * 100 + 500)
+        high = min(4000, int(np.iinfo(np.dtype(dtype)).max))
+        return rng.integers(0, high, size=shape, dtype=dtype)
+    return rng.standard_normal(shape).astype(dtype) * 100 + 500
+
+
+def _make_movie(height: int, width: int, n_frames: int, dtype: str) -> np.ndarray:
+    return _random((height, width, n_frames), dtype)
 
 
 def _make_volume(n_frames: int, length: int, width: int, depth: int, dtype: str) -> np.ndarray:
-    rng = np.random.default_rng(0)
-    if np.issubdtype(np.dtype(dtype), np.integer):
-        return rng.integers(0, 4000, size=(n_frames, length, width, depth), dtype=dtype)
-    return (rng.standard_normal((n_frames, length, width, depth)).astype(dtype) * 100 + 500)
+    return _random((n_frames, length, width, depth), dtype)
 
 
 def _run(stage: str, height: int, width: int, n_frames: int, dtype: str, n_stages: int = 5) -> None:
     if stage == "motion_rigid_3d":
         # Whole-volume 3D rigid registration on a (T, L, W, D) movie --
         # like "motion_rigid" but for volumetric data, which OOM-crashed
-        # a real session when the whole volume was mapped to float64.
-        # The trailing arg (n_stages' slot) is the depth D here.
+        # a real session. The trailing arg (n_stages' slot) is the depth
+        # D here. init_batch is capped as MotionCorrectionTab does it, so
+        # the bootstrap median doesn't scan the whole set.
         from orbit.motion_correction_3d import rigid_motion_correct_3d
 
         volume = _make_volume(n_frames, height, width, n_stages, dtype)
-        rigid_motion_correct_3d(volume, bin_width=200, n_iter=1)
+        rigid_motion_correct_3d(volume, bin_width=200, n_iter=1, init_batch=min(n_frames, 30))
         return
 
     movie = _make_movie(height, width, n_frames, dtype)

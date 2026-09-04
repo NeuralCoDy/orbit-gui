@@ -16,9 +16,21 @@ from scipy.fft import fftn, ifftn, next_fast_len
 from scipy.ndimage import fourier_shift, map_coordinates
 from skimage.registration import phase_cross_correlation
 
+from ._blocks import iter_axis_slices
 from ._concurrency import available_cpu_count
 
 _DEFAULT_MAX_WORKERS = 4
+_MEDIAN_SLAB_BYTES = 256 * 1024 * 1024  # working-slab budget for _median_over_axis
+_SMOOTH_ENOUGH_PRIME = 53  # an axis whose length's largest prime factor is <= this FFTs fast enough without padding
+
+
+def _largest_prime_factor(n: int) -> int:
+    f = 2
+    while f * f <= n:
+        while n % f == 0:
+            n //= f
+        f += 1
+    return n
 
 
 def _pad_to_fast_len(image: np.ndarray, mode: str = "constant") -> np.ndarray:
@@ -33,21 +45,48 @@ def _pad_to_fast_len(image: np.ndarray, mode: str = "constant") -> np.ndarray:
     at 31px wide, and 31 is prime -- can make an FFT several times
     slower than a same-ballpark size with only small prime factors
     (confirmed empirically: a 509x509 FFT took ~5x longer than padding
-    up to 512x512 first, including the padding's own cost). No-op
-    (returns ``image`` unchanged, no copy) when already at a fast size,
-    so this costs nothing in the common case of already-round movie
-    dimensions."""
-    target_shape = tuple(next_fast_len(n) for n in image.shape)
+    up to 512x512 first, including the padding's own cost).
+
+    An axis is only padded if its length has a prime factor larger than
+    ``_SMOOTH_ENOUGH_PRIME`` -- pocketfft handles a moderately-composite
+    size efficiently enough (a factor of, say, 53 costs maybe 1.5x a
+    fully smooth transform), and for a whole 3D volume the padding copy
+    is gigabytes, dwarfing that. A genuinely pathological size (a large
+    prime like 509, or a small prime like the 31px patch above) still
+    gets padded. No-op (no copy) when every axis is smooth enough."""
+    target_shape = tuple(
+        next_fast_len(n) if _largest_prime_factor(n) > _SMOOTH_ENOUGH_PRIME else n for n in image.shape
+    )
     if target_shape == image.shape:
         return image
     pad_width = [(0, target - n) for n, target in zip(image.shape, target_shape)]
     return np.pad(image, pad_width, mode=mode)
 
 
-def _resolve_max_workers(max_workers: int | None, bin_width: int) -> int:
+def _resolve_max_workers(max_workers: int | None, bin_width: int, default: int = _DEFAULT_MAX_WORKERS) -> int:
     if max_workers is not None:
         return max_workers
-    return min(_DEFAULT_MAX_WORKERS, available_cpu_count(), bin_width)
+    return max(1, min(default, available_cpu_count(), bin_width))
+
+
+def _median_over_axis(arr: np.ndarray, axis: int) -> np.ndarray:
+    """``np.median(arr.astype(float32), axis=axis)``, computed one
+    spatial slab at a time.
+
+    np.median makes an internal partition copy the size of its input; on
+    the whole registered movie (the template refresh) or a batch of raw
+    volumes (the bootstrap) that copy is a second multi-GB array. Each
+    ~``_MEDIAN_SLAB_BYTES`` slab is copied to float32 and medianed in
+    place instead, so neither that partition copy nor a full float
+    materialization of ``arr`` ever happens -- ``arr`` may be a raw
+    (uint8/uint16) memmap and is never mutated. Element-wise identical
+    to ``np.median`` on the float32 cast."""
+    moved = np.moveaxis(arr, axis, 0)  # reduction axis -> 0 (a view)
+    out = np.empty(moved.shape[1:], dtype=np.float32)
+    for sl in iter_axis_slices(moved.shape, 1, target_bytes=_MEDIAN_SLAB_BYTES, itemsize=4):
+        slab = np.array(moved[:, sl], dtype=np.float32)  # own float32 copy -- safe to overwrite
+        out[sl] = np.median(slab, axis=0, overwrite_input=True)
+    return out
 
 
 def _as_float_working_copy(movie: np.ndarray) -> np.ndarray:
@@ -116,14 +155,13 @@ def _bootstrap_template(
     """Starting reference image: ``template`` if supplied, else the median
     of the first ``init_batch`` frames. Returns ``(template, initial_template)``.
 
-    The median is taken in float32 so the bootstrap template is
-    identical whether the movie has already been converted to the
-    float32 working copy (the in-RAM path) or is still the caller's raw
-    array (the ``output=`` path, which reads frames straight from it) --
-    a no-op view in the former case."""
+    _median_over_axis casts to float32 a slab at a time, so the
+    bootstrap template is identical whether the movie is already the
+    float32 working copy (in-RAM path) or still the caller's raw array
+    (``output=`` path), without materializing ``init_batch`` frames as
+    float32 up front."""
     if template is None:
-        batch = np.asarray(movie[:, :, : min(init_batch, movie.shape[-1])], dtype=np.float32)
-        template = np.median(batch, axis=2)
+        template = _median_over_axis(movie[:, :, : min(init_batch, movie.shape[-1])], axis=2)
     return template, template.copy()
 
 
@@ -152,9 +190,16 @@ def _estimate_shift(
     prime), and this function is called once per patch per frame there."""
     reference = _pad_to_fast_len(reference, mode="edge")
     moving = _pad_to_fast_len(moving, mode="edge")
-    shift, _error, _phasediff = phase_cross_correlation(
-        reference, moving, upsample_factor=upsample_factor, normalization=normalization
-    )
+    # phase_cross_correlation's error/phasediff terms compute
+    # src_amp * target_amp, each a sum of |F|^2 over every voxel -- for a
+    # whole float32 volume that product overflows float32 (a warning,
+    # then inf). We only read ``shift``, which comes from the argmax of
+    # the (unaffected) cross-correlation, so the overflow is harmless
+    # here -- confirmed against a synthetic known-shift volume.
+    with np.errstate(over="ignore", invalid="ignore"):
+        shift, _error, _phasediff = phase_cross_correlation(
+            reference, moving, upsample_factor=upsample_factor, normalization=normalization
+        )
     return np.clip(shift, -max_shift, max_shift)
 
 
@@ -184,7 +229,7 @@ def _register_in_chunks(
                 registered[:, :, t] = reg_frame
                 accum[t] += delta
 
-        template = np.median(registered[:, :, chunk_start:chunk_end], axis=2)
+        template = _median_over_axis(registered[:, :, chunk_start:chunk_end], axis=2)
 
     return template
 

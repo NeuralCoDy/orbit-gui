@@ -134,16 +134,16 @@ def test_rigid_motion_correction_peak_memory_is_bounded():
 
 
 def test_rigid_3d_motion_correction_peak_memory_is_bounded():
-    # Volumetric (T, L, W, D) rigid registration -- the path that
-    # OOM-crashed a real session by mapping the whole volume to float64.
-    # A raw uint16 volume forces one float32 working copy (~2x its raw
-    # size); the bound guards against a regression back to float64 (~4x)
-    # or an extra full-volume temporary. ~52MB raw here (128*128*160*10
-    # uint16); measured ~545MB peak (working copy + per-worker complex64
-    # FFT transients + the scipy/skimage import baseline), bounded loosely
-    # like the others.
-    peak_mb = _peak_rss_mb("motion_rigid_3d", 128, 128, 160, "uint16", depth=10)
-    assert peak_mb < 1100, f"3D rigid motion correction peak RSS {peak_mb:.0f}MB exceeds bound"
+    # Volumetric (T, L, W, D) rigid registration -- few big volumes, the
+    # real dataset's shape, and uint8 (its worst case: float32 is 4x, not
+    # 2x). Peak is dominated by (a) the one float32 working copy and (b)
+    # phase_cross_correlation's whole-volume complex64 FFT buffers -- ~12x
+    # the raw uint8 at this size once the scipy/skimage import baseline is
+    # netted out. The bound is loose; it guards against a regression to
+    # float64 (would ~double it) or a re-introduced full-stack median
+    # copy. ~90MB raw here (10 * 300 * 500 * 60 uint8), measured ~1.25GB.
+    peak_mb = _peak_rss_mb("motion_rigid_3d", 300, 500, 10, "uint8", timeout=240.0, depth=60)
+    assert peak_mb < 2200, f"3D rigid motion correction peak RSS {peak_mb:.0f}MB exceeds bound"
 
 
 def test_rigid_motion_correction_memmap_commit_scales_sublinearly_with_frame_count():

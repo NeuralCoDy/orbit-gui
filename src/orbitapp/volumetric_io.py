@@ -38,16 +38,29 @@ ONE_VOLUME_PER_STACK = "one_volume_per_stack"
 INTERLEAVED = "interleaved"
 
 
-def preview_slice_volumetric(movie: np.ndarray, max_frames: int = 5000) -> np.ndarray:
-    """The first ``max_frames`` timepoints of a (T, L, W, D) ``movie`` --
-    same purpose as orbitapp.io.preview_slice (a cheap memmap view, no
-    copy, when ``movie`` is disk-backed and longer than that), but capped
-    on axis 0 rather than axis -1 -- volumetric movies put time first,
-    not last, so reusing preview_slice itself here would cap the wrong
-    axis (depth, not time)."""
-    if is_memmap(movie) and movie.shape[0] > max_frames:
-        return movie[:max_frames]
-    return movie
+def preview_slice_volumetric(
+    movie: np.ndarray, max_frames: int = 5000, max_voxels: int | None = None
+) -> np.ndarray:
+    """The leading timepoints of a (T, L, W, D) ``movie`` -- same purpose
+    as orbitapp.io.preview_slice (a cheap view, no copy) but capped on
+    axis 0, not axis -1 (volumetric movies put time first).
+
+    ``max_frames`` only trims a disk-backed movie, matching preview_slice.
+    ``max_voxels``, if given, additionally trims *any* movie (memmap or
+    in-RAM) so the preview stays under that many voxels total -- a
+    per-timepoint cap is meaningless for a wide volume, where even a
+    handful of (L, W, D) timepoints is many GB once converted to float
+    for registration. Callers that run heavy per-voxel compute on the
+    preview (the stage tabs' Apply) pass this; display-only callers
+    don't."""
+    T = movie.shape[0]
+    limit = T
+    if is_memmap(movie) and T > max_frames:
+        limit = max_frames
+    if max_voxels is not None:
+        per_timepoint = movie.size // T
+        limit = min(limit, max(1, max_voxels // per_timepoint))
+    return movie[:limit] if limit < T else movie
 
 
 def load_volumetric_movie(path: str | Path, mmap: bool = False) -> np.ndarray:
