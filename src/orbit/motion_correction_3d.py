@@ -2,9 +2,9 @@
 movies -- the volumetric analog of orbit.motion_correction's rigid path.
 
 _apply_shift and _estimate_shift over there are already dimension-agnostic
-(fourier_shift/fftn and skimage's phase_cross_correlation both operate on
-an array of any dimensionality, given a shift vector of matching length),
-so they're reused unmodified here. Only the axis-order plumbing around
+(fourier_shift/fftn and _phase_correlate_shift both operate on an array of
+any dimensionality, given a shift vector of matching length), so they're
+reused unmodified here. Only the axis-order plumbing around
 them -- which axis is time, how the template is bootstrapped, how chunks
 are looped -- is specific to a movie's shape convention, and (T, L, W, D)
 puts time on axis 0 rather than axis -1 (orbit.motion_correction's (H, W,

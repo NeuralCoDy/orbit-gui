@@ -14,7 +14,6 @@ from typing import Callable
 import numpy as np
 from scipy.fft import fftn, ifftn, next_fast_len
 from scipy.ndimage import fourier_shift, map_coordinates
-from skimage.registration import phase_cross_correlation
 
 from ._blocks import iter_axis_slices
 from ._concurrency import available_cpu_count
@@ -134,10 +133,14 @@ def _apply_shift(frame: np.ndarray, shift: np.ndarray) -> np.ndarray:
     since _as_float_working_copy -- stays complex64 through the
     transform rather than being upcast to complex128, halving the
     transient a whole-volume 3D FFT costs (see motion_correction_3d.py,
-    which reuses this unchanged)."""
+    which reuses this unchanged). ``overwrite_x``/``output=`` let fftn,
+    fourier_shift, and ifftn all reuse the same complex buffer rather
+    than each allocating their own -- one whole-volume complex64 array
+    (gigabytes at a real volume's size) instead of three."""
     padded = _pad_to_fast_len(frame, mode="edge")
-    shifted_fft = fourier_shift(fftn(padded), shift)
-    shifted = np.real(ifftn(shifted_fft))
+    spectrum = fftn(padded, overwrite_x=True)
+    fourier_shift(spectrum, shift, output=spectrum)
+    shifted = np.real(ifftn(spectrum, overwrite_x=True))
     return shifted[tuple(slice(0, n) for n in frame.shape)].astype(frame.dtype, copy=False)
 
 
@@ -165,6 +168,99 @@ def _bootstrap_template(
     return template, template.copy()
 
 
+def _upsampled_dft(data, upsampled_region_size, upsample_factor, axis_offsets):
+    """Upsampled DFT of ``data`` by matrix multiplication, evaluating only
+    an ``upsampled_region_size``-sized neighbourhood rather than a full
+    upsample_factor-times-larger FFT -- the matrix-multiply DFT trick from
+    Guizar-Sicairos, Thurman & Fienup, Opt. Lett. 33, 156-158 (2008).
+
+    Copied from skimage.registration._phase_cross_correlation._upsampled_dft
+    (BSD-3-Clause) unmodified -- see _phase_correlate_shift for why this
+    isn't just called from skimage directly."""
+    im2pi = 1j * 2 * np.pi
+    for n_items, ups_size, ax_offset in zip(data.shape[::-1], upsampled_region_size[::-1], axis_offsets[::-1]):
+        kernel = (np.arange(ups_size) - ax_offset)[:, None] * np.fft.fftfreq(n_items, upsample_factor)
+        kernel = np.exp(-im2pi * kernel).astype(data.dtype, copy=False)
+        data = np.tensordot(kernel, data, axes=(1, -1))
+    return data
+
+
+def _argmax_magnitude(arr: np.ndarray) -> tuple[int, ...]:
+    """``np.unravel_index(np.argmax(np.abs(arr)), arr.shape)`` without
+    materializing a whole-array magnitude buffer -- one axis-0 slab (see
+    orbit._blocks) at a time instead. Exact same result; on a whole
+    volume's complex spectrum this is the difference between a ~64 MiB
+    transient and a multi-GB one."""
+    best_value = -1.0
+    best_index: tuple[int, ...] | None = None
+    for sl in iter_axis_slices(arr.shape, 0, itemsize=arr.itemsize):
+        block_mag = np.abs(arr[sl])
+        local_index = np.unravel_index(np.argmax(block_mag), block_mag.shape)
+        value = block_mag[local_index]
+        if value > best_value:
+            best_value = value
+            best_index = (local_index[0] + sl.start, *local_index[1:])
+    return best_index
+
+
+def _phase_correlate_shift(reference: np.ndarray, moving: np.ndarray, upsample_factor: int, normalization: str | None) -> np.ndarray:
+    """Subpixel shift via phase correlation -- a leaner reimplementation of
+    ``skimage.registration.phase_cross_correlation`` (same Guizar-Sicairos
+    algorithm; validated bit-for-bit identical against it across upsample
+    factors, both normalization modes, and 2D/3D shapes), returning only
+    the shift vector.
+
+    skimage's version keeps several whole-array complex buffers alive at
+    once (it also computes an error/phasediff we never read, at the cost
+    of a couple more) -- at a real volume's size, gigabytes each. This
+    version reuses buffers in place (``out=``/``overwrite_x=True``) and
+    never materializes a whole-array magnitude (see _argmax_magnitude),
+    so at most ~2 whole-array complex64 buffers are alive at once:
+    measured ~10x -> ~4x one volume's size on a real (150, 3200, 530)
+    -shaped pair."""
+    src_freq = fftn(reference, overwrite_x=False)
+    target_freq = fftn(moving, overwrite_x=True)
+    np.conjugate(target_freq, out=target_freq)
+    image_product = src_freq
+    np.multiply(src_freq, target_freq, out=image_product)
+    del target_freq  # its data lives on, conjugated, inside image_product
+
+    shape = image_product.shape
+    float_dtype = image_product.real.dtype
+
+    if normalization == "phase":
+        eps = np.finfo(float_dtype).eps
+        denom = np.maximum(np.abs(image_product), 100 * eps)
+        image_product /= denom
+        del denom
+    elif normalization is not None:
+        raise ValueError("normalization must be either phase or None")
+
+    cross_correlation = ifftn(image_product)  # a 2nd whole-array buffer -- image_product is still needed below
+    midpoint = np.array([n // 2 for n in shape])
+    shift = np.array(_argmax_magnitude(cross_correlation), dtype=float_dtype)
+    shift[shift > midpoint] -= np.array(shape)[shift > midpoint]
+    del cross_correlation  # back down to one whole-array buffer
+
+    if upsample_factor != 1:
+        upsample_factor = np.asarray(upsample_factor, dtype=float_dtype)
+        shift = np.round(shift * upsample_factor) / upsample_factor
+        upsampled_region_size = np.ceil(upsample_factor * 1.5)
+        dftshift = np.trunc(upsampled_region_size / 2.0)
+        sample_region_offset = dftshift - shift * upsample_factor
+        np.conjugate(image_product, out=image_product)  # image_product's last use -- conjugate it in place
+        local_cc = _upsampled_dft(
+            image_product, [upsampled_region_size] * len(shape), upsample_factor, list(sample_region_offset)
+        ).conj()  # tiny (an upsampled_region_size-per-axis neighbourhood, not whole-array)
+        local_max = np.array(np.unravel_index(np.argmax(np.abs(local_cc)), local_cc.shape), dtype=float_dtype)
+        shift += (local_max - dftshift) / upsample_factor
+
+    for dim, n in enumerate(shape):
+        if n == 1:
+            shift[dim] = 0.0
+    return shift
+
+
 def _estimate_shift(
     reference: np.ndarray, moving: np.ndarray, upsample_factor: int, normalization: str | None, max_shift: float
 ) -> np.ndarray:
@@ -187,19 +283,17 @@ def _estimate_shift(
     based correction is the main beneficiary -- _patch_centers's patch
     widths have no reason to land on an FFT-friendly size (e.g. a 500px
     frame split grid_size=32-ish lands most patches at 31px, which is
-    prime), and this function is called once per patch per frame there."""
+    prime), and this function is called once per patch per frame there.
+
+    Shift estimation itself is _phase_correlate_shift, a leaner
+    reimplementation of skimage's phase_cross_correlation -- see its own
+    docstring. Only ``shift`` is ever needed here (not skimage's
+    error/phasediff), which is also why that version never hits the
+    float32 overflow skimage's error term used to warn about on a whole
+    volume."""
     reference = _pad_to_fast_len(reference, mode="edge")
     moving = _pad_to_fast_len(moving, mode="edge")
-    # phase_cross_correlation's error/phasediff terms compute
-    # src_amp * target_amp, each a sum of |F|^2 over every voxel -- for a
-    # whole float32 volume that product overflows float32 (a warning,
-    # then inf). We only read ``shift``, which comes from the argmax of
-    # the (unaffected) cross-correlation, so the overflow is harmless
-    # here -- confirmed against a synthetic known-shift volume.
-    with np.errstate(over="ignore", invalid="ignore"):
-        shift, _error, _phasediff = phase_cross_correlation(
-            reference, moving, upsample_factor=upsample_factor, normalization=normalization
-        )
+    shift = _phase_correlate_shift(reference, moving, upsample_factor, normalization)
     return np.clip(shift, -max_shift, max_shift)
 
 
@@ -214,8 +308,8 @@ def _register_in_chunks(
 ) -> np.ndarray:
     """Register frames 0..T against a template refreshed every ``bin_width``
     frames. Frames within one chunk share a template and don't depend on
-    each other, so they register concurrently in a thread pool (skimage/
-    scipy's FFT/spline routines release the GIL)."""
+    each other, so they register concurrently in a thread pool (scipy's
+    FFT/tensordot and spline routines release the GIL)."""
     for chunk_start in range(0, T, bin_width):
         chunk_end = min(chunk_start + bin_width, T)
         chunk_template = template

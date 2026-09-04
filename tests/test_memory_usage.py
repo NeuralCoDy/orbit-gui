@@ -134,16 +134,19 @@ def test_rigid_motion_correction_peak_memory_is_bounded():
 
 
 def test_rigid_3d_motion_correction_peak_memory_is_bounded():
-    # Volumetric (T, L, W, D) rigid registration -- few big volumes, the
-    # real dataset's shape, and uint8 (its worst case: float32 is 4x, not
-    # 2x). Peak is dominated by (a) the one float32 working copy and (b)
-    # phase_cross_correlation's whole-volume complex64 FFT buffers -- ~12x
-    # the raw uint8 at this size once the scipy/skimage import baseline is
-    # netted out. The bound is loose; it guards against a regression to
-    # float64 (would ~double it) or a re-introduced full-stack median
-    # copy. ~90MB raw here (10 * 300 * 500 * 60 uint8), measured ~1.25GB.
-    peak_mb = _peak_rss_mb("motion_rigid_3d", 300, 500, 10, "uint8", timeout=240.0, depth=60)
-    assert peak_mb < 2200, f"3D rigid motion correction peak RSS {peak_mb:.0f}MB exceeds bound"
+    # Volumetric (T, L, W, D) rigid registration -- few big volumes (like
+    # the real dataset's shape) and uint8 (its worst case: float32 is 4x,
+    # not 2x). Sized so each volume (~144MB float32) is big enough that
+    # the per-call phase-correlation transient shows up over the fixed
+    # scipy/numpy import baseline -- a smaller movie mostly measures that
+    # baseline instead. Peak is dominated by the one float32 working copy
+    # plus _phase_correlate_shift's own whole-volume complex64 buffers
+    # (see test_phase_correlate.py -- a leaner reimplementation of
+    # skimage's phase_cross_correlation, ~4x one volume vs skimage's
+    # ~10x). ~346MB raw here (8 * 300 * 800 * 150 uint8); measured ~2.8GB
+    # (was ~3.8GB with skimage's phase_cross_correlation, same config).
+    peak_mb = _peak_rss_mb("motion_rigid_3d", 300, 800, 8, "uint8", timeout=120.0, depth=150)
+    assert peak_mb < 3500, f"3D rigid motion correction peak RSS {peak_mb:.0f}MB exceeds bound"
 
 
 def test_rigid_motion_correction_memmap_commit_scales_sublinearly_with_frame_count():
