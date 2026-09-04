@@ -24,6 +24,7 @@ class FunctionWorker(QThread):
     finished_ok = Signal(object)
     failed = Signal(str)
     warning = Signal(str)
+    progress = Signal(int, int)  # (done, total) -- see run_worker's on_progress
 
     def __init__(self, fn: Callable, *args: Any, parent=None, **kwargs: Any) -> None:
         super().__init__(parent)
@@ -65,13 +66,23 @@ class FunctionWorker(QThread):
 
 
 def run_worker(
-    busy_bar: BusyBar, message: str, fn: Callable, *args: Any, on_success: Callable, on_failure: Callable, **kwargs: Any
+    busy_bar: BusyBar, message: str, fn: Callable, *args: Any, on_success: Callable, on_failure: Callable,
+    on_progress: bool = False, **kwargs: Any,
 ) -> FunctionWorker:
     """Starts ``busy_bar``, runs ``fn(*args, **kwargs)`` on a background
     FunctionWorker, and wires its result/failure signals -- the "launch
     a long-running orbit call" sequence every tab needs. Caller must
     keep the returned worker referenced (e.g. ``self.worker = run_worker(...)``)
     so it isn't garbage-collected mid-run.
+
+    ``on_progress=True`` is for an ``fn`` that itself accepts a
+    ``progress`` keyword (a ``(done, total) -> None`` callback, e.g.
+    load_volumetric_tiff_folder) -- it's given ``worker.progress.emit``,
+    which is safe to call from ``fn``'s background thread (Qt auto-
+    queues cross-thread signal emits to the receiving/GUI thread), and
+    the emitted values are wired straight to ``busy_bar.set_progress``
+    so the bar shows real progress instead of guessing from elapsed
+    time. Leave it off for an ``fn`` that has no such notion of progress.
 
     ``worker.wait()`` before invoking the caller's handler matters: our
     finished_ok/failed signals are emitted from inside run(), queued to
@@ -85,6 +96,9 @@ def run_worker(
     """
     busy_bar.start(message)
     worker = FunctionWorker(fn, *args, **kwargs)
+    if on_progress:
+        worker.kwargs["progress"] = worker.progress.emit
+        worker.progress.connect(busy_bar.set_progress)
 
     def _joined(handler: Callable, arg: Any) -> None:
         worker.wait()

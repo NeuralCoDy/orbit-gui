@@ -46,3 +46,21 @@ def test_run_worker_reports_failure():
 
     assert len(failures) == 1
     assert "nope" in failures[0]
+
+
+def test_run_worker_on_progress_wires_fn_callback_to_busy_bar():
+    bar = BusyBar()
+    bar.start("Loading...")
+    results = []
+
+    def _fn(progress):
+        for i in range(1, 4):
+            progress(i, 3)
+        return "done"
+
+    worker = run_worker(bar, "Loading...", _fn, on_success=results.append, on_failure=lambda _m: None, on_progress=True)
+    _run_until(worker.finished_ok)
+
+    assert results == ["done"]
+    assert bar.bar.value() == 100
+    assert bar.label.text() == "Loading... (3/3)"

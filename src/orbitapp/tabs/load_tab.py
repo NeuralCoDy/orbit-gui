@@ -223,7 +223,7 @@ class LoadTab(QWidget):
         self.worker = run_worker(
             self.busy_bar, f"Loading volumetric data from {path}...",
             load_volumetric_tiff_folder, path, mode, depth,
-            on_success=self._on_volumetric_loaded, on_failure=self._on_failed,
+            on_success=self._on_volumetric_loaded, on_failure=self._on_failed, on_progress=True,
         )
 
     def _on_volumetric_loaded(self, movie: np.ndarray) -> None:

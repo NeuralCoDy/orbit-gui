@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import warnings
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 from astropy.io import fits
@@ -99,7 +100,10 @@ def _load_full(path: Path) -> np.ndarray:
         return np.ascontiguousarray(hdul[0].data)
 
 
-def load_volumetric_tiff_folder(path: str | Path, mode: str, depth: int | None = None) -> np.ndarray:
+def load_volumetric_tiff_folder(
+    path: str | Path, mode: str, depth: int | None = None,
+    progress: Callable[[int, int], None] | None = None,
+) -> np.ndarray:
     """Loads every TIFF file in ``path`` (sorted by name) as a (T, L, W,
     D) volumetric movie. ``mode`` resolves the file-vs-volume ambiguity
     a folder has that a single 4D FITS file doesn't:
@@ -113,6 +117,12 @@ def load_volumetric_tiff_folder(path: str | Path, mode: str, depth: int | None =
     order, is one continuous stream of 2D slices -- every ``depth``
     consecutive slices become one volume, so ``depth`` is required and
     the total slice count must be an exact multiple of it.
+
+    Reading is dominated by per-file TIFF decompression (tens of
+    seconds a file on a large, heavily-compressed stack), done one file
+    at a time -- ``progress``, if given, is called ``(files_read,
+    total_files)`` after each file so a caller can show real progress
+    instead of guessing from elapsed time.
     """
     import tifffile
 
@@ -122,13 +132,15 @@ def load_volumetric_tiff_folder(path: str | Path, mode: str, depth: int | None =
         raise ValueError(f"No .tif/.tiff files found in {path}")
 
     stacks = []
-    for f in files:
+    for i, f in enumerate(files):
         stack = tifffile.imread(f)
         if stack.ndim == 2:
             stack = stack[None, ...]  # a single-page file is a 1-slice stack
         elif stack.ndim != 3:
             raise ValueError(f"Expected a 2D or 3D (page, H, W) TIFF stack, got shape {stack.shape} from {f}")
         stacks.append(stack)  # each (n_pages, L, W)
+        if progress is not None:
+            progress(i + 1, len(files))
 
     if mode == ONE_VOLUME_PER_STACK:
         shapes = {s.shape for s in stacks}
