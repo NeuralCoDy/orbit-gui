@@ -1022,9 +1022,28 @@ class ROIValidationTab(QWidget):
         self._ax_to_trans = {}
         self._trans_to_ax = {}
 
+        # This grid's pixel dimensions change with the cell's transient
+        # count, unlike every other canvas in this tab (sized once via
+        # figsize= and left to Qt's normal resize flow) -- so it's the
+        # only place that needs to explicitly resize the figure/canvas
+        # here. base_dpi backs out the figure's LOGICAL (devicePixelRatio
+        # == 1) dpi from its current (Qt-maintained) physical dpi, so a
+        # target size in logical pixels (cell_px, matching setFixedSize's
+        # own logical units) converts to inches correctly regardless of
+        # screen scaling. Do NOT call Figure.set_dpi() here instead (this
+        # used to): that overwrites the figure's dpi directly rather than
+        # through Figure._set_device_pixel_ratio, desyncing it from the
+        # canvas's actual physical backing store on a HiDPI/scaled
+        # display -- the visible symptom was stale, uninitialized pixels
+        # showing around the actually-drawn thumbnails whenever the grid
+        # needed to resize (e.g. switching to a cell with a different
+        # transient count, which is also why it only ever showed up
+        # "sometimes, when loading a new cell").
+        base_dpi = self.thumb_fig.dpi / (self.thumb_canvas.devicePixelRatioF() or 1)
+
         n_trans = ti["times"].shape[0]
         if n_trans == 0:
-            self.thumb_fig.set_size_inches(4, 3)
+            self.thumb_fig.set_size_inches(400 / base_dpi, 300 / base_dpi)
             self.thumb_canvas.setFixedSize(400, 300)
             ax = self.thumb_fig.add_subplot(111)
             ax.text(0.5, 0.5, "This ROI has no transients", ha="center", va="center", color="#61afef")
@@ -1037,9 +1056,7 @@ class ROIValidationTab(QWidget):
         n_rows = -(-n_trans // n_cols)
 
         cell_px = 150
-        dpi = 100
-        self.thumb_fig.set_dpi(dpi)
-        self.thumb_fig.set_size_inches(n_cols * cell_px / dpi, n_rows * cell_px / dpi)
+        self.thumb_fig.set_size_inches(n_cols * cell_px / base_dpi, n_rows * cell_px / base_dpi)
         self.thumb_canvas.setFixedSize(n_cols * cell_px, n_rows * cell_px)
 
         axes = self.thumb_fig.subplots(n_rows, n_cols, squeeze=False)
