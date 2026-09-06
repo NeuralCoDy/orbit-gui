@@ -331,7 +331,7 @@ def _section_source_extraction(step: PipelineStep, rois: list) -> str:
     count_line = (
         "; ".join(f"{_latex_escape(k)}: {v}" for k, v in counts.items()) if counts else "none committed yet"
     )
-    section = _section(step.label, prose, step.params, {})
+    section = _section(step.label, prose, step.params, step.metrics)
     return (
         section + "\n\n"
         r"\textbf{Committed ROIs so far (all Source Extraction commits combined):} " + count_line + "."

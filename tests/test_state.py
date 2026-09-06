@@ -121,12 +121,43 @@ def test_load_resets_rois():
     assert state.pipeline == ["Load"]
 
 
-def test_clear_rois_empties_committed_rois_but_keeps_pipeline_history():
+def test_clear_rois_empties_committed_rois_and_removes_their_pipeline_blocks():
     state = AppState()
     state.load("/some/movie.tif", np.zeros((4, 4, 5)))
     state.commit_rois([_make_roi(1, "correlation"), _make_roi(2, "correlation")], "Correlation ROIs")
+    state.commit_rois([_make_roi(3, "real_seudo")], "Real-SEUDO")
 
     state.clear_rois()
 
     assert state.rois == []
-    assert state.pipeline == ["Load", "Correlation ROIs"]  # history log, not current state
+    # Unlike every other stage's history (left as-is), the now-undone
+    # source-extraction blocks are removed -- they'd otherwise claim ROIs
+    # were committed that no longer exist anywhere in the session.
+    assert state.pipeline == ["Load"]
+    assert [s.stage for s in state.steps] == ["load"]
+
+
+def test_clear_rois_leaves_non_source_extraction_pipeline_history_alone():
+    state = AppState()
+    state.load("/some/movie.tif", np.zeros((4, 4, 5)))
+    state.commit(np.zeros((4, 4, 5)), "Motion Correction", stage="motion_correction")
+    state.commit_rois([_make_roi(1, "correlation")], "Correlation ROIs")
+
+    state.clear_rois()
+
+    assert state.pipeline == ["Load", "Motion Correction"]
+    assert [s.stage for s in state.steps] == ["load", "motion_correction"]
+
+
+def test_commit_rois_records_params_and_metrics():
+    state = AppState()
+    state.load("/some/movie.tif", np.zeros((4, 4, 5)))
+
+    state.commit_rois(
+        [_make_roi(1, "real_seudo")], "Real-SEUDO",
+        params={"sigma2": 0.002, "lambda_blob": 10.0}, metrics={"rois_committed": 1, "rois_deleted": 3},
+    )
+
+    step = state.steps[-1]
+    assert step.params == {"sigma2": 0.002, "lambda_blob": 10.0}
+    assert step.metrics == {"rois_committed": 1, "rois_deleted": 3}

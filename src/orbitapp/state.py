@@ -99,22 +99,36 @@ class AppState:
         self.pipeline.append(step_name)
         self.steps.append(PipelineStep(stage=stage, label=step_name, params=params or {}, metrics=metrics or {}))
 
-    def commit_rois(self, new_rois: list[ROI], step_name: str, params: dict | None = None) -> None:
+    def commit_rois(
+        self, new_rois: list[ROI], step_name: str, params: dict | None = None, metrics: dict | None = None,
+    ) -> None:
         """Adds newly-accepted ROIs to the committed set and records
         ``step_name`` in the pipeline -- parallel to commit(), but ROIs
         accumulate across multiple rounds/methods rather than replacing a
         single active movie (unlike commit(), which always replaces).
         ``params`` here is the batch method's own parameters (PCA-ICA/
         CNMF); correlation-based ROIs instead carry their own per-ROI
-        seed_loc/params, set directly on each ROI before it reaches here."""
+        seed_loc/params, set directly on each ROI before it reaches here.
+        ``metrics`` is this commit's own headline numbers (e.g. how many
+        of the run's candidates were committed vs. deleted before
+        commit) -- see SourceExtractionTab._finish_commit."""
         self.rois.extend(new_rois)
         self.pipeline.append(step_name)
-        self.steps.append(PipelineStep(stage="source_extraction", label=step_name, params=params or {}))
+        self.steps.append(
+            PipelineStep(stage="source_extraction", label=step_name, params=params or {}, metrics=metrics or {})
+        )
 
     def clear_rois(self) -> None:
         """Removes every committed ROI, undoing any number of prior
         commit_rois() calls -- lets Source Extraction be redone from
-        scratch without reloading the movie. The pipeline breadcrumb is
-        left as-is (a history log of what ran, not current state -- same
-        as every other stage's commits)."""
+        scratch without reloading the movie. Unlike every other stage's
+        commits (a history log of what ran, left as-is even after later
+        stages supersede their output), the source-extraction pipeline
+        breadcrumbs are removed here too: with every committed ROI gone,
+        those blocks would otherwise claim ROIs were produced/committed
+        that no longer exist anywhere in the session. self.pipeline is
+        always steps' own labels in order (see commit/commit_rois), so
+        rebuilding it from the filtered steps keeps both in sync."""
         self.rois = []
+        self.steps = [step for step in self.steps if step.stage != "source_extraction"]
+        self.pipeline = [step.label for step in self.steps]
