@@ -104,7 +104,9 @@ def test_one_volume_per_stack_reports_progress_per_file(tmp_path):
     _write_tiff_stacks(tmp_path, volumes)
 
     calls = []
-    load_volumetric_tiff_folder(tmp_path, ONE_VOLUME_PER_STACK, progress=lambda done, total: calls.append((done, total)))
+    load_volumetric_tiff_folder(
+        tmp_path, ONE_VOLUME_PER_STACK, progress_callback=lambda done, total: calls.append((done, total))
+    )
 
     assert calls == [(i, T) for i in range(1, T + 1)]
 

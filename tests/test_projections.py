@@ -4,8 +4,8 @@ import numpy as np
 import pytest
 
 import orbit._native as _native
+from orbit._blocks import _BLOCK_PIXELS
 from orbit.projections import (
-    _BLOCK_PIXELS,
     fano_factor_projection,
     fano_factor_projection_volumetric,
     local_correlation_projection,

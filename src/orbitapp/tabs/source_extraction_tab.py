@@ -33,6 +33,7 @@ overlap another's mask.
 from __future__ import annotations
 
 import functools
+from collections import Counter
 
 import numpy as np
 from PySide6.QtCore import Signal
@@ -152,21 +153,11 @@ class SourceExtractionTab(QWidget):
         self._corr_image: np.ndarray | None = None
         self._preview_roi: ROI | None = None  # grown but not yet added -- listed as "ROI -1"
         self._last_batch_run: tuple | None = None  # (id(movie), fn, sorted kwargs) of the last successful batch run
-        # source_method -> candidates produced since that method's last
-        # commit (summed across however many runs happened in between) --
-        # lets _finish_commit report how many of a run's candidates were
-        # actually committed vs. deleted/left pending, without needing to
-        # attribute individual candidates back to a specific run. Popped
-        # (not decremented) on commit, so leftover *uncommitted* candidates
-        # from an earlier round of the same method are folded back into
-        # "still pending" (n_remaining), never counted as deleted -- the
-        # one edge case this can undercount is that same method being run
-        # again and THEN committing those older leftovers together with
-        # the new run's candidates, since the older ones' own contribution
-        # to "produced" was already popped at the first commit. Always
-        # clamped to >= 0 either way (see _finish_commit), so the result
-        # is a safe underestimate in that case, never a misleading one.
-        self._produced_since_commit: dict[str, int] = {}
+        # source_method -> candidates produced by that method's runs
+        # since its last commit; popped there to derive rois_deleted
+        # (produced - committed - still-pending, clamped >= 0). See
+        # _finish_commit.
+        self._produced_since_commit: Counter[str] = Counter()
         self._pending_corr_params: dict = {}  # shared corr_kwargs for the in-flight seed-growing worker
         self._pending_batch_params: dict = {}  # kwargs for the in-flight PCA-ICA/CNMF/GraFT worker
 
@@ -671,12 +662,10 @@ class SourceExtractionTab(QWidget):
         self._preview_roi.id = self._next_id
         self._preview_roi.status = "pending"
         self._next_id += 1
-        self._candidates.append(self._preview_roi)
-        self._produced_since_commit["correlation"] = self._produced_since_commit.get("correlation", 0) + 1
-        self._preview_roi = None
+        roi, self._preview_roi = self._preview_roi, None
         self.add_roi_btn.setEnabled(False)
         self.review_panel.set_preview_roi(None)
-        self._refresh_candidates_display()
+        self._add_candidates([roi])
 
     def _clear_preview(self) -> None:
         self._preview_roi = None
@@ -1103,8 +1092,7 @@ class SourceExtractionTab(QWidget):
 
     def _add_candidates(self, new_rois: list[ROI]) -> None:
         self._candidates.extend(new_rois)
-        for roi in new_rois:
-            self._produced_since_commit[roi.source_method] = self._produced_since_commit.get(roi.source_method, 0) + 1
+        self._produced_since_commit.update(roi.source_method for roi in new_rois)
         self._refresh_candidates_display()
 
     def _on_roi_deleted(self, _roi_id: int) -> None:
@@ -1161,28 +1149,22 @@ class SourceExtractionTab(QWidget):
 
     def _finish_commit(self, accepted: list[ROI]) -> None:
         methods = {roi.source_method for roi in accepted}
-        single_method = accepted[0].source_method if len(methods) == 1 else None
-        label = _PIPELINE_LABELS[single_method] if single_method is not None else "Source Extraction"
-
-        # Only attributable when every accepted ROI came from the same
-        # method: a mixed commit has no single "the run"'s params/counts
-        # to report (matches label's own same simplification above).
-        # Every accepted ROI from one run shares that run's params dict
-        # (see _make_rois) -- accepted[0].params is representative unless
-        # the method was run more than once with different settings
-        # before this commit, in which case it's just one of them.
-        params = accepted[0].params if single_method is not None else None
-        metrics = None
-        if single_method is not None:
-            n_committed = len(accepted)
-            n_produced = self._produced_since_commit.pop(single_method, 0)
-            n_remaining = sum(
-                1 for roi in self._candidates if roi.source_method == single_method and roi.status != "accepted"
+        if len(methods) == 1:
+            method = methods.pop()
+            label = _PIPELINE_LABELS[method]
+            n_produced = self._produced_since_commit.pop(method, 0)
+            n_remaining = sum(r.source_method == method and r.status != "accepted" for r in self._candidates)
+            self.state.commit_rois(
+                accepted, label,
+                params=accepted[0].params,  # one run's shared params dict -- see _make_rois
+                metrics={
+                    "rois_committed": len(accepted),
+                    "rois_deleted": max(0, n_produced - len(accepted) - n_remaining),
+                },
             )
-            n_deleted = max(0, n_produced - n_committed - n_remaining)
-            metrics = {"rois_committed": n_committed, "rois_deleted": n_deleted}
-
-        self.state.commit_rois(accepted, label, params=params, metrics=metrics)
+        else:
+            label = "Source Extraction"  # mixed methods: no single run's params/counts to attribute
+            self.state.commit_rois(accepted, label)
 
         self._candidates = [roi for roi in self._candidates if roi.status != "accepted"]
         self._sync_candidates(f"Committed {len(accepted)} ROI(s) as pipeline step '{label}'.")
@@ -1210,7 +1192,7 @@ class SourceExtractionTab(QWidget):
         self._candidates = []
         self._clear_preview()
         self._next_id = 0
-        self._produced_since_commit = {}
+        self._produced_since_commit.clear()
         self.state.clear_rois()
         self.review_panel.set_candidates(self._candidates)
         self.status_label.setText("Cleared all candidate and committed ROIs.")

@@ -8,64 +8,35 @@ from __future__ import annotations
 
 import numpy as np
 
-from ._blocks import _MEDIAN_SLAB_BYTES, chunked_median, iter_axis_slices
+from ._blocks import _chunked_reduce, chunked_median
 from .projections import _half_sample_mode_1d, mode_projection
 
 _MAD_CONST = 0.6741891400433162  # matches robustSTD.m's exact constant
-_MEDIAN_BLOCK_PIXELS = 150  # cap on the chunked spatial axis -- see orbit._blocks.chunked_median
+
+
+def _block_mad(block: np.ndarray) -> np.ndarray:
+    """Median absolute deviation of ``block`` over axis 0 -- the two-pass
+    reduction _chunked_reduce runs per block (mutates ``block`` in place,
+    which _chunked_reduce hands it a private copy for)."""
+    block -= np.median(block, axis=0, keepdims=True)
+    np.abs(block, out=block)
+    return np.median(block, axis=0, overwrite_input=True)
 
 
 def robust_std(x: np.ndarray, axis: int | tuple[int, ...] | None = None, keepdims: bool = False) -> np.ndarray:
     """Median-absolute-deviation-based robust standard deviation.
 
-    A single non-None ``axis`` -- the per-pixel/per-voxel baseline case,
-    on a movie/volume that can be multi-GB -- is chunked (see
-    _chunked_robust_std). ``axis=None`` (one global scalar) or a
-    multi-axis tuple (e.g. orbit.denoising's per-subband
-    ``robust_std(coeffs, axis=(-2, -1))``, reducing a small wavelet
-    coefficient array over both its spatial axes at once) fall back to
-    the plain formula unchanged: an exact global/multi-axis median
-    needs every value in that reduction at once, so it can't be spatially
-    blocked the way a single-axis-at-a-time reduction can -- and neither
-    case here is ever movie-scale anyway (multi-axis calls are always on
-    one already-small wavelet subband, not a full movie)."""
+    A single ``int`` axis (the per-pixel/per-voxel baseline case, on a
+    movie/volume that can be multi-GB) is chunked. ``axis=None`` or a
+    multi-axis tuple (orbit.denoising's per-subband
+    ``robust_std(coeffs, axis=(-2, -1))``) fall back to the plain
+    formula -- neither is ever movie-scale, and a multi-axis median
+    can't be blocked one axis at a time anyway."""
     x = np.asarray(x, dtype=float)
     if isinstance(axis, int):
-        return _chunked_robust_std(x, axis, keepdims)
+        return _chunked_reduce(x, axis, _block_mad, keepdims, np.float64) / _MAD_CONST
     centered = x - np.median(x, axis=axis, keepdims=True)
     return np.median(np.abs(centered), axis=axis, keepdims=keepdims) / _MAD_CONST
-
-
-def _chunked_robust_std(x: np.ndarray, axis: int, keepdims: bool) -> np.ndarray:
-    """``robust_std(x, axis=axis, keepdims=keepdims)`` computed one
-    spatial block at a time. The two-pass MAD algorithm (median, then
-    median of abs deviations from it) would otherwise need a full
-    movie-sized ``x - median`` array between passes on top of
-    np.median's own internal partition copy -- each block instead runs
-    both passes on just its own slab, in place, before moving on, so
-    neither of those is ever materialized at full size."""
-    moved = np.moveaxis(x, axis, 0)  # reduction axis -> 0 (a view)
-    out = np.empty(moved.shape[1:], dtype=np.float64)
-    for sl in iter_axis_slices(moved.shape, 1, target_bytes=_MEDIAN_SLAB_BYTES, itemsize=8, max_step=_MEDIAN_BLOCK_PIXELS):
-        block = np.array(moved[:, sl], dtype=np.float64)  # own copy -- safe to overwrite in place
-        center = np.median(block, axis=0, keepdims=True)
-        block -= center
-        np.abs(block, out=block)
-        out[sl] = np.median(block, axis=0, overwrite_input=True)
-    out /= _MAD_CONST
-    return np.expand_dims(out, axis) if keepdims else out
-
-
-def _chunked_median_baseline(movie: np.ndarray, axis: int | None = None, keepdims: bool = False) -> np.ndarray:
-    """Drop-in for np.median in _CENTER_BASELINES/_NORM_BASELINES: a
-    real ``axis`` (the pixel-wise baseline case) routes through the one
-    shared chunked_median implementation instead of a plain np.median
-    call on the whole movie; ``axis=None`` (a single global scalar
-    baseline) falls back to plain np.median -- see robust_std's
-    docstring for why a global median can't be chunked the same way."""
-    if axis is None:
-        return np.median(movie)
-    return chunked_median(movie, axis=axis, keepdims=keepdims, max_block=_MEDIAN_BLOCK_PIXELS)
 
 
 def _mode_baseline(x: np.ndarray, axis: int | None = None, keepdims: bool = False) -> np.ndarray:
@@ -82,8 +53,8 @@ def _mode_baseline(x: np.ndarray, axis: int | None = None, keepdims: bool = Fals
     return result[:, :, None] if keepdims else result
 
 
-_CENTER_BASELINES = {"median": _chunked_median_baseline, "mean": np.mean, "min": np.min, "mode": _mode_baseline}
-_NORM_BASELINES = {"median": _chunked_median_baseline, "mean": np.mean, "max": np.max, "robuststd": robust_std}
+_CENTER_BASELINES = {"median": chunked_median, "mean": np.mean, "min": np.min, "mode": _mode_baseline}
+_NORM_BASELINES = {"median": chunked_median, "mean": np.mean, "max": np.max, "robuststd": robust_std}
 
 
 def _center_baseline(movie: np.ndarray, baseline_name: str, pixel_wise: bool) -> np.ndarray:

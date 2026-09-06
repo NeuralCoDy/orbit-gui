@@ -53,9 +53,9 @@ def test_run_worker_on_progress_wires_fn_callback_to_busy_bar():
     bar.start("Loading...")
     results = []
 
-    def _fn(progress):
+    def _fn(progress_callback):
         for i in range(1, 4):
-            progress(i, 3)
+            progress_callback(i, 3)
         return "done"
 
     worker = run_worker(bar, "Loading...", _fn, on_success=results.append, on_failure=lambda _m: None, on_progress=True)

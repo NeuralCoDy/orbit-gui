@@ -19,7 +19,6 @@ from ._blocks import chunked_median, iter_axis_slices
 from ._concurrency import available_cpu_count
 
 _DEFAULT_MAX_WORKERS = 4
-_MEDIAN_SLAB_BYTES = 256 * 1024 * 1024  # working-slab budget for _median_over_axis
 _SMOOTH_ENOUGH_PRIME = 53  # an axis whose length's largest prime factor is <= this FFTs fast enough without padding
 
 
@@ -69,20 +68,12 @@ def _resolve_max_workers(max_workers: int | None, bin_width: int, default: int =
 
 
 def _median_over_axis(arr: np.ndarray, axis: int) -> np.ndarray:
-    """``np.median(arr.astype(float32), axis=axis)``, computed one
-    spatial slab at a time -- a thin wrapper around
-    orbit._blocks.chunked_median (the one shared chunked-median
-    implementation; see that module's docstring) that keeps this
-    call site's two long-standing choices: always float32 output
-    (motion correction never needs more precision, even from an
-    integer/float64 input) and no hard pixel cap on top of the byte
-    budget (unlike orbit.projections' median_projection, a chunk here
-    can otherwise span thousands of pixels while safely staying under
-    ``_MEDIAN_SLAB_BYTES``, and capping it lower would just mean more,
-    smaller np.median calls for no memory benefit).
-
-    ``arr`` may be a raw (uint8/uint16) memmap and is never mutated."""
-    return chunked_median(arr, axis, out_dtype=np.float32, target_bytes=_MEDIAN_SLAB_BYTES)
+    """Chunked ``np.median(arr, axis=axis)`` -- float32 output (motion
+    correction never needs more), and ``max_block=None`` since only the
+    byte budget matters here (a chunk safely spanning thousands of
+    pixels is fine; capping it lower would just mean more np.median
+    calls for no memory benefit). ``arr`` is never mutated."""
+    return chunked_median(arr, axis, out_dtype=np.float32, max_block=None)
 
 
 def _as_float_working_copy(movie: np.ndarray) -> np.ndarray:

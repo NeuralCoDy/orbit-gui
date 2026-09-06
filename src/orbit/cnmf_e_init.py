@@ -51,7 +51,7 @@ def peak_to_noise_ratio_projection(movie: np.ndarray) -> np.ndarray:
     real calcium transient's peak sits many noise-std above its own
     quiescent baseline, unlike a purely noisy or slowly-drifting
     background pixel."""
-    peak = movie.max(axis=2) - chunked_median(movie, axis=2, max_block=150)
+    peak = movie.max(axis=2) - chunked_median(movie, axis=2)
     noise = noise_std_projection(movie)
     return peak / np.maximum(noise, 1e-6)
 

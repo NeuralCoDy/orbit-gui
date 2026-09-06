@@ -208,25 +208,13 @@ class ROIValidationTab(QWidget):
         self._right_scroll = QScrollArea()
         self._right_scroll.setWidget(self._right_widget)
         self._right_scroll.setWidgetResizable(True)
-        # No fixed cap here (unlike left_scroll's 350px, which fits the
-        # image-heavy left panel's content at any reasonable font size):
-        # this panel's content is almost entirely labels/spinboxes/combo
-        # boxes, whose sizeHint grows directly with the app's text-size
-        # setting. QScrollArea.sizeHint() only reflects the contained
-        # widget's sizeHint at the moment setWidget() is called, not on
-        # later changes (confirmed empirically: right_widget's own
-        # sizeHint/minimumWidth updated correctly on a font change, but
-        # right_scroll's own sizeHint/width didn't move at all) -- so
-        # with the horizontal scrollbar off, a widened right_widget was
-        # simply clipped by the still-unchanged viewport, with no
-        # scrollbar to reach the rest. _sync_right_panel_min_width
-        # explicitly re-widens right_scroll itself (not just
-        # right_widget) to match, so main_row's QHBoxLayout actually
-        # gives it the space -- the center panel (which already has its
-        # own zoom/pan for exactly this kind of "doesn't all fit"
-        # situation) absorbs the squeeze instead. Kept in sync with the
-        # live text-size slider via the FontChange event caught in
-        # eventFilter below.
+        # This panel is all labels/spinboxes/combos, so its sizeHint
+        # grows with the app's text size -- but QScrollArea.sizeHint()
+        # doesn't track its widget's sizeHint after setWidget(), so with
+        # no horizontal scrollbar a widened panel just gets clipped.
+        # _sync_right_panel_min_width pins the scroll area's own width to
+        # match, re-run on FontChange; the center panel (which has its
+        # own zoom/pan) absorbs the squeeze.
         self._right_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         main_row.addWidget(self._right_scroll, 0)
         self._right_widget.installEventFilter(self)
@@ -240,26 +228,19 @@ class ROIValidationTab(QWidget):
         QShortcut(QtCore.Qt.Key.Key_A, self, self._toggle_artifact_shortcut)
 
     def _sync_right_panel_min_width(self) -> None:
-        """Pins both the right sidebar and its scroll area to the
-        sidebar's own current sizeHint width -- see _build_ui's comment
-        on why both (not just right_widget) need it. Re-run on every
-        FontChange (see eventFilter) so the panel keeps tracking the
-        text-size slider live, not just at construction."""
+        """Widen the right scroll area (and its content widget) to the
+        panel's current sizeHint -- see _build_ui. Re-run on FontChange."""
         content_width = self._right_widget.sizeHint().width()
         self._right_widget.setMinimumWidth(content_width)
-        frame = self._right_scroll.frameWidth() * 2
         vbar = self._right_scroll.verticalScrollBar()
         scrollbar_width = vbar.sizeHint().width() if vbar.isVisible() else 0
-        self._right_scroll.setMinimumWidth(content_width + frame + scrollbar_width)
+        self._right_scroll.setMinimumWidth(content_width + self._right_scroll.frameWidth() * 2 + scrollbar_width)
 
     def eventFilter(self, watched, event) -> bool:
         if watched is self._right_widget and event.type() == QtCore.QEvent.Type.FontChange:
-            # Deferred: set_font_size_scale sets every reachable widget's
-            # font in one loop (see theme.py), so right_widget's own
-            # FontChange can fire before all of its children have
-            # actually picked up the new font -- reading sizeHint() right
-            # now would undercount. Queuing to the next event-loop pass
-            # lets that whole loop finish first.
+            # Deferred: set_font_size_scale sets every widget's font in one
+            # loop, so a child may not have its new font yet when this
+            # fires -- sizeHint() next tick reflects the whole panel.
             QtCore.QTimer.singleShot(0, self._sync_right_panel_min_width)
         return super().eventFilter(watched, event)
 
@@ -1060,35 +1041,29 @@ class ROIValidationTab(QWidget):
             return f"{metric['resRatios'][trans_idx]:0.3f}"
         return str(trans_idx + 1)
 
+    def _resize_thumb_canvas(self, width_px: int, height_px: int) -> None:
+        """Size the thumbnail canvas to ``width_px`` x ``height_px``
+        logical pixels. The grid's size changes with the cell's transient
+        count (unlike this tab's other canvases, sized once via figsize=),
+        so it's resized per draw. base_dpi is the figure's logical
+        (devicePixelRatio == 1) dpi; converting through it, then letting
+        setFixedSize's resize apply the real scaling, keeps the Agg
+        buffer in sync with the widget -- calling Figure.set_dpi()
+        instead bypasses Figure._set_device_pixel_ratio and leaves stale
+        pixels around the thumbnails on a HiDPI display."""
+        base_dpi = self.thumb_fig.dpi / (self.thumb_canvas.devicePixelRatioF() or 1)
+        self.thumb_fig.set_size_inches(width_px / base_dpi, height_px / base_dpi)
+        self.thumb_canvas.setFixedSize(width_px, height_px)
+
     def _draw_thumbnails(self) -> None:
         ti = self._cell_transient_info()
         self.thumb_fig.clf()
         self._ax_to_trans = {}
         self._trans_to_ax = {}
 
-        # This grid's pixel dimensions change with the cell's transient
-        # count, unlike every other canvas in this tab (sized once via
-        # figsize= and left to Qt's normal resize flow) -- so it's the
-        # only place that needs to explicitly resize the figure/canvas
-        # here. base_dpi backs out the figure's LOGICAL (devicePixelRatio
-        # == 1) dpi from its current (Qt-maintained) physical dpi, so a
-        # target size in logical pixels (cell_px, matching setFixedSize's
-        # own logical units) converts to inches correctly regardless of
-        # screen scaling. Do NOT call Figure.set_dpi() here instead (this
-        # used to): that overwrites the figure's dpi directly rather than
-        # through Figure._set_device_pixel_ratio, desyncing it from the
-        # canvas's actual physical backing store on a HiDPI/scaled
-        # display -- the visible symptom was stale, uninitialized pixels
-        # showing around the actually-drawn thumbnails whenever the grid
-        # needed to resize (e.g. switching to a cell with a different
-        # transient count, which is also why it only ever showed up
-        # "sometimes, when loading a new cell").
-        base_dpi = self.thumb_fig.dpi / (self.thumb_canvas.devicePixelRatioF() or 1)
-
         n_trans = ti["times"].shape[0]
         if n_trans == 0:
-            self.thumb_fig.set_size_inches(400 / base_dpi, 300 / base_dpi)
-            self.thumb_canvas.setFixedSize(400, 300)
+            self._resize_thumb_canvas(400, 300)
             ax = self.thumb_fig.add_subplot(111)
             ax.text(0.5, 0.5, "This ROI has no transients", ha="center", va="center", color="#61afef")
             ax.axis("off")
@@ -1100,8 +1075,7 @@ class ROIValidationTab(QWidget):
         n_rows = -(-n_trans // n_cols)
 
         cell_px = 150
-        self.thumb_fig.set_size_inches(n_cols * cell_px / base_dpi, n_rows * cell_px / base_dpi)
-        self.thumb_canvas.setFixedSize(n_cols * cell_px, n_rows * cell_px)
+        self._resize_thumb_canvas(n_cols * cell_px, n_rows * cell_px)
 
         axes = self.thumb_fig.subplots(n_rows, n_cols, squeeze=False)
         for i, ax in enumerate(axes.flat):

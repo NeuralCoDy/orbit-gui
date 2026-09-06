@@ -9,7 +9,17 @@ import numpy as np
 from . import _native
 from ._blocks import chunked_median, chunked_variance
 
-_BLOCK_PIXELS = 150  # cap on the chunked spatial axis -- see orbit._blocks.chunked_median/chunked_variance
+
+def _fano_ratio(mean: np.ndarray, var: np.ndarray) -> np.ndarray:
+    """``var / mean`` per pixel, 0 where mean <= 0 -- divides into
+    ``var`` in place (mutating it), since ``var / mean`` + ``np.where``
+    would each allocate another array the size of the output, a real
+    cost once that output is large (a volumetric projection's (L, W, D)
+    can be hundreds of millions of voxels)."""
+    with np.errstate(invalid="ignore", divide="ignore"):
+        np.divide(var, mean, out=var, where=mean > 0)
+    var[mean <= 0] = 0.0
+    return var
 
 
 def mean_projection(movie: np.ndarray) -> np.ndarray:
@@ -19,31 +29,17 @@ def mean_projection(movie: np.ndarray) -> np.ndarray:
 
 def median_projection(movie: np.ndarray) -> np.ndarray:
     """Per-pixel median across time -- robust to bright transients."""
-    return chunked_median(movie, axis=2, max_block=_BLOCK_PIXELS)
+    return chunked_median(movie, axis=2)
 
 
 def variance_projection(movie: np.ndarray) -> np.ndarray:
     """Per-pixel variance across time -- highlights active pixels."""
-    return chunked_variance(movie, axis=2, max_block=_BLOCK_PIXELS)
+    return chunked_variance(movie, axis=2)
 
 
 def fano_factor_projection(movie: np.ndarray) -> np.ndarray:
-    """Per-pixel Fano factor (variance / mean); zero-mean pixels -> 0.
-
-    The output here is one full (H, W) array per pixel statistic
-    (``mean``, ``var``) -- ordinary ``var / mean`` plus ``np.where``
-    would allocate two more full-size temporaries on top of those, a
-    real cost once (H, W) itself is large (a volumetric projection's
-    (L, W, D) output can be hundreds of millions of voxels). Dividing
-    into ``var``'s own buffer in place, then zeroing the non-positive-
-    mean positions, needs neither."""
-    mean = movie.mean(axis=2)
-    var = chunked_variance(movie, axis=2, max_block=_BLOCK_PIXELS)
-    positive = mean > 0
-    with np.errstate(invalid="ignore", divide="ignore"):
-        np.divide(var, mean, out=var, where=positive)
-    var[~positive] = 0.0
-    return var
+    """Per-pixel Fano factor (variance / mean); zero-mean pixels -> 0."""
+    return _fano_ratio(movie.mean(axis=2), variance_projection(movie))
 
 
 def _half_sample_mode_1d(x: np.ndarray) -> float:
@@ -116,29 +112,19 @@ def mean_projection_volumetric(movie: np.ndarray) -> np.ndarray:
 def median_projection_volumetric(movie: np.ndarray) -> np.ndarray:
     """Per-voxel median across time -- (T, L, W, D) -> (L, W, D). See
     mean_projection_volumetric."""
-    return chunked_median(movie, axis=0, max_block=_BLOCK_PIXELS)
+    return chunked_median(movie, axis=0)
 
 
 def variance_projection_volumetric(movie: np.ndarray) -> np.ndarray:
     """Per-voxel variance across time -- (T, L, W, D) -> (L, W, D). See
     mean_projection_volumetric."""
-    return chunked_variance(movie, axis=0, max_block=_BLOCK_PIXELS)
+    return chunked_variance(movie, axis=0)
 
 
 def fano_factor_projection_volumetric(movie: np.ndarray) -> np.ndarray:
     """Per-voxel Fano factor across time -- (T, L, W, D) -> (L, W, D).
-    See mean_projection_volumetric and fano_factor_projection's
-    docstring for why the combine step divides into ``var`` in place
-    rather than via ``var / mean`` + ``np.where`` -- (L, W, D) here can
-    be hundreds of millions of voxels on a real dataset, so each extra
-    full-size temporary is a real cost, not a rounding error."""
-    mean = movie.mean(axis=0)
-    var = chunked_variance(movie, axis=0, max_block=_BLOCK_PIXELS)
-    positive = mean > 0
-    with np.errstate(invalid="ignore", divide="ignore"):
-        np.divide(var, mean, out=var, where=positive)
-    var[~positive] = 0.0
-    return var
+    See mean_projection_volumetric."""
+    return _fano_ratio(movie.mean(axis=0), variance_projection_volumetric(movie))
 
 
 def mode_projection_volumetric(movie: np.ndarray) -> np.ndarray:

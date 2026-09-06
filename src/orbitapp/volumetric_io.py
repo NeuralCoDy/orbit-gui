@@ -102,7 +102,7 @@ def _load_full(path: Path) -> np.ndarray:
 
 def load_volumetric_tiff_folder(
     path: str | Path, mode: str, depth: int | None = None,
-    progress: Callable[[int, int], None] | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> np.ndarray:
     """Loads every TIFF file in ``path`` (sorted by name) as a (T, L, W,
     D) volumetric movie. ``mode`` resolves the file-vs-volume ambiguity
@@ -120,9 +120,8 @@ def load_volumetric_tiff_folder(
 
     Reading is dominated by per-file TIFF decompression (tens of
     seconds a file on a large, heavily-compressed stack), done one file
-    at a time -- ``progress``, if given, is called ``(files_read,
-    total_files)`` after each file so a caller can show real progress
-    instead of guessing from elapsed time.
+    at a time -- ``progress_callback``, if given, is called
+    ``(files_read, total_files)`` after each file.
     """
     import tifffile
 
@@ -139,8 +138,8 @@ def load_volumetric_tiff_folder(
         elif stack.ndim != 3:
             raise ValueError(f"Expected a 2D or 3D (page, H, W) TIFF stack, got shape {stack.shape} from {f}")
         stacks.append(stack)  # each (n_pages, L, W)
-        if progress is not None:
-            progress(i + 1, len(files))
+        if progress_callback is not None:
+            progress_callback(i + 1, len(files))
 
     if mode == ONE_VOLUME_PER_STACK:
         shapes = {s.shape for s in stacks}
