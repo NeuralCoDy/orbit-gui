@@ -40,6 +40,7 @@ class BusyBar(QWidget):
         layout.addWidget(self.bar)
 
         self._elapsed_ms = 0
+        self._base_message = ""
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
 
@@ -48,6 +49,7 @@ class BusyBar(QWidget):
         self.bar.setValue(0)
         self.bar.setVisible(True)
         self._elapsed_ms = 0
+        self._base_message = message
         self._timer.start(_TICK_MS)
 
     def set_message(self, message: str) -> None:
@@ -55,6 +57,18 @@ class BusyBar(QWidget):
         visibility/animation running -- for a multi-phase operation that
         should read as one continuous wait rather than restarting."""
         self.label.setText(message)
+        self._base_message = message
+
+    def set_progress(self, done: int, total: int) -> None:
+        """Switches the bar from the fake elapsed-time animation to a
+        real fraction, for callers that can actually count units of
+        work (e.g. "N of M files loaded") -- stops the timer so it
+        can't keep overwriting a real value with a guessed one."""
+        if total <= 0:
+            return
+        self._timer.stop()
+        self.bar.setValue(min(int(100 * done / total), 100))
+        self.label.setText(f"{self._base_message} ({done}/{total})")
 
     def _tick(self) -> None:
         self._elapsed_ms += _TICK_MS

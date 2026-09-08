@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSplitter,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -32,7 +33,7 @@ from .. import io as orbitapp_io
 from ..format import format_movie_summary
 from ..state import AppState
 from ..volumetric_io import load_volumetric_tiff_folder
-from ..widgets import BusyBar, VolumetricLoadDialog, confirm_recompute, show_movie_popout
+from ..widgets import BusyBar, VolumetricLoadDialog, VolumeView, confirm_recompute, show_movie_popout
 from ..workers import FunctionWorker, run_worker
 
 # (AppState field name, checkbox display label) -- field names must stay
@@ -109,10 +110,14 @@ class LoadTab(QWidget):
         sidebar_layout.addStretch()
 
         self.movie_view = MovieSliderWidget()
+        self.volume_view = VolumeView()  # shown instead of movie_view for volumetric data
+        self._view_stack = QStackedWidget()
+        self._view_stack.addWidget(self.movie_view)
+        self._view_stack.addWidget(self.volume_view)
 
         splitter = QSplitter()
         splitter.addWidget(sidebar)
-        splitter.addWidget(self.movie_view)
+        splitter.addWidget(self._view_stack)
         splitter.setSizes([260, 840])
 
         layout = QHBoxLayout(self)
@@ -174,6 +179,7 @@ class LoadTab(QWidget):
         # instead of forcing a full read of an otherwise-still-lazy movie.
         self.busy_bar.set_message(f"Rendering movie viewer for {path}...")
         QApplication.processEvents()
+        self._view_stack.setCurrentWidget(self.movie_view)
         self.movie_view.show_movie(orbitapp_io.preview_slice(movie))
 
         self.busy_bar.stop(f"Loaded {path}.")
@@ -217,7 +223,7 @@ class LoadTab(QWidget):
         self.worker = run_worker(
             self.busy_bar, f"Loading volumetric data from {path}...",
             load_volumetric_tiff_folder, path, mode, depth,
-            on_success=self._on_volumetric_loaded, on_failure=self._on_failed,
+            on_success=self._on_volumetric_loaded, on_failure=self._on_failed, on_progress=True,
         )
 
     def _on_volumetric_loaded(self, movie: np.ndarray) -> None:
@@ -225,14 +231,19 @@ class LoadTab(QWidget):
         self.state.load(path, movie)
         n_frames, length, width, depth = movie.shape
         self.info_label.setText(
-            f"Loaded volumetric folder: {path}\n"
+            f"Loaded volumetric: {path}\n"
             f"Volume size {length} x {width} x {depth} for {n_frames} time-steps\n"
-            "(no volumetric preview yet)"
+            "Showing the time-mean volume in 3D -- drag to rotate."
         )
+        self.busy_bar.set_message("Rendering 3D volume view...")
+        QApplication.processEvents()
+        self._view_stack.setCurrentWidget(self.volume_view)
+        self.volume_view.set_volume(movie)
+
         self.busy_bar.stop(f"Loaded {path}.")
         for btn in self._browse_buttons:
             btn.setEnabled(True)
-        self.view_movie_btn.setEnabled(False)  # no volumetric viewer yet -- this app's own 2D one can't show it
+        self.view_movie_btn.setEnabled(False)  # the 2D movie popout can't show a volume
         self.data_loaded.emit()
 
     def _on_failed(self, message: str) -> None:

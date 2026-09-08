@@ -7,6 +7,19 @@ from __future__ import annotations
 import numpy as np
 
 from . import _native
+from ._blocks import chunked_median, chunked_variance
+
+
+def _fano_ratio(mean: np.ndarray, var: np.ndarray) -> np.ndarray:
+    """``var / mean`` per pixel, 0 where mean <= 0 -- divides into
+    ``var`` in place (mutating it), since ``var / mean`` + ``np.where``
+    would each allocate another array the size of the output, a real
+    cost once that output is large (a volumetric projection's (L, W, D)
+    can be hundreds of millions of voxels)."""
+    with np.errstate(invalid="ignore", divide="ignore"):
+        np.divide(var, mean, out=var, where=mean > 0)
+    var[mean <= 0] = 0.0
+    return var
 
 
 def mean_projection(movie: np.ndarray) -> np.ndarray:
@@ -16,20 +29,17 @@ def mean_projection(movie: np.ndarray) -> np.ndarray:
 
 def median_projection(movie: np.ndarray) -> np.ndarray:
     """Per-pixel median across time -- robust to bright transients."""
-    return np.median(movie, axis=2)
+    return chunked_median(movie, axis=2)
 
 
 def variance_projection(movie: np.ndarray) -> np.ndarray:
     """Per-pixel variance across time -- highlights active pixels."""
-    return movie.var(axis=2)
+    return chunked_variance(movie, axis=2)
 
 
 def fano_factor_projection(movie: np.ndarray) -> np.ndarray:
     """Per-pixel Fano factor (variance / mean); zero-mean pixels -> 0."""
-    mean = movie.mean(axis=2)
-    var = movie.var(axis=2)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        return np.where(mean > 0, var / mean, 0.0)
+    return _fano_ratio(movie.mean(axis=2), variance_projection(movie))
 
 
 def _half_sample_mode_1d(x: np.ndarray) -> float:
@@ -88,6 +98,45 @@ def mode_projection(movie: np.ndarray) -> np.ndarray:
         return np.asarray(_native.half_sample_mode_native(movie))
 
     return np.apply_along_axis(_half_sample_mode_1d, 2, movie)
+
+
+def mean_projection_volumetric(movie: np.ndarray) -> np.ndarray:
+    """Per-voxel mean across time -- (T, L, W, D) -> (L, W, D). The
+    volumetric analog of mean_projection: the reduction is over the time
+    axis (axis 0), not a spatial one. Every 2D projection here has
+    ``axis=2`` baked in for the (H, W, T) convention, which on a
+    (T, L, W, D) volume would silently average over width instead."""
+    return movie.mean(axis=0)
+
+
+def median_projection_volumetric(movie: np.ndarray) -> np.ndarray:
+    """Per-voxel median across time -- (T, L, W, D) -> (L, W, D). See
+    mean_projection_volumetric."""
+    return chunked_median(movie, axis=0)
+
+
+def variance_projection_volumetric(movie: np.ndarray) -> np.ndarray:
+    """Per-voxel variance across time -- (T, L, W, D) -> (L, W, D). See
+    mean_projection_volumetric."""
+    return chunked_variance(movie, axis=0)
+
+
+def fano_factor_projection_volumetric(movie: np.ndarray) -> np.ndarray:
+    """Per-voxel Fano factor across time -- (T, L, W, D) -> (L, W, D).
+    See mean_projection_volumetric."""
+    return _fano_ratio(movie.mean(axis=0), variance_projection_volumetric(movie))
+
+
+def mode_projection_volumetric(movie: np.ndarray) -> np.ndarray:
+    """Per-voxel half-sample mode across time -- (T, L, W, D) -> (L, W, D).
+
+    mode_projection reduces its array's last axis, so the volume is laid
+    out as (L, W*D, T) for the call (time last, the two remaining
+    spatial axes merged -- the per-trace mode is independent per voxel,
+    so merging W and D is harmless) and the result reshaped back."""
+    T, L, W, D = movie.shape
+    as_traces = np.moveaxis(movie, 0, -1).reshape(L, W * D, T)
+    return mode_projection(as_traces).reshape(L, W, D)
 
 
 def local_correlation_projection(movie: np.ndarray) -> np.ndarray:

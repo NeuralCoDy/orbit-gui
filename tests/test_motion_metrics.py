@@ -1,5 +1,6 @@
 import numpy as np
 
+from orbit import motion_metrics
 from orbit.motion_metrics import (
     enhanced_correlation_coefficient,
     mean_correlation_to_reference,
@@ -70,6 +71,26 @@ def test_mean_correlation_to_reference_with_explicit_reference():
     score = mean_correlation_to_reference(movie, reference=reference)
 
     assert np.isclose(score, 1.0)
+
+
+def test_mean_correlation_to_reference_is_block_size_independent(monkeypatch):
+    # It sums per-frame correlations a frame-block at a time (see
+    # orbit._blocks); the result must not depend on how the frames are
+    # chunked. Compare the default (one block for this size) against a
+    # forced 4-frame block size.
+    rng = np.random.default_rng(11)
+    movie = (rng.standard_normal((12, 9, 40)) * 30 + 100).astype(np.float32)
+
+    whole = mean_correlation_to_reference(movie)
+
+    def _blocks_of_4(shape, axis, **_):
+        for start in range(0, shape[axis], 4):
+            yield slice(start, min(start + 4, shape[axis]))
+
+    monkeypatch.setattr(motion_metrics, "iter_axis_slices", _blocks_of_4)
+    chunked = mean_correlation_to_reference(movie)
+
+    assert np.isclose(whole, chunked, rtol=1e-6, atol=1e-8)
 
 
 def test_spatiotemporal_svd_shapes():

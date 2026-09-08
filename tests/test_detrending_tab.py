@@ -65,25 +65,63 @@ def test_on_data_loaded_plots_the_masked_average_when_a_mask_is_set():
     assert np.allclose(plotted, expected / expected[0])
 
 
-def test_params_dialog_has_percentile_and_window_rows():
+def test_params_dialog_has_percentile_window_and_exponential_rows():
+    # 2 percentile-method rows + 2 exponential-method rows -- see
+    # _update_visible_params for hiding whichever isn't the active method.
     _state, tab = _tab_with_loaded_movie()
-    assert tab.params_dialog.form.rowCount() == 2
+    assert tab.params_dialog.form.rowCount() == 4
+
+
+def test_method_combo_shows_only_the_selected_methods_param_rows():
+    _state, tab = _tab_with_loaded_movie()
+
+    tab.method_combo.setCurrentText("Running percentile")
+    assert tab.params_dialog.form.isRowVisible(tab.percentile_spin)
+    assert tab.params_dialog.form.isRowVisible(tab.window_spin)
+    assert not tab.params_dialog.form.isRowVisible(tab.delta_pos_sigma_spin)
+    assert not tab.params_dialog.form.isRowVisible(tab.delta_neg_sigma_spin)
+
+    tab.method_combo.setCurrentText("Exponential decay (Huber)")
+    assert not tab.params_dialog.form.isRowVisible(tab.percentile_spin)
+    assert not tab.params_dialog.form.isRowVisible(tab.window_spin)
+    assert tab.params_dialog.form.isRowVisible(tab.delta_pos_sigma_spin)
+    assert tab.params_dialog.form.isRowVisible(tab.delta_neg_sigma_spin)
 
 
 def test_current_fingerprint_reports_percentile_and_window():
     _state, tab = _tab_with_loaded_movie()
+    tab.method_combo.setCurrentText("Running percentile")
     tab.percentile_spin.setValue(15.0)
     tab.window_spin.setValue(75)
-    assert tab._current_fingerprint() == {"percentile": 15.0, "window": 75}
+    assert tab._current_fingerprint() == {"method": "percentile", "percentile": 15.0, "window": 75}
+
+
+def test_current_fingerprint_reports_exponential_params():
+    _state, tab = _tab_with_loaded_movie()
+    tab.method_combo.setCurrentText("Exponential decay (Huber)")
+    tab.delta_pos_sigma_spin.setValue(2.0)
+    tab.delta_neg_sigma_spin.setValue(5.0)
+    assert tab._current_fingerprint() == {"method": "exponential", "delta_pos_sigma": 2.0, "delta_neg_sigma": 5.0}
 
 
 def test_restore_params_sets_widgets_from_a_saved_fingerprint():
     _state, tab = _tab_with_loaded_movie()
-    saved = {"percentile": 20.0, "window": 100}
+    saved = {"method": "percentile", "percentile": 20.0, "window": 100}
 
     tab.restore_params(saved)
 
     assert tab._current_fingerprint() == saved
+    assert tab.method_combo.currentText() == "Running percentile"
+
+
+def test_restore_params_round_trips_the_exponential_method():
+    _state, tab = _tab_with_loaded_movie()
+    saved = {"method": "exponential", "delta_pos_sigma": 1.5, "delta_neg_sigma": 4.0}
+
+    tab.restore_params(saved)
+
+    assert tab._current_fingerprint() == saved
+    assert tab.method_combo.currentText() == "Exponential decay (Huber)"
 
 
 def test_restore_params_tolerates_missing_keys():
@@ -143,6 +181,99 @@ def test_commit_updates_active_data_and_pipeline():
     corrected_trace = np.asarray(corrected).mean(axis=(0, 1))
     raw_drop = raw_trace[0] - raw_trace[-1]
     corrected_drop = abs(corrected_trace[-30:].mean() - corrected_trace[:30].mean())
+    assert corrected_drop < raw_drop * 0.2
+
+
+def _exponentially_drifting_movie(height=10, width=10, n_frames=600, seed=0):
+    rng = np.random.default_rng(seed)
+    t = np.arange(n_frames, dtype=np.float64)
+    # A true exponential decaying toward (near) zero, not _drifting_movie's
+    # linear ramp -- timescale scaled to n_frames (b = n_frames/4, decaying
+    # to ~e^-4 =~ 2% by the end) rather than a fixed b, since a fixed short
+    # b against a much longer trace clips to the floor below for most of
+    # the recording, corrupting fit_exponential_trend's own initial-guess
+    # regression (see that function's own docstring for the real failure
+    # this reproduced with n_frames=8000, b=150 fixed).
+    decay = np.exp(-t / (n_frames / 4.0))
+    movie = (1.0 + rng.standard_normal((height, width, n_frames)) * 0.01) * decay[None, None, :]
+    return np.clip(movie, 1e-4, None)
+
+
+def test_apply_produces_a_candidate_and_plots_trace_and_trend_exponential_method():
+    movie = _exponentially_drifting_movie()
+    _state, tab = _tab_with_loaded_movie(movie)
+    tab.method_combo.setCurrentText("Exponential decay (Huber)")
+
+    tab._apply()
+    _wait(tab)
+
+    assert tab.commit_controls.commit_btn.isEnabled()
+    result = tab._pending_result
+    assert result["corrected"].shape == movie.shape
+    assert result["trace"].shape == (movie.shape[-1],)
+    assert result["trend"].shape == (movie.shape[-1],)
+    assert result["a"] > 0
+    assert result["b"] > 0
+
+    items = tab.trace_plot.listDataItems()
+    assert len(items) == 2  # raw + trend
+    legend = tab.trace_plot.plotItem.legend
+    assert legend is not None
+    labels = {item[1].text for item in legend.items}
+    assert any(label.startswith("Trend (exponential decay:") for label in labels)
+
+
+def test_commit_updates_active_data_and_pipeline_exponential_method():
+    movie = _exponentially_drifting_movie()
+    state, tab = _tab_with_loaded_movie(movie)
+    tab.method_combo.setCurrentText("Exponential decay (Huber)")
+
+    tab._apply()
+    _wait(tab)
+    tab._commit()
+
+    assert len(state.pipeline) == 2
+    assert state.pipeline[1].startswith("Detrend (exponential decay,")
+    corrected = state.active_data()
+    assert corrected.shape == movie.shape
+    assert corrected is not movie
+
+    raw_trace = movie.mean(axis=(0, 1))
+    corrected_trace = np.asarray(corrected).mean(axis=(0, 1))
+    raw_drop = raw_trace[0] - raw_trace[-1]
+    corrected_drop = abs(corrected_trace[-30:].mean() - corrected_trace[:30].mean())
+    assert corrected_drop < raw_drop * 0.2
+
+
+def test_commit_of_a_memmap_movie_covers_the_whole_movie_exponential_method(tmp_path):
+    movie = _exponentially_drifting_movie(height=8, width=8, n_frames=8000).astype(np.float32)
+    path = tmp_path / "movie.npy"
+    np.save(path, movie)
+    mmap_movie = load_movie(path, mmap=True)
+
+    state = AppState()
+    state.load(str(path), mmap_movie)
+    tab = DetrendingTab(state)
+    tab.on_data_loaded()
+    tab._chunk_frames = 1000
+    tab.method_combo.setCurrentText("Exponential decay (Huber)")
+
+    tab._apply()
+    _wait(tab)
+    assert tab._pending_result["corrected"].shape[-1] == 5000  # capped preview
+
+    tab._commit()
+    _wait(tab)
+
+    committed = state.active_data()
+    assert is_memmap(committed)
+    assert committed.shape == mmap_movie.shape  # the WHOLE movie, not just the 5000-frame preview
+    assert np.all(np.isfinite(np.asarray(committed)))
+
+    committed_trace = np.asarray(committed).mean(axis=(0, 1))
+    raw_trace = movie.mean(axis=(0, 1))
+    raw_drop = raw_trace[0] - raw_trace[-1]
+    corrected_drop = abs(committed_trace[-200:].mean() - committed_trace[:200].mean())
     assert corrected_drop < raw_drop * 0.2
 
 

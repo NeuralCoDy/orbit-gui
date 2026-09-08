@@ -17,6 +17,7 @@ import numpy as np
 import pywt
 from scipy.ndimage import gaussian_filter, median_filter
 
+from ._blocks import iter_axis_slices
 from .ljung_box import ljung_box_test_movie
 from .normalization import robust_std
 
@@ -116,10 +117,22 @@ def residual_energy_fraction(before: np.ndarray, after: np.ndarray) -> float:
     ||before - after||^2 / ||before||^2. Higher means more of the
     original signal was treated as noise and subtracted -- a value so
     high it looks implausible for genuine noise is a sign real signal is
-    being removed, not just noise."""
-    residual = before.astype(np.float64) - after.astype(np.float64)
-    denom = np.sum(before.astype(np.float64) ** 2)
-    return float(np.sum(residual**2) / denom) if denom > 0 else 0.0
+    being removed, not just noise.
+
+    Both sums are accumulated block-wise along the first axis (see
+    orbit._blocks): a large (volumetric) movie never holds a whole-array
+    float64 copy of ``before``, ``after``, or their difference at once,
+    only one block, though the running totals stay full-width float64."""
+    before = np.asarray(before)
+    after = np.asarray(after)
+    resid_energy = 0.0
+    ref_energy = 0.0
+    for s in iter_axis_slices(before.shape, axis=0):
+        b = before[s].astype(np.float64)
+        a = after[s].astype(np.float64)
+        resid_energy += float(np.sum((b - a) ** 2))
+        ref_energy += float(np.sum(b**2))
+    return resid_energy / ref_energy if ref_energy > 0 else 0.0
 
 
 def residual_autocorrelation_failures(before: np.ndarray, after: np.ndarray, n_exclude: int = 0) -> tuple[int, int]:

@@ -156,23 +156,29 @@ def test_motion_correct_rejects_unknown_method():
 
 def test_rigid_motion_correct_output_param_matches_default_in_ram_path():
     # output= (used for a memmap movie's chunked Commit) must produce
-    # numerically identical results to the normal in-RAM path -- it's a
-    # where-results-are-written change, not an algorithm change.
+    # the same results as the normal in-RAM path -- it's a
+    # where-results-are-written change, not an algorithm change. Tolerance
+    # is float32-scale, not exact: registration works in float32 (see
+    # _as_float_working_copy), and the two paths round intermediates
+    # slightly differently (the default path registers off its own
+    # float32 working copy, the output= path reads each frame fresh from
+    # the caller's array), so they agree to float32 precision, not bit
+    # for bit.
     rng = np.random.default_rng(5)
     movie = gaussian_filter(rng.standard_normal((16, 16, 25)), (2, 2, 0))
 
     reg_default, shifts_default, tmpl_default, init_default = rigid_motion_correct(
         movie, bin_width=7, n_iter=2, upsample_factor=10, init_batch=10
     )
-    output = np.zeros_like(movie)
+    output = np.zeros((*movie.shape[:2], movie.shape[2]), dtype=np.float32)  # matches the real FITS memmap sink
     reg_output, shifts_output, tmpl_output, init_output = rigid_motion_correct(
         movie, bin_width=7, n_iter=2, upsample_factor=10, init_batch=10, output=output
     )
 
     assert reg_output is output
-    np.testing.assert_allclose(reg_default, reg_output)
-    np.testing.assert_allclose(shifts_default, shifts_output)
-    np.testing.assert_allclose(tmpl_default, tmpl_output)
+    np.testing.assert_allclose(reg_default, reg_output, rtol=1e-4, atol=1e-5)
+    np.testing.assert_allclose(shifts_default, shifts_output, rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(tmpl_default, tmpl_output, rtol=1e-4, atol=1e-5)
     np.testing.assert_array_equal(init_default, init_output)
 
 
@@ -183,16 +189,17 @@ def test_patch_motion_correct_output_param_matches_default_in_ram_path():
     reg_default, sf_default, tmpl_default, init_default = patch_motion_correct(
         movie, grid_size=8, bin_width=7, n_iter=1, upsample_factor=10, init_batch=10, min_patch_contrast=0
     )
-    output = np.zeros_like(movie)
+    output = np.zeros((*movie.shape[:2], movie.shape[2]), dtype=np.float32)  # matches the real FITS memmap sink
     reg_output, sf_output, tmpl_output, init_output = patch_motion_correct(
         movie, grid_size=8, bin_width=7, n_iter=1, upsample_factor=10, init_batch=10, min_patch_contrast=0,
         output=output,
     )
 
     assert reg_output is output
-    np.testing.assert_allclose(reg_default, reg_output)
-    np.testing.assert_allclose(sf_default, sf_output)
-    np.testing.assert_allclose(tmpl_default, tmpl_output)
+    # float32-scale, not exact -- see test_rigid_motion_correct_output_param_matches_default_in_ram_path.
+    np.testing.assert_allclose(reg_default, reg_output, rtol=1e-4, atol=1e-5)
+    np.testing.assert_allclose(sf_default, sf_output, rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(tmpl_default, tmpl_output, rtol=1e-4, atol=1e-5)
     np.testing.assert_array_equal(init_default, init_output)
 
 

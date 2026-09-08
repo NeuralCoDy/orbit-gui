@@ -261,6 +261,31 @@ def test_residual_movie_is_playable_after_apply():
     assert tab.panel._players["residual"].windowTitle() == "Movie Player - Play Residual Movie"
 
 
+def test_depth_projected_residual_3d_matches_whole_volume_projection_regardless_of_block_size(monkeypatch):
+    # The volumetric residual is streamed a frame-block at a time to keep
+    # peak memory bounded (see orbit._blocks); it must still equal
+    # depth_project(movie - denoised) computed in one shot -- verified
+    # here with a forced 3-frame block size so several blocks run.
+    from orbit._volumetric import depth_project
+    from orbitapp.tabs import denoising_tab
+
+    def _tiny_blocks(shape, axis, **_):
+        for start in range(0, shape[axis], 3):
+            yield slice(start, min(start + 3, shape[axis]))
+
+    monkeypatch.setattr(denoising_tab, "iter_axis_slices", _tiny_blocks)
+
+    rng = np.random.default_rng(1)
+    movie = (rng.standard_normal((17, 5, 6, 4)) * 200 + 500).astype(np.float32)  # (T, L, W, D)
+    denoised = (movie * 0.85).astype(np.float32)
+
+    got = denoising_tab._depth_projected_residual_3d(movie, denoised)
+    expected = depth_project(movie.astype(np.float64) - denoised.astype(np.float64))
+
+    assert got.shape == (5, 6, 17)
+    np.testing.assert_allclose(got, expected, rtol=1e-6, atol=1e-4)
+
+
 def test_ljung_box_n_exclude_matches_each_algorithms_own_reach():
     from orbitapp.tabs.denoising_tab import _ljung_box_n_exclude
 

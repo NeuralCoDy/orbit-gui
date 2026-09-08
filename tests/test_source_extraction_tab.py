@@ -367,6 +367,49 @@ def test_commit_moves_only_accepted_rois_into_state_and_accumulates():
     assert len(state.rois) == 2
 
 
+def test_commit_records_the_run_s_params_and_a_deleted_count_metric():
+    state = AppState()
+    movie = _synthetic_movie()
+    state.load("movie.tif", movie)
+    tab = SourceExtractionTab(state)
+    tab.on_data_loaded()
+    _wait_for_worker(tab)
+
+    tab._grow_from_seeds(movie, [(7, 7), (22, 22)])
+    _wait_for_worker(tab)
+    assert len(tab._candidates) == 2
+
+    tab._candidates[0].status = "accepted"
+    del tab._candidates[1]  # simulates the review panel's Delete Selected/Delete All Rejected
+
+    tab._commit()
+
+    step = state.steps[-1]
+    assert step.label == "Correlation ROIs"
+    assert step.params  # the run's own correlation params, not empty
+    assert step.metrics == {"rois_committed": 1, "rois_deleted": 1}
+
+
+def test_commit_does_not_count_a_still_pending_candidate_as_deleted():
+    state = AppState()
+    movie = _synthetic_movie()
+    state.load("movie.tif", movie)
+    tab = SourceExtractionTab(state)
+    tab.on_data_loaded()
+    _wait_for_worker(tab)
+
+    tab._grow_from_seeds(movie, [(7, 7), (22, 22)])
+    _wait_for_worker(tab)
+    tab._candidates[0].status = "accepted"
+    # tab._candidates[1] stays "pending" -- left for later review, not deleted
+
+    tab._commit()
+
+    step = state.steps[-1]
+    assert step.metrics == {"rois_committed": 1, "rois_deleted": 0}
+    assert len(tab._candidates) == 1  # the pending one is still around
+
+
 def test_clicking_grows_a_preview_but_does_not_add_it_to_the_collection():
     state = AppState()
     movie = _synthetic_movie()
@@ -816,7 +859,9 @@ def test_clear_all_wipes_pending_candidates_and_committed_rois_when_confirmed(mo
 
     assert tab._candidates == []
     assert state.rois == []
-    assert state.pipeline == ["Load", "Correlation ROIs"]  # history log untouched
+    # unlike other stages' history, the undone source-extraction block is
+    # removed too -- it no longer has any committed ROIs to describe
+    assert state.pipeline == ["Load"]
     assert changed == [1]
     assert tab._next_id == 0
 

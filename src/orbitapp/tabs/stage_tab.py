@@ -68,8 +68,6 @@ import numpy as np
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QMessageBox, QVBoxLayout, QWidget
 
-from orbit._volumetric import depth_project
-
 from ..io import is_memmap, preview_slice
 from ..state import AppState
 from ..volumetric_io import preview_slice_volumetric
@@ -86,6 +84,12 @@ class StageTab(QWidget):
     _stage_key = "stage"  # lowercase identifier recorded in AppState.steps / session_io.py
     _chunk_frames = 500  # time-chunk size for a memmap input's chunked Commit
     _supports_volumetric = False  # set True by subclasses with a real *_volumetric implementation (see below)
+    # Voxel budget for a volumetric Apply preview. Registration converts
+    # the preview to float32 (4x for uint8) and holds gigabyte-scale FFT
+    # buffers per volume, so the whole-volume-set preview a per-timepoint
+    # cap would allow is not survivable -- ~2e9 voxels keeps the working
+    # set to tens of GB. Commit still runs the full movie, chunked.
+    _volumetric_preview_max_voxels = 2_000_000_000
 
     def __init__(
         self,
@@ -169,7 +173,10 @@ class StageTab(QWidget):
         self._pending_result = None
         self._pending_step_label = None
         self._last_run = None  # a new/changed movie invalidates any prior "already run" state
+        self._clear_stale_candidate()
         self._on_data_reset()
+        if hasattr(self.panel, "set_volumetric"):
+            self.panel.set_volumetric(False)
         if movie is not None:
             self._show_before_preview(movie)
             self.status_label.setText(f"Ready. shape={movie.shape}")
@@ -182,24 +189,53 @@ class StageTab(QWidget):
         self._pending_result = None
         self._pending_step_label = None
         self._last_run = None
+        self._clear_stale_candidate()
         self._on_data_reset()
+        if hasattr(self.panel, "set_volumetric"):
+            self.panel.set_volumetric(True)
         if movie is not None:
             self._show_before_preview_volumetric(movie)
             self.status_label.setText(f"Ready. shape={movie.shape} (volumetric)")
 
+    def _clear_stale_candidate(self) -> None:
+        """Drops references to this tab's own last Apply candidate:
+        ``self._input_movie`` (already cleared by _finish_commit on a
+        successful commit, but also needed here for an ABANDONED
+        candidate -- Applied but never Committed before some OTHER tab's
+        commit made it moot) and the panel's "after" movie (kept alive so
+        its own Play Movie button stays usable right after Apply/Commit,
+        only released once the pipeline has genuinely moved past this tab
+        -- i.e. exactly when on_data_loaded fires due to a DIFFERENT
+        tab's commit, since data_changed only wires to every OTHER tab's
+        on_data_loaded, not this one's own).
+
+        Without this, every StageTab-derived tab keeps two full-size
+        movie-shaped arrays alive for the rest of the app's lifetime once
+        Apply has been clicked on it even once -- confirmed via a real
+        5-stage pipeline run (Motion Correction -> Mask -> Denoising ->
+        Normalization -> Detrending) on the real default dataset: ~9.4GB
+        of pure waste on top of a single ~1GB movie, since none of those
+        stale _input_movie/after references were the current active
+        dataset by the time the pipeline had moved on.
+
+        self.panel might not support movies at all (e.g. Detrending's
+        single-trace-plot panel -- see _build_panel), so this is guarded
+        rather than assuming every subclass's panel is a StagePanel."""
+        self._input_movie = None
+        if hasattr(self.panel, "set_after_movie"):
+            self.panel.set_after_movie(None)
+        if hasattr(self.panel, "set_after_volume"):
+            self.panel.set_after_volume(None)
+
     def _show_before_preview_volumetric(self, movie: np.ndarray) -> None:
-        """Volumetric counterpart of _show_before_preview -- the
-        before-preview defaults to a depth projection of the (T, L, W, D)
-        volume (see orbit._volumetric.depth_project), since self.panel's
-        images are inherently 2D. Default assumes self.panel is a
-        StagePanel, same caveat as _show_before_preview; override
-        alongside _build_panel/_show_before_preview for a stage whose
-        main figure isn't a pair of images (see DetrendingTab, whose
-        volumetric preview is a 1D per-volume trace, not an image at
-        all -- no depth projection needed there)."""
-        projected = depth_project(preview_slice_volumetric(movie))
-        self.panel.before_view.setImage(projected.mean(axis=2))
-        self.panel.set_before_movie(projected)
+        """Volumetric counterpart of _show_before_preview -- shows the
+        (T, L, W, D) volume's time-mean in the StagePanel's 3D VolumeView
+        (see StagePanel.set_volumetric). Default assumes self.panel is a
+        StagePanel; override alongside _build_panel/_show_before_preview
+        for a stage whose main figure isn't a pair of images (see
+        DetrendingTab, whose volumetric preview is a 1D per-volume trace,
+        not an image at all)."""
+        self.panel.set_before_volume(preview_slice_volumetric(movie))
 
     def _current_fingerprint(self) -> dict:
         """Named snapshot of every widget value that affects the
@@ -285,7 +321,13 @@ class StageTab(QWidget):
         self._input_movie = movie
         self.commit_controls.set_apply_enabled(False)
         self.commit_controls.set_commit_enabled(False)
-        self._start_worker_volumetric(preview_slice_volumetric(movie))
+        preview = preview_slice_volumetric(movie, max_voxels=self._volumetric_preview_max_voxels)
+        if preview.shape[0] < movie.shape[0]:
+            self.status_label.setText(
+                f"Preview: first {preview.shape[0]} of {movie.shape[0]} timepoints "
+                "(Commit runs the whole movie, chunked)."
+            )
+        self._start_worker_volumetric(preview)
 
     def _render_result(self, result: dict) -> None:
         """Updates the panel images/movies and self.metrics_label (plus
@@ -358,6 +400,15 @@ class StageTab(QWidget):
         self.state.commit(
             data, self._pending_step_label, stage=self._stage_key, params=self._pending_params, metrics=metrics,
         )
+        # _input_movie was only ever needed as _start_chunked_commit's
+        # source (see its own docstring) -- nothing reads it again after
+        # a successful commit until the next Apply overwrites it.
+        # Dropped here immediately rather than waiting for some LATER
+        # tab's own commit to eventually trigger this tab's own
+        # on_data_loaded/_clear_stale_candidate -- see that method's
+        # docstring for the full picture (this is the half of it that
+        # doesn't need to wait for a cross-tab signal).
+        self._input_movie = None
         self.status_label.setText(f"Committed as pipeline step '{self._pending_step_label}'.")
         self.commit_controls.set_commit_enabled(False)
         self.data_changed.emit()

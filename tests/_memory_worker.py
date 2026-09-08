@@ -17,14 +17,64 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import numpy as np  # noqa: E402
 
 
-def _make_movie(height: int, width: int, n_frames: int, dtype: str) -> np.ndarray:
+def _random(shape: tuple[int, ...], dtype: str) -> np.ndarray:
     rng = np.random.default_rng(0)
     if np.issubdtype(np.dtype(dtype), np.integer):
-        return rng.integers(0, 4000, size=(height, width, n_frames), dtype=dtype)
-    return (rng.standard_normal((height, width, n_frames)).astype(dtype) * 100 + 500)
+        high = min(4000, int(np.iinfo(np.dtype(dtype)).max))
+        return rng.integers(0, high, size=shape, dtype=dtype)
+    return rng.standard_normal(shape).astype(dtype) * 100 + 500
 
 
-def _run(stage: str, height: int, width: int, n_frames: int, dtype: str) -> None:
+def _make_movie(height: int, width: int, n_frames: int, dtype: str) -> np.ndarray:
+    return _random((height, width, n_frames), dtype)
+
+
+def _make_volume(n_frames: int, length: int, width: int, depth: int, dtype: str) -> np.ndarray:
+    return _random((n_frames, length, width, depth), dtype)
+
+
+def _run(stage: str, height: int, width: int, n_frames: int, dtype: str, n_stages: int = 5) -> None:
+    if stage == "motion_rigid_3d":
+        # Whole-volume 3D rigid registration on a (T, L, W, D) movie --
+        # like "motion_rigid" but for volumetric data, which OOM-crashed
+        # a real session. The trailing arg (n_stages' slot) is the depth
+        # D here. init_batch is capped as MotionCorrectionTab does it, so
+        # the bootstrap median doesn't scan the whole set.
+        from orbit.motion_correction_3d import rigid_motion_correct_3d
+
+        volume = _make_volume(n_frames, height, width, n_stages, dtype)
+        rigid_motion_correct_3d(volume, bin_width=200, n_iter=1, init_batch=min(n_frames, 30))
+        return
+
+    _PROJECTIONS_3D = {
+        "proj_mean_3d": "mean_projection_volumetric",
+        "proj_median_3d": "median_projection_volumetric",
+        "proj_variance_3d": "variance_projection_volumetric",
+        "proj_fano_3d": "fano_factor_projection_volumetric",
+        "proj_mode_3d": "mode_projection_volumetric",
+    }
+    if stage in _PROJECTIONS_3D:
+        import orbit.projections as projections
+
+        volume = _make_volume(n_frames, height, width, n_stages, dtype)
+        getattr(projections, _PROJECTIONS_3D[stage])(volume)
+        return
+
+    _PROJECTIONS_2D = {
+        "proj_mean": "mean_projection",
+        "proj_median": "median_projection",
+        "proj_variance": "variance_projection",
+        "proj_fano": "fano_factor_projection",
+        "proj_local_corr": "local_correlation_projection",
+        "proj_mode": "mode_projection",
+    }
+    if stage in _PROJECTIONS_2D:
+        import orbit.projections as projections
+
+        movie = _make_movie(height, width, n_frames, dtype)
+        getattr(projections, _PROJECTIONS_2D[stage])(movie)
+        return
+
     movie = _make_movie(height, width, n_frames, dtype)
 
     if stage == "motion_rigid":
@@ -61,18 +111,97 @@ def _run(stage: str, height: int, width: int, n_frames: int, dtype: str) -> None
         patch_cnmf_source_extraction(
             movie.astype(np.float64), patch_size=(80, 80), overlap=20, n_components_per_patch=6, n_iterations=1
         )
+    elif stage == "graft":
+        from orbit.roi_extraction_graft import graft_source_extraction
+
+        graft_source_extraction(movie.astype(np.float64), n_dict=10)
     elif stage == "patch_graft":
         from orbit.roi_extraction_graft import patch_graft_source_extraction
 
         patch_graft_source_extraction(
             movie.astype(np.float64), patch_size=(80, 80), overlap=(20, 20), n_dict_per_patch=6,
         )
+    elif stage == "gui_pipeline":
+        _run_gui_pipeline(movie, n_stages)
+    elif stage == "patchwarp":
+        from orbit.patchwarp import patchwarp_motion_correct
+
+        patchwarp_motion_correct(movie.astype(np.float64), grid_size=2, ecc_iterations=20, max_workers=4)
     else:
         raise ValueError(f"unknown stage: {stage!r}")
 
 
+def _run_gui_pipeline(movie: np.ndarray, n_stages: int) -> None:
+    """Drives ``n_stages`` real StageTab commits in sequence (Motion
+    Correction -> Mask -> Denoising -> Normalization -> Detrending) --
+    the GUI layer's own equivalent of the raw-algorithm stages above,
+    catching a regression in StageTab/FunctionWorker's own reference-
+    holding (self._input_movie, the panel's "after" movie,
+    FunctionWorker.args/kwargs) rather than anything about a single
+    algorithm's own internal memory use (already covered above). See
+    StageTab._clear_stale_candidate's and FunctionWorker's own docstrings
+    for the bug this guards against: before those existed, every
+    StageTab-derived tab kept its own full-size input/candidate movie
+    alive for the rest of the app's lifetime once Apply had been clicked
+    on it even once -- confirmed via a real 5-stage pipeline run on a
+    real ~1GB dataset, ~9.4GB of that kind of waste alone, on top of
+    another ~5GB held by finished-but-still-referenced FunctionWorker
+    instances. ``n_stages`` lets test_memory_usage.py compare a short vs
+    long pipeline's peak RSS (see its own scaling-style test) rather than
+    just pinning one absolute number, which is what actually catches
+    "grows with pipeline depth" regressions specifically."""
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    # Qt's own QApplication singleton stays alive globally once
+    # constructed (same as every other test fixture's
+    # ``QApplication.instance() or QApplication([])`` -- see
+    # tests/test_stage_tab.py's qapp fixture), so no local reference
+    # needs to be kept around here.
+    QApplication.instance() or QApplication([])
+
+    from orbitapp.state import AppState
+    from orbitapp.tabs.denoising_tab import DenoisingTab
+    from orbitapp.tabs.detrending_tab import DetrendingTab
+    from orbitapp.tabs.mask_tab import MaskTab
+    from orbitapp.tabs.motion_correction_tab import MotionCorrectionTab
+    from orbitapp.tabs.normalization_tab import NormalizationTab
+
+    def _wait(tab) -> None:
+        if tab.worker is not None:
+            tab.worker.wait(30000)
+        for _ in range(50):
+            QApplication.processEvents()
+
+    state = AppState()
+    state.load("movie.npy", movie.astype(np.float64))
+    all_tabs = [
+        MotionCorrectionTab(state), MaskTab(state), DenoisingTab(state),
+        NormalizationTab(state), DetrendingTab(state),
+    ]
+    tabs = all_tabs[:n_stages]
+    for t in tabs:
+        t.on_data_loaded()
+
+    for tab in tabs:
+        tab._apply()
+        _wait(tab)
+        if tab._pending_result is None:
+            continue
+        tab._commit()
+        _wait(tab)
+        for other in tabs:
+            other.on_data_loaded()
+
+
 if __name__ == "__main__":
     _stage, _h, _w, _t, _dtype = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
-    _run(_stage, _h, _w, _t, _dtype)
+    # optional trailing arg: number of StageTab commits to drive for
+    # "gui_pipeline" (see _run_gui_pipeline), or the depth D for
+    # "motion_rigid_3d" -- every other stage ignores it.
+    _n_stages = int(sys.argv[6]) if len(sys.argv) > 6 else 5
+    _run(_stage, _h, _w, _t, _dtype, _n_stages)
     # ru_maxrss is KB on Linux, bytes on macOS -- this repo's CI/dev target is Linux.
     print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)

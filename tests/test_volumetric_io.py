@@ -98,6 +98,19 @@ def test_one_volume_per_stack_reads_each_file_as_one_timepoint(tmp_path):
     np.testing.assert_array_equal(result, np.moveaxis(volumes, 1, -1))
 
 
+def test_one_volume_per_stack_reports_progress_per_file(tmp_path):
+    T, D, L, W = 4, 2, 3, 3
+    volumes = np.arange(T * D * L * W, dtype=np.float32).reshape(T, D, L, W)
+    _write_tiff_stacks(tmp_path, volumes)
+
+    calls = []
+    load_volumetric_tiff_folder(
+        tmp_path, ONE_VOLUME_PER_STACK, progress_callback=lambda done, total: calls.append((done, total))
+    )
+
+    assert calls == [(i, T) for i in range(1, T + 1)]
+
+
 def test_one_volume_per_stack_rejects_mismatched_file_shapes(tmp_path):
     tifffile = pytest.importorskip("tifffile")
     tifffile.imwrite(tmp_path / "a.tif", np.zeros((4, 5, 6), dtype=np.float32))

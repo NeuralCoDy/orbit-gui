@@ -42,6 +42,20 @@ def test_peak_to_noise_ratio_projection_higher_at_active_pixel_than_background()
     assert pnr[10, 10] > pnr[0, 0]
 
 
+def test_peak_to_noise_ratio_projection_matches_plain_numpy_median_across_a_chunk_boundary():
+    # height=340 spans multiple chunked_median blocks (150-pixel cap) --
+    # confirms the chunked per-pixel median used for the PNR's baseline
+    # still matches a plain, unchunked np.median.
+    movie = _synthetic_1p_movie(height=340, width=3, n_frames=40)
+
+    pnr = peak_to_noise_ratio_projection(movie)
+
+    expected_peak = movie.max(axis=2) - np.median(movie, axis=2)
+    noise = noise_std_projection(movie)
+    expected = expected_peak / np.maximum(noise, 1e-6)
+    np.testing.assert_allclose(pnr, expected)
+
+
 def test_cnmf_e_seed_candidates_finds_both_synthetic_blobs():
     movie = _synthetic_1p_movie()
     seeds = cnmf_e_seed_candidates(

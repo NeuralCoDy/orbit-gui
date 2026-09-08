@@ -2,9 +2,9 @@
 movies -- the volumetric analog of orbit.motion_correction's rigid path.
 
 _apply_shift and _estimate_shift over there are already dimension-agnostic
-(fourier_shift/fftn and skimage's phase_cross_correlation both operate on
-an array of any dimensionality, given a shift vector of matching length),
-so they're reused unmodified here. Only the axis-order plumbing around
+(fourier_shift/fftn and _phase_correlate_shift both operate on an array of
+any dimensionality, given a shift vector of matching length), so they're
+reused unmodified here. Only the axis-order plumbing around
 them -- which axis is time, how the template is bootstrapped, how chunks
 are looped -- is specific to a movie's shape convention, and (T, L, W, D)
 puts time on axis 0 rather than axis -1 (orbit.motion_correction's (H, W,
@@ -20,7 +20,20 @@ from typing import Callable
 
 import numpy as np
 
-from .motion_correction import _apply_shift, _as_float_working_copy, _estimate_shift, _resolve_max_workers
+from .motion_correction import (
+    _apply_shift,
+    _as_float_working_copy,
+    _estimate_shift,
+    _median_over_axis,
+    _resolve_max_workers,
+)
+
+# One whole-volume FFT buffer is complex64 the size of the volume
+# (gigabytes at realistic sizes), and phase_cross_correlation holds
+# several at once -- concurrent workers multiply that, the single
+# largest transient in the 3D path. So it defaults to serial; callers
+# with RAM headroom can pass ``max_workers`` explicitly.
+_DEFAULT_MAX_WORKERS_3D = 1
 
 
 def _bootstrap_template_3d(
@@ -28,9 +41,15 @@ def _bootstrap_template_3d(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Starting reference volume: ``template`` if supplied, else the
     median of the first ``init_batch`` volumes. Returns ``(template,
-    initial_template)``."""
+    initial_template)``.
+
+    _median_over_axis casts to float32 a spatial slab at a time -- see
+    _bootstrap_template (2D). It reads straight from ``movie``, so a
+    batch of ``init_batch`` raw volumes is never materialized as float32
+    (that would be another ~4x the raw uint8 movie, gigabytes on a real
+    set)."""
     if template is None:
-        template = np.median(movie[: min(init_batch, movie.shape[0])], axis=0)
+        template = _median_over_axis(movie[: min(init_batch, movie.shape[0])], axis=0)
     return template, template.copy()
 
 
@@ -59,7 +78,7 @@ def _register_in_chunks_3d(
                 registered[t] = reg_vol
                 accum[t] += delta
 
-        template = np.median(registered[chunk_start:chunk_end], axis=0)
+        template = _median_over_axis(registered[chunk_start:chunk_end], axis=0)
 
     return template
 
@@ -80,9 +99,9 @@ def _setup_registration_3d(
         movie = _as_float_working_copy(movie)
         T = movie.shape[0]
         template, initial_template = _bootstrap_template_3d(movie, template, init_batch)
-        registered = movie  # movie is already a private float64 copy -- no second copy needed
+        registered = movie  # movie is already a private float32 copy -- no second copy needed
         initial_read_source = None
-    workers = _resolve_max_workers(max_workers, bin_width)
+    workers = _resolve_max_workers(max_workers, bin_width, default=_DEFAULT_MAX_WORKERS_3D)
     return registered, initial_read_source, template, initial_template, T, workers
 
 
@@ -123,7 +142,12 @@ def rigid_motion_correct_3d(
         source = read_source if read_source is not None else registered
 
         def _process_one(t: int, chunk_template: np.ndarray, _source: np.ndarray = source) -> tuple[np.ndarray, np.ndarray]:
-            volume = _source[t]
+            # float32 per volume -- a no-op view when _source is the
+            # float32 working copy, but when it's the caller's raw
+            # (uint16/float32 memmap) movie -- the ``output=`` path --
+            # this bounds each worker's whole-volume FFT transient to one
+            # float32 volume rather than one complex128 one.
+            volume = np.asarray(_source[t], dtype=np.float32)
             shift = _estimate_shift(chunk_template, volume, upsample_factor, normalization, max_shift)
             return _apply_shift(volume, shift), shift
 

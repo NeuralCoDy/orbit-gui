@@ -7,17 +7,28 @@ notes -- unchanged here, just relocated.
 
 from __future__ import annotations
 
-import os
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
 import numpy as np
-from scipy.fft import next_fast_len
+from scipy.fft import fftn, ifftn, next_fast_len
 from scipy.ndimage import fourier_shift, map_coordinates
-from skimage.registration import phase_cross_correlation
+
+from ._blocks import chunked_median, iter_axis_slices
+from ._concurrency import available_cpu_count
 
 _DEFAULT_MAX_WORKERS = 4
+_SMOOTH_ENOUGH_PRIME = 53  # an axis whose length's largest prime factor is <= this FFTs fast enough without padding
+
+
+def _largest_prime_factor(n: int) -> int:
+    f = 2
+    while f * f <= n:
+        while n % f == 0:
+            n //= f
+        f += 1
+    return n
 
 
 def _pad_to_fast_len(image: np.ndarray, mode: str = "constant") -> np.ndarray:
@@ -32,40 +43,66 @@ def _pad_to_fast_len(image: np.ndarray, mode: str = "constant") -> np.ndarray:
     at 31px wide, and 31 is prime -- can make an FFT several times
     slower than a same-ballpark size with only small prime factors
     (confirmed empirically: a 509x509 FFT took ~5x longer than padding
-    up to 512x512 first, including the padding's own cost). No-op
-    (returns ``image`` unchanged, no copy) when already at a fast size,
-    so this costs nothing in the common case of already-round movie
-    dimensions."""
-    target_shape = tuple(next_fast_len(n) for n in image.shape)
+    up to 512x512 first, including the padding's own cost).
+
+    An axis is only padded if its length has a prime factor larger than
+    ``_SMOOTH_ENOUGH_PRIME`` -- pocketfft handles a moderately-composite
+    size efficiently enough (a factor of, say, 53 costs maybe 1.5x a
+    fully smooth transform), and for a whole 3D volume the padding copy
+    is gigabytes, dwarfing that. A genuinely pathological size (a large
+    prime like 509, or a small prime like the 31px patch above) still
+    gets padded. No-op (no copy) when every axis is smooth enough."""
+    target_shape = tuple(
+        next_fast_len(n) if _largest_prime_factor(n) > _SMOOTH_ENOUGH_PRIME else n for n in image.shape
+    )
     if target_shape == image.shape:
         return image
     pad_width = [(0, target - n) for n, target in zip(image.shape, target_shape)]
     return np.pad(image, pad_width, mode=mode)
 
 
-def _resolve_max_workers(max_workers: int | None, bin_width: int) -> int:
+def _resolve_max_workers(max_workers: int | None, bin_width: int, default: int = _DEFAULT_MAX_WORKERS) -> int:
     if max_workers is not None:
         return max_workers
-    return min(_DEFAULT_MAX_WORKERS, os.cpu_count() or 1, bin_width)
+    return max(1, min(default, available_cpu_count(), bin_width))
+
+
+def _median_over_axis(arr: np.ndarray, axis: int) -> np.ndarray:
+    """Chunked ``np.median(arr, axis=axis)`` -- float32 output (motion
+    correction never needs more), and ``max_block=None`` since only the
+    byte budget matters here (a chunk safely spanning thousands of
+    pixels is fine; capping it lower would just mean more np.median
+    calls for no memory benefit). ``arr`` is never mutated."""
+    return chunked_median(arr, axis, out_dtype=np.float32, max_block=None)
 
 
 def _as_float_working_copy(movie: np.ndarray) -> np.ndarray:
-    """A float64 (H, W, T) array this function owns and can register
+    """A float32 (H, W, T) array this function owns and can register
     into in place, without mutating whatever the caller passed in.
 
-    np.asarray(movie, dtype=float) already allocates a fresh, private
-    array whenever a dtype conversion is needed (the common case: raw
-    microscopy movies are usually uint16 or float32) -- calling .copy()
-    on top of that in every case, regardless of whether a conversion
-    happened, doubled peak memory for exactly the inputs most likely to
-    be large (measured: ~13x a uint16 movie's raw size, vs ~7x once this
-    redundant copy is skipped). Only allocate the extra copy when
-    asarray returned the caller's own array unchanged (dtype was already
-    float64), since that's the one case where skipping it would let
-    per-frame registration mutate data the caller still holds a
-    reference to."""
-    converted = np.asarray(movie, dtype=float)
-    return converted if converted is not movie else converted.copy()
+    float32, not float64: phase-correlation shift estimates are
+    unaffected by the narrower mantissa at realistic upsample_factors
+    (20-50), and raw microscopy movies -- usually uint16 or float32 --
+    are exactly the inputs large enough for a float64 working copy to
+    matter (a uint16 volume becomes a 4x-larger array as float64 vs 2x
+    as float32, with the original still referenced alongside it). Matches
+    the float32 FITS memmap the chunked-Commit path already writes into
+    (see _setup_registration's ``output``).
+
+    A dtype conversion (the common case: raw movies are uint16 or, when
+    already float, usually float64) already allocates a fresh, private,
+    writable array -- calling .copy() on top of that in every case
+    doubled peak memory for exactly the inputs most likely to be large
+    (measured: ~13x a uint16 movie's raw size, vs ~7x once this
+    redundant copy is skipped). So the explicit copy is made only when
+    the input is *already* float32, the one case where np.asarray would
+    hand back something backed by the caller's data. That test is on the
+    dtype, not on object identity: np.asarray of a float32 np.memmap
+    returns a plain-ndarray *view* (fails ``is``) that is also read-only,
+    and registering into that raises rather than copying."""
+    if movie.dtype == np.float32:
+        return np.array(movie, dtype=np.float32)  # our own writable copy
+    return np.asarray(movie, dtype=np.float32)  # conversion already made a fresh, writable array
 
 
 def _apply_shift(frame: np.ndarray, shift: np.ndarray) -> np.ndarray:
@@ -78,11 +115,21 @@ def _apply_shift(frame: np.ndarray, shift: np.ndarray) -> np.ndarray:
     zero-padding would risk shifting real content into view of a
     sharp-edged all-zero region near the boundary. _pad_to_fast_len is a
     no-op (no copy) when ``frame`` is already a fast size, so the crop
-    below is then a full-extent, effectively free slice."""
+    below is then a full-extent, effectively free slice.
+
+    scipy.fft (not np.fft) so a float32 ``frame`` -- the working dtype
+    since _as_float_working_copy -- stays complex64 through the
+    transform rather than being upcast to complex128, halving the
+    transient a whole-volume 3D FFT costs (see motion_correction_3d.py,
+    which reuses this unchanged). ``overwrite_x``/``output=`` let fftn,
+    fourier_shift, and ifftn all reuse the same complex buffer rather
+    than each allocating their own -- one whole-volume complex64 array
+    (gigabytes at a real volume's size) instead of three."""
     padded = _pad_to_fast_len(frame, mode="edge")
-    shifted_fft = fourier_shift(np.fft.fftn(padded), shift)
-    shifted = np.real(np.fft.ifftn(shifted_fft))
-    return shifted[tuple(slice(0, n) for n in frame.shape)]
+    spectrum = fftn(padded, overwrite_x=True)
+    fourier_shift(spectrum, shift, output=spectrum)
+    shifted = np.real(ifftn(spectrum, overwrite_x=True))
+    return shifted[tuple(slice(0, n) for n in frame.shape)].astype(frame.dtype, copy=False)
 
 
 def _apply_displacement_field(frame: np.ndarray, disp_y: np.ndarray, disp_x: np.ndarray) -> np.ndarray:
@@ -97,10 +144,109 @@ def _bootstrap_template(
     movie: np.ndarray, template: np.ndarray | None, init_batch: int
 ) -> tuple[np.ndarray, np.ndarray]:
     """Starting reference image: ``template`` if supplied, else the median
-    of the first ``init_batch`` frames. Returns ``(template, initial_template)``."""
+    of the first ``init_batch`` frames. Returns ``(template, initial_template)``.
+
+    _median_over_axis casts to float32 a slab at a time, so the
+    bootstrap template is identical whether the movie is already the
+    float32 working copy (in-RAM path) or still the caller's raw array
+    (``output=`` path), without materializing ``init_batch`` frames as
+    float32 up front."""
     if template is None:
-        template = np.median(movie[:, :, : min(init_batch, movie.shape[-1])], axis=2)
+        template = _median_over_axis(movie[:, :, : min(init_batch, movie.shape[-1])], axis=2)
     return template, template.copy()
+
+
+def _upsampled_dft(data, upsampled_region_size, upsample_factor, axis_offsets):
+    """Upsampled DFT of ``data`` by matrix multiplication, evaluating only
+    an ``upsampled_region_size``-sized neighbourhood rather than a full
+    upsample_factor-times-larger FFT -- the matrix-multiply DFT trick from
+    Guizar-Sicairos, Thurman & Fienup, Opt. Lett. 33, 156-158 (2008).
+
+    Copied from skimage.registration._phase_cross_correlation._upsampled_dft
+    (BSD-3-Clause) unmodified -- see _phase_correlate_shift for why this
+    isn't just called from skimage directly."""
+    im2pi = 1j * 2 * np.pi
+    for n_items, ups_size, ax_offset in zip(data.shape[::-1], upsampled_region_size[::-1], axis_offsets[::-1]):
+        kernel = (np.arange(ups_size) - ax_offset)[:, None] * np.fft.fftfreq(n_items, upsample_factor)
+        kernel = np.exp(-im2pi * kernel).astype(data.dtype, copy=False)
+        data = np.tensordot(kernel, data, axes=(1, -1))
+    return data
+
+
+def _argmax_magnitude(arr: np.ndarray) -> tuple[int, ...]:
+    """``np.unravel_index(np.argmax(np.abs(arr)), arr.shape)`` without
+    materializing a whole-array magnitude buffer -- one axis-0 slab (see
+    orbit._blocks) at a time instead. Exact same result; on a whole
+    volume's complex spectrum this is the difference between a ~64 MiB
+    transient and a multi-GB one."""
+    best_value = -1.0
+    best_index: tuple[int, ...] | None = None
+    for sl in iter_axis_slices(arr.shape, 0, itemsize=arr.itemsize):
+        block_mag = np.abs(arr[sl])
+        local_index = np.unravel_index(np.argmax(block_mag), block_mag.shape)
+        value = block_mag[local_index]
+        if value > best_value:
+            best_value = value
+            best_index = (local_index[0] + sl.start, *local_index[1:])
+    return best_index
+
+
+def _phase_correlate_shift(reference: np.ndarray, moving: np.ndarray, upsample_factor: int, normalization: str | None) -> np.ndarray:
+    """Subpixel shift via phase correlation -- a leaner reimplementation of
+    ``skimage.registration.phase_cross_correlation`` (same Guizar-Sicairos
+    algorithm; validated bit-for-bit identical against it across upsample
+    factors, both normalization modes, and 2D/3D shapes), returning only
+    the shift vector.
+
+    skimage's version keeps several whole-array complex buffers alive at
+    once (it also computes an error/phasediff we never read, at the cost
+    of a couple more) -- at a real volume's size, gigabytes each. This
+    version reuses buffers in place (``out=``/``overwrite_x=True``) and
+    never materializes a whole-array magnitude (see _argmax_magnitude),
+    so at most ~2 whole-array complex64 buffers are alive at once:
+    measured ~10x -> ~4x one volume's size on a real (150, 3200, 530)
+    -shaped pair."""
+    src_freq = fftn(reference, overwrite_x=False)
+    target_freq = fftn(moving, overwrite_x=True)
+    np.conjugate(target_freq, out=target_freq)
+    image_product = src_freq
+    np.multiply(src_freq, target_freq, out=image_product)
+    del target_freq  # its data lives on, conjugated, inside image_product
+
+    shape = image_product.shape
+    float_dtype = image_product.real.dtype
+
+    if normalization == "phase":
+        eps = np.finfo(float_dtype).eps
+        denom = np.maximum(np.abs(image_product), 100 * eps)
+        image_product /= denom
+        del denom
+    elif normalization is not None:
+        raise ValueError("normalization must be either phase or None")
+
+    cross_correlation = ifftn(image_product)  # a 2nd whole-array buffer -- image_product is still needed below
+    midpoint = np.array([n // 2 for n in shape])
+    shift = np.array(_argmax_magnitude(cross_correlation), dtype=float_dtype)
+    shift[shift > midpoint] -= np.array(shape)[shift > midpoint]
+    del cross_correlation  # back down to one whole-array buffer
+
+    if upsample_factor != 1:
+        upsample_factor = np.asarray(upsample_factor, dtype=float_dtype)
+        shift = np.round(shift * upsample_factor) / upsample_factor
+        upsampled_region_size = np.ceil(upsample_factor * 1.5)
+        dftshift = np.trunc(upsampled_region_size / 2.0)
+        sample_region_offset = dftshift - shift * upsample_factor
+        np.conjugate(image_product, out=image_product)  # image_product's last use -- conjugate it in place
+        local_cc = _upsampled_dft(
+            image_product, [upsampled_region_size] * len(shape), upsample_factor, list(sample_region_offset)
+        ).conj()  # tiny (an upsampled_region_size-per-axis neighbourhood, not whole-array)
+        local_max = np.array(np.unravel_index(np.argmax(np.abs(local_cc)), local_cc.shape), dtype=float_dtype)
+        shift += (local_max - dftshift) / upsample_factor
+
+    for dim, n in enumerate(shape):
+        if n == 1:
+            shift[dim] = 0.0
+    return shift
 
 
 def _estimate_shift(
@@ -125,12 +271,17 @@ def _estimate_shift(
     based correction is the main beneficiary -- _patch_centers's patch
     widths have no reason to land on an FFT-friendly size (e.g. a 500px
     frame split grid_size=32-ish lands most patches at 31px, which is
-    prime), and this function is called once per patch per frame there."""
+    prime), and this function is called once per patch per frame there.
+
+    Shift estimation itself is _phase_correlate_shift, a leaner
+    reimplementation of skimage's phase_cross_correlation -- see its own
+    docstring. Only ``shift`` is ever needed here (not skimage's
+    error/phasediff), which is also why that version never hits the
+    float32 overflow skimage's error term used to warn about on a whole
+    volume."""
     reference = _pad_to_fast_len(reference, mode="edge")
     moving = _pad_to_fast_len(moving, mode="edge")
-    shift, _error, _phasediff = phase_cross_correlation(
-        reference, moving, upsample_factor=upsample_factor, normalization=normalization
-    )
+    shift = _phase_correlate_shift(reference, moving, upsample_factor, normalization)
     return np.clip(shift, -max_shift, max_shift)
 
 
@@ -145,8 +296,8 @@ def _register_in_chunks(
 ) -> np.ndarray:
     """Register frames 0..T against a template refreshed every ``bin_width``
     frames. Frames within one chunk share a template and don't depend on
-    each other, so they register concurrently in a thread pool (skimage/
-    scipy's FFT/spline routines release the GIL)."""
+    each other, so they register concurrently in a thread pool (scipy's
+    FFT/tensordot and spline routines release the GIL)."""
     for chunk_start in range(0, T, bin_width):
         chunk_end = min(chunk_start + bin_width, T)
         chunk_template = template
@@ -160,7 +311,7 @@ def _register_in_chunks(
                 registered[:, :, t] = reg_frame
                 accum[t] += delta
 
-        template = np.median(registered[:, :, chunk_start:chunk_end], axis=2)
+        template = _median_over_axis(registered[:, :, chunk_start:chunk_end], axis=2)
 
     return template
 
@@ -191,7 +342,7 @@ def _setup_registration(
         movie = _as_float_working_copy(movie)
         T = movie.shape[-1]
         template, initial_template = _bootstrap_template(movie, template, init_batch)
-        registered = movie  # movie is already a private float64 copy -- no second copy needed
+        registered = movie  # movie is already a private float32 copy -- no second copy needed
         initial_read_source = None
     workers = _resolve_max_workers(max_workers, bin_width)
     return registered, initial_read_source, template, initial_template, T, workers
@@ -234,7 +385,12 @@ def rigid_motion_correct(
         source = read_source if read_source is not None else registered
 
         def _process_one(t: int, chunk_template: np.ndarray, _source: np.ndarray = source) -> tuple[np.ndarray, np.ndarray]:
-            frame = _source[:, :, t]
+            # float32 per frame -- a no-op view when _source is already
+            # the float32 working copy, but when it's the caller's raw
+            # (uint16/float32 memmap) movie -- the ``output=`` path --
+            # this bounds each worker's FFT transient to one float32
+            # frame rather than one complex128 one.
+            frame = np.asarray(_source[:, :, t], dtype=np.float32)
             shift = _estimate_shift(chunk_template, frame, upsample_factor, normalization, max_shift)
             return _apply_shift(frame, shift), shift
 
@@ -379,7 +535,7 @@ def patch_motion_correct(
         source = read_source if read_source is not None else registered
 
         def _process_one(t: int, chunk_template: np.ndarray, _source: np.ndarray = source) -> tuple[np.ndarray, np.ndarray]:
-            frame = _source[:, :, t]
+            frame = np.asarray(_source[:, :, t], dtype=np.float32)  # see rigid_motion_correct's _process_one
             rigid_shift = _estimate_shift(chunk_template, frame, upsample_factor, normalization, max_shift)
             patch_shift = _estimate_patch_shift_field(
                 chunk_template, frame, y_edges, x_edges, rigid_shift, max_dev, upsample_factor, normalization

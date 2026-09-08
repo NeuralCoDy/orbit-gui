@@ -25,6 +25,7 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton
 
+from orbit._blocks import iter_axis_slices
 from orbit._volumetric import depth_project
 from orbit.denoising import (
     denoise_gaussian,
@@ -155,6 +156,21 @@ def _run_and_assess(movie: np.ndarray, algorithm: str, **kwargs) -> dict:
     }
 
 
+def _depth_projected_residual_3d(movie: np.ndarray, denoised: np.ndarray) -> np.ndarray:
+    """(T, L, W, D) ``movie``/``denoised`` -> the (L, W, T) max-projected
+    residual the tab plays as a movie -- computed a frame-block at a time
+    (see orbit._blocks) so a large volume never materializes a whole
+    ``movie - denoised`` array (float64 *or* float32). Same max-over-depth
+    projection as ``depth_project(movie - denoised)`` -- the projection is
+    within a single volume, so blocking the time axis doesn't change it."""
+    T, L, W = movie.shape[:3]
+    out = np.empty((L, W, T), dtype=np.float32)
+    for s in iter_axis_slices(movie.shape, axis=0):
+        block = np.subtract(movie[s], denoised[s], dtype=np.float32)  # (frames-in-block, L, W, D)
+        out[:, :, s] = depth_project(block)  # (L, W, frames-in-block)
+    return out
+
+
 def _run_and_assess_3d(movie: np.ndarray, algorithm: str, **kwargs) -> dict:
     """Volumetric (T, L, W, D) counterpart of _run_and_assess -- runs the
     3D Gaussian/median filter, then depth-projects the movie/denoised
@@ -174,7 +190,7 @@ def _run_and_assess_3d(movie: np.ndarray, algorithm: str, **kwargs) -> dict:
     return {
         "denoised": projected_after,  # (L, W, T) -- for display/metrics only
         "denoised_3d": denoised,  # (T, L, W, D) -- the real array, for Commit
-        "residual": depth_project(movie.astype(np.float64) - denoised.astype(np.float64)),
+        "residual": _depth_projected_residual_3d(movie, denoised),
         "residual_energy_fraction": residual_energy_fraction(movie, denoised),
         "corr_before": float(local_correlation_projection(projected_before).mean()),
         "corr_after": float(local_correlation_projection(projected_after).mean()),
@@ -409,12 +425,13 @@ class DenoisingTab(StageTab):
 
     def _render_result(self, result: dict) -> None:
         if self.state.volumetric:
-            before = depth_project(preview_slice_volumetric(self._input_movie))
+            self.panel.set_before_volume(preview_slice_volumetric(self._input_movie))
+            self.panel.set_after_volume(result[self._result_key_3d])
         else:
             before = preview_slice(self._input_movie)
-        self.panel.before_view.setImage(before.mean(axis=2))
-        self.panel.after_view.setImage(result["denoised"].mean(axis=2))
-        self.panel.set_after_movie(result["denoised"])
+            self.panel.before_view.setImage(before.mean(axis=2))
+            self.panel.after_view.setImage(result["denoised"].mean(axis=2))
+            self.panel.set_after_movie(result["denoised"])
         self.panel.set_movie("residual", result["residual"])
 
         ljung_box_pct = 100 * result["ljung_box_failed"] / result["ljung_box_total"] if result["ljung_box_total"] else 0.0
@@ -427,11 +444,12 @@ class DenoisingTab(StageTab):
         )
 
         qc_traces = result["qc_traces"]
-        marker_xs, marker_ys = pixels_to_data_pos(
-            self.panel.before_view.getImageItem(),
-            [s["row"] + 0.5 for s in qc_traces], [s["col"] + 0.5 for s in qc_traces],
-        )
-        self._location_markers.setData(marker_xs, marker_ys)
+        if not self.state.volumetric:  # markers sit on the 2D before_view, hidden in 3D mode
+            marker_xs, marker_ys = pixels_to_data_pos(
+                self.panel.before_view.getImageItem(),
+                [s["row"] + 0.5 for s in qc_traces], [s["col"] + 0.5 for s in qc_traces],
+            )
+            self._location_markers.setData(marker_xs, marker_ys)
         peak_samples, low_samples = split_by_kind(qc_traces)
         self.trace_grid.fill(peak_samples, low_samples, _plot_trace)
 

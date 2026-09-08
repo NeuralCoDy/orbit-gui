@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import warnings
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 from astropy.io import fits
@@ -38,16 +39,29 @@ ONE_VOLUME_PER_STACK = "one_volume_per_stack"
 INTERLEAVED = "interleaved"
 
 
-def preview_slice_volumetric(movie: np.ndarray, max_frames: int = 5000) -> np.ndarray:
-    """The first ``max_frames`` timepoints of a (T, L, W, D) ``movie`` --
-    same purpose as orbitapp.io.preview_slice (a cheap memmap view, no
-    copy, when ``movie`` is disk-backed and longer than that), but capped
-    on axis 0 rather than axis -1 -- volumetric movies put time first,
-    not last, so reusing preview_slice itself here would cap the wrong
-    axis (depth, not time)."""
-    if is_memmap(movie) and movie.shape[0] > max_frames:
-        return movie[:max_frames]
-    return movie
+def preview_slice_volumetric(
+    movie: np.ndarray, max_frames: int = 5000, max_voxels: int | None = None
+) -> np.ndarray:
+    """The leading timepoints of a (T, L, W, D) ``movie`` -- same purpose
+    as orbitapp.io.preview_slice (a cheap view, no copy) but capped on
+    axis 0, not axis -1 (volumetric movies put time first).
+
+    ``max_frames`` only trims a disk-backed movie, matching preview_slice.
+    ``max_voxels``, if given, additionally trims *any* movie (memmap or
+    in-RAM) so the preview stays under that many voxels total -- a
+    per-timepoint cap is meaningless for a wide volume, where even a
+    handful of (L, W, D) timepoints is many GB once converted to float
+    for registration. Callers that run heavy per-voxel compute on the
+    preview (the stage tabs' Apply) pass this; display-only callers
+    don't."""
+    T = movie.shape[0]
+    limit = T
+    if is_memmap(movie) and T > max_frames:
+        limit = max_frames
+    if max_voxels is not None:
+        per_timepoint = movie.size // T
+        limit = min(limit, max(1, max_voxels // per_timepoint))
+    return movie[:limit] if limit < T else movie
 
 
 def load_volumetric_movie(path: str | Path, mmap: bool = False) -> np.ndarray:
@@ -86,7 +100,10 @@ def _load_full(path: Path) -> np.ndarray:
         return np.ascontiguousarray(hdul[0].data)
 
 
-def load_volumetric_tiff_folder(path: str | Path, mode: str, depth: int | None = None) -> np.ndarray:
+def load_volumetric_tiff_folder(
+    path: str | Path, mode: str, depth: int | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> np.ndarray:
     """Loads every TIFF file in ``path`` (sorted by name) as a (T, L, W,
     D) volumetric movie. ``mode`` resolves the file-vs-volume ambiguity
     a folder has that a single 4D FITS file doesn't:
@@ -100,6 +117,11 @@ def load_volumetric_tiff_folder(path: str | Path, mode: str, depth: int | None =
     order, is one continuous stream of 2D slices -- every ``depth``
     consecutive slices become one volume, so ``depth`` is required and
     the total slice count must be an exact multiple of it.
+
+    Reading is dominated by per-file TIFF decompression (tens of
+    seconds a file on a large, heavily-compressed stack), done one file
+    at a time -- ``progress_callback``, if given, is called
+    ``(files_read, total_files)`` after each file.
     """
     import tifffile
 
@@ -109,13 +131,15 @@ def load_volumetric_tiff_folder(path: str | Path, mode: str, depth: int | None =
         raise ValueError(f"No .tif/.tiff files found in {path}")
 
     stacks = []
-    for f in files:
+    for i, f in enumerate(files):
         stack = tifffile.imread(f)
         if stack.ndim == 2:
             stack = stack[None, ...]  # a single-page file is a 1-slice stack
         elif stack.ndim != 3:
             raise ValueError(f"Expected a 2D or 3D (page, H, W) TIFF stack, got shape {stack.shape} from {f}")
         stacks.append(stack)  # each (n_pages, L, W)
+        if progress_callback is not None:
+            progress_callback(i + 1, len(files))
 
     if mode == ONE_VOLUME_PER_STACK:
         shapes = {s.shape for s in stacks}

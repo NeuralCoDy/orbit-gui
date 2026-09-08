@@ -203,14 +203,22 @@ class ROIValidationTab(QWidget):
 
         main_row.addLayout(self._build_center_panel(), 1)
 
-        right_widget = QWidget()
-        right_widget.setLayout(self._build_right_sidebar_panel())
-        right_scroll = QScrollArea()
-        right_scroll.setWidget(right_widget)
-        right_scroll.setWidgetResizable(True)
-        right_scroll.setMaximumWidth(300)
-        right_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        main_row.addWidget(right_scroll, 0)
+        self._right_widget = QWidget()
+        self._right_widget.setLayout(self._build_right_sidebar_panel())
+        self._right_scroll = QScrollArea()
+        self._right_scroll.setWidget(self._right_widget)
+        self._right_scroll.setWidgetResizable(True)
+        # This panel is all labels/spinboxes/combos, so its sizeHint
+        # grows with the app's text size -- but QScrollArea.sizeHint()
+        # doesn't track its widget's sizeHint after setWidget(), so with
+        # no horizontal scrollbar a widened panel just gets clipped.
+        # _sync_right_panel_min_width pins the scroll area's own width to
+        # match, re-run on FontChange; the center panel (which has its
+        # own zoom/pan) absorbs the squeeze.
+        self._right_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        main_row.addWidget(self._right_scroll, 0)
+        self._right_widget.installEventFilter(self)
+        self._sync_right_panel_min_width()
 
         outer.addLayout(main_row, 1)
         outer.addLayout(self._build_cell_nav_bar())
@@ -218,6 +226,23 @@ class ROIValidationTab(QWidget):
         QShortcut(QtCore.Qt.Key.Key_PageDown, self, self._scroll_thumbnails_page_down)
         QShortcut(QtCore.Qt.Key.Key_PageUp, self, self._scroll_thumbnails_page_up)
         QShortcut(QtCore.Qt.Key.Key_A, self, self._toggle_artifact_shortcut)
+
+    def _sync_right_panel_min_width(self) -> None:
+        """Widen the right scroll area (and its content widget) to the
+        panel's current sizeHint -- see _build_ui. Re-run on FontChange."""
+        content_width = self._right_widget.sizeHint().width()
+        self._right_widget.setMinimumWidth(content_width)
+        vbar = self._right_scroll.verticalScrollBar()
+        scrollbar_width = vbar.sizeHint().width() if vbar.isVisible() else 0
+        self._right_scroll.setMinimumWidth(content_width + self._right_scroll.frameWidth() * 2 + scrollbar_width)
+
+    def eventFilter(self, watched, event) -> bool:
+        if watched is self._right_widget and event.type() == QtCore.QEvent.Type.FontChange:
+            # Deferred: set_font_size_scale sets every widget's font in one
+            # loop, so a child may not have its new font yet when this
+            # fires -- sizeHint() next tick reflects the whole panel.
+            QtCore.QTimer.singleShot(0, self._sync_right_panel_min_width)
+        return super().eventFilter(watched, event)
 
     def _build_counts_panel(self) -> QGroupBox:
         group = QGroupBox("Classification counts")
@@ -1016,6 +1041,20 @@ class ROIValidationTab(QWidget):
             return f"{metric['resRatios'][trans_idx]:0.3f}"
         return str(trans_idx + 1)
 
+    def _resize_thumb_canvas(self, width_px: int, height_px: int) -> None:
+        """Size the thumbnail canvas to ``width_px`` x ``height_px``
+        logical pixels. The grid's size changes with the cell's transient
+        count (unlike this tab's other canvases, sized once via figsize=),
+        so it's resized per draw. base_dpi is the figure's logical
+        (devicePixelRatio == 1) dpi; converting through it, then letting
+        setFixedSize's resize apply the real scaling, keeps the Agg
+        buffer in sync with the widget -- calling Figure.set_dpi()
+        instead bypasses Figure._set_device_pixel_ratio and leaves stale
+        pixels around the thumbnails on a HiDPI display."""
+        base_dpi = self.thumb_fig.dpi / (self.thumb_canvas.devicePixelRatioF() or 1)
+        self.thumb_fig.set_size_inches(width_px / base_dpi, height_px / base_dpi)
+        self.thumb_canvas.setFixedSize(width_px, height_px)
+
     def _draw_thumbnails(self) -> None:
         ti = self._cell_transient_info()
         self.thumb_fig.clf()
@@ -1024,8 +1063,7 @@ class ROIValidationTab(QWidget):
 
         n_trans = ti["times"].shape[0]
         if n_trans == 0:
-            self.thumb_fig.set_size_inches(4, 3)
-            self.thumb_canvas.setFixedSize(400, 300)
+            self._resize_thumb_canvas(400, 300)
             ax = self.thumb_fig.add_subplot(111)
             ax.text(0.5, 0.5, "This ROI has no transients", ha="center", va="center", color="#61afef")
             ax.axis("off")
@@ -1037,10 +1075,7 @@ class ROIValidationTab(QWidget):
         n_rows = -(-n_trans // n_cols)
 
         cell_px = 150
-        dpi = 100
-        self.thumb_fig.set_dpi(dpi)
-        self.thumb_fig.set_size_inches(n_cols * cell_px / dpi, n_rows * cell_px / dpi)
-        self.thumb_canvas.setFixedSize(n_cols * cell_px, n_rows * cell_px)
+        self._resize_thumb_canvas(n_cols * cell_px, n_rows * cell_px)
 
         axes = self.thumb_fig.subplots(n_rows, n_cols, squeeze=False)
         for i, ax in enumerate(axes.flat):

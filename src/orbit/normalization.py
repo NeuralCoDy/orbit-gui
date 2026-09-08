@@ -8,14 +8,33 @@ from __future__ import annotations
 
 import numpy as np
 
+from ._blocks import _chunked_reduce, chunked_median
 from .projections import _half_sample_mode_1d, mode_projection
 
 _MAD_CONST = 0.6741891400433162  # matches robustSTD.m's exact constant
 
 
-def robust_std(x: np.ndarray, axis: int | None = None, keepdims: bool = False) -> np.ndarray:
-    """Median-absolute-deviation-based robust standard deviation."""
+def _block_mad(block: np.ndarray) -> np.ndarray:
+    """Median absolute deviation of ``block`` over axis 0 -- the two-pass
+    reduction _chunked_reduce runs per block (mutates ``block`` in place,
+    which _chunked_reduce hands it a private copy for)."""
+    block -= np.median(block, axis=0, keepdims=True)
+    np.abs(block, out=block)
+    return np.median(block, axis=0, overwrite_input=True)
+
+
+def robust_std(x: np.ndarray, axis: int | tuple[int, ...] | None = None, keepdims: bool = False) -> np.ndarray:
+    """Median-absolute-deviation-based robust standard deviation.
+
+    A single ``int`` axis (the per-pixel/per-voxel baseline case, on a
+    movie/volume that can be multi-GB) is chunked. ``axis=None`` or a
+    multi-axis tuple (orbit.denoising's per-subband
+    ``robust_std(coeffs, axis=(-2, -1))``) fall back to the plain
+    formula -- neither is ever movie-scale, and a multi-axis median
+    can't be blocked one axis at a time anyway."""
     x = np.asarray(x, dtype=float)
+    if isinstance(axis, int):
+        return _chunked_reduce(x, axis, _block_mad, keepdims, np.float64) / _MAD_CONST
     centered = x - np.median(x, axis=axis, keepdims=True)
     return np.median(np.abs(centered), axis=axis, keepdims=keepdims) / _MAD_CONST
 
@@ -34,8 +53,8 @@ def _mode_baseline(x: np.ndarray, axis: int | None = None, keepdims: bool = Fals
     return result[:, :, None] if keepdims else result
 
 
-_CENTER_BASELINES = {"median": np.median, "mean": np.mean, "min": np.min, "mode": _mode_baseline}
-_NORM_BASELINES = {"median": np.median, "mean": np.mean, "max": np.max, "robuststd": robust_std}
+_CENTER_BASELINES = {"median": chunked_median, "mean": np.mean, "min": np.min, "mode": _mode_baseline}
+_NORM_BASELINES = {"median": chunked_median, "mean": np.mean, "max": np.max, "robuststd": robust_std}
 
 
 def _center_baseline(movie: np.ndarray, baseline_name: str, pixel_wise: bool) -> np.ndarray:

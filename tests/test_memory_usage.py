@@ -90,11 +90,15 @@ def _vm_hwm_kb(pid: int) -> int:
     return 0
 
 
-def _peak_rss_mb(stage: str, height: int, width: int, n_frames: int, dtype: str, timeout: float = 90.0) -> float:
-    proc = subprocess.Popen(
-        [sys.executable, str(_WORKER), stage, str(height), str(width), str(n_frames), dtype],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+def _peak_rss_mb(
+    stage: str, height: int, width: int, n_frames: int, dtype: str, timeout: float = 90.0,
+    n_stages: int | None = None, depth: int | None = None,
+) -> float:
+    args = [sys.executable, str(_WORKER), stage, str(height), str(width), str(n_frames), dtype]
+    trailing = n_stages if n_stages is not None else depth  # gui_pipeline: stage count; motion_rigid_3d: depth D
+    if trailing is not None:
+        args.append(str(trailing))
+    proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     # Tracks the peak *sum* of VmHWM across the worker process and every
     # live descendant at each poll -- a single process's own VmHWM
     # doesn't capture concurrently-running sibling worker processes
@@ -122,11 +126,27 @@ def _peak_rss_mb(stage: str, height: int, width: int, n_frames: int, dtype: str,
 
 
 def test_rigid_motion_correction_peak_memory_is_bounded():
-    # A raw uint16 movie forces a float64 working copy internally (~4x);
-    # peak should stay close to that one copy plus a fixed baseline, not
-    # blow up with extra full-movie temporaries.
+    # A raw uint16 movie forces one float32 working copy internally (~2x
+    # its raw size); peak should stay close to that one copy plus a fixed
+    # baseline, not blow up with extra full-movie temporaries.
     peak_mb = _peak_rss_mb("motion_rigid", 300, 300, 400, "uint16")
     assert peak_mb < 1000, f"rigid motion correction peak RSS {peak_mb:.0f}MB exceeds bound"
+
+
+def test_rigid_3d_motion_correction_peak_memory_is_bounded():
+    # Volumetric (T, L, W, D) rigid registration -- few big volumes (like
+    # the real dataset's shape) and uint8 (its worst case: float32 is 4x,
+    # not 2x). Sized so each volume (~144MB float32) is big enough that
+    # the per-call phase-correlation transient shows up over the fixed
+    # scipy/numpy import baseline -- a smaller movie mostly measures that
+    # baseline instead. Peak is dominated by the one float32 working copy
+    # plus _phase_correlate_shift's own whole-volume complex64 buffers
+    # (see test_phase_correlate.py -- a leaner reimplementation of
+    # skimage's phase_cross_correlation, ~4x one volume vs skimage's
+    # ~10x). ~346MB raw here (8 * 300 * 800 * 150 uint8); measured ~2.8GB
+    # (was ~3.8GB with skimage's phase_cross_correlation, same config).
+    peak_mb = _peak_rss_mb("motion_rigid_3d", 300, 800, 8, "uint8", timeout=120.0, depth=150)
+    assert peak_mb < 3500, f"3D rigid motion correction peak RSS {peak_mb:.0f}MB exceeds bound"
 
 
 def test_rigid_motion_correction_memmap_commit_scales_sublinearly_with_frame_count():
@@ -157,6 +177,23 @@ def test_patch_motion_correction_peak_memory_is_bounded():
     assert peak_mb < 750, f"patch motion correction peak RSS {peak_mb:.0f}MB exceeds bound"
 
 
+def test_patchwarp_motion_correct_peak_memory_is_bounded():
+    # patchwarp_motion_correct used to keep two extra full-movie-sized
+    # buffers alive through its whole thread-pool stage on top of
+    # rigid_motion_correct's own output (a float32 copy of the entire
+    # movie, converted up front rather than one frame at a time, and a
+    # separate output array rather than writing back in place). A
+    # smaller test movie doesn't show this clearly (the fixed baseline
+    # cost of imports/thread-pool setup dominates at small sizes,
+    # confirmed by trying 200x200x80 first: pre- and post-fix peaks were
+    # only ~26MB apart there, too close to bound reliably) -- this size
+    # was chosen because the gap is large enough to actually catch a
+    # regression: measured ~1005MB pre-fix vs ~864MB post-fix (~14%
+    # less) on this exact movie.
+    peak_mb = _peak_rss_mb("patchwarp", 300, 300, 300, "uint16", timeout=90.0)
+    assert peak_mb < 950, f"patchwarp_motion_correct peak RSS {peak_mb:.0f}MB exceeds bound"
+
+
 def test_cnmf_source_extraction_peak_memory_is_bounded():
     peak_mb = _peak_rss_mb("cnmf", 180, 180, 200, "float32")
     assert peak_mb < 700, f"CNMF peak RSS {peak_mb:.0f}MB exceeds bound"
@@ -176,6 +213,20 @@ def test_patch_cnmf_source_extraction_peak_memory_is_bounded():
     assert peak_mb < 1700, f"patch-based CNMF peak RSS {peak_mb:.0f}MB exceeds bound"
 
 
+def test_graft_source_extraction_peak_memory_is_bounded():
+    # Whole-FOV GraFT's own compiled solver has a comparable fixed
+    # overhead to the patch-based path below, but with substantially
+    # more run-to-run variance measured at this movie size (repeated
+    # runs ranged roughly 900MB-2GB regardless of which thread cap was
+    # used -- see roi_extraction_graft.py's own _WHOLE_FOV_MAX_THREADS
+    # comment) -- the bound here is wider than patch GraFT's own to
+    # accommodate that noise without flaking, while still catching a
+    # real regression (e.g. several times that, from an accidentally
+    # materialized full-FOV-sized extra copy).
+    peak_mb = _peak_rss_mb("graft", 250, 250, 150, "float32", timeout=120.0)
+    assert peak_mb < 2500, f"whole-FOV GraFT peak RSS {peak_mb:.0f}MB exceeds bound"
+
+
 def test_patch_graft_source_extraction_peak_memory_is_bounded():
     # Same reasoning as patch-based CNMF above. GraFT's own compiled
     # solver has a higher fixed overhead per patch-worker than CNMF's
@@ -186,3 +237,30 @@ def test_patch_graft_source_extraction_peak_memory_is_bounded():
     # that fixed cost.
     peak_mb = _peak_rss_mb("patch_graft", 250, 250, 150, "float32", timeout=60.0)
     assert peak_mb < 2000, f"patch-based GraFT peak RSS {peak_mb:.0f}MB exceeds bound"
+
+
+def test_gui_pipeline_peak_memory_does_not_scale_with_pipeline_depth():
+    # Regression test for StageTab/FunctionWorker holding full-size
+    # movie references forever once Apply had been clicked on a tab even
+    # once (self._input_movie, the panel's "after" movie, FunctionWorker's
+    # own .args/.kwargs -- see their docstrings). A single committed
+    # stage's own baseline (widget construction, one active movie, ...)
+    # is expected to cost something; what must NOT happen is that cost
+    # multiplying by pipeline depth. Compares a 1-stage vs a 5-stage
+    # pipeline (Motion Correction -> Mask -> Denoising -> Normalization ->
+    # Detrending, see _memory_worker._run_gui_pipeline) on the SAME movie
+    # size, same style as the memmap frame-count scaling test above.
+    #
+    # Calibrated against a real before/after measurement at this exact
+    # movie size: the delta was ~443MB pre-fix (~110MB/stage) vs ~169MB
+    # post-fix (~42MB/stage) for these same 4 extra stages -- 300MB
+    # cleanly separates the two while leaving real headroom for
+    # legitimate per-tab overhead (each stage's own widgets, params
+    # dialog, ...) that isn't itself a bug.
+    one_stage = _peak_rss_mb("gui_pipeline", 250, 250, 300, "float32", timeout=60.0, n_stages=1)
+    five_stages = _peak_rss_mb("gui_pipeline", 250, 250, 300, "float32", timeout=60.0, n_stages=5)
+    delta = five_stages - one_stage
+    assert delta < 300, (
+        f"peak RSS grew {delta:.0f}MB from 1 to 5 committed pipeline stages "
+        f"({one_stage:.0f}MB -> {five_stages:.0f}MB) -- expected roughly flat, not growing with pipeline depth"
+    )

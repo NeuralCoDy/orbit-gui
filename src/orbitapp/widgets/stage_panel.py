@@ -12,6 +12,11 @@ adds another such button/movie slot, placed next to (not below)
 ``column``'s existing Play Movie button, each splitting the row's width
 evenly -- for a stage with a movie worth previewing besides its own
 before/after image (e.g. Denoising's residual).
+
+For volumetric (T, L, W, D) data each column swaps its 2D ImageView for
+a drag-rotatable 3D VolumeView (see set_volumetric): the time-mean
+volume in perspective rather than a flat depth projection. Play Movie
+buttons are hidden in that mode -- the 3D view is the viewer.
 """
 
 from __future__ import annotations
@@ -19,10 +24,11 @@ from __future__ import annotations
 import numpy as np
 import pyqtgraph as pg
 from movieslider.gui.movie_slider_widget import MovieSliderWidget
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget
 
 from ..io import preview_slice
 from .movie_popout import show_movie_popout
+from .volume_view import VolumeView
 
 
 class StagePanel(QWidget):
@@ -32,22 +38,37 @@ class StagePanel(QWidget):
         self._players: dict[str, MovieSliderWidget | None] = {"before": None, "after": None}
         self._titles = {"before": before_title, "after": after_title}
         self._button_rows: dict[str, QHBoxLayout] = {}
+        self._button_containers: dict[str, QWidget] = {}
+        self._volumetric = False
 
         layout = QVBoxLayout(self)
 
         images_row = QHBoxLayout()
         self.before_view = pg.ImageView()
         self.after_view = pg.ImageView()
-        for key, view, title in (("before", self.before_view, before_title), ("after", self.after_view, after_title)):
+        self.before_volume = VolumeView()
+        self.after_volume = VolumeView(placeholder="Run this stage to see the candidate volume in 3D.")
+        self._stacks: dict[str, QStackedWidget] = {}
+        for key, view, volume, title in (
+            ("before", self.before_view, self.before_volume, before_title),
+            ("after", self.after_view, self.after_volume, after_title),
+        ):
             col = QVBoxLayout()
             col.addWidget(QLabel(title))
-            col.addWidget(view)
+            stack = QStackedWidget()
+            stack.addWidget(view)  # index 0: 2D projection
+            stack.addWidget(volume)  # index 1: 3D volume (volumetric data)
+            self._stacks[key] = stack
+            col.addWidget(stack)
             button_row = QHBoxLayout()
             play_btn = QPushButton("Play Movie")
             play_btn.clicked.connect(lambda _checked=False, key=key: self._play_movie(key))
             button_row.addWidget(play_btn, 1)
-            col.addLayout(button_row)
+            button_container = QWidget()
+            button_container.setLayout(button_row)
+            col.addWidget(button_container)
             self._button_rows[key] = button_row
+            self._button_containers[key] = button_container
             images_row.addLayout(col)
         images_container = QWidget()
         images_container.setLayout(images_row)
@@ -75,6 +96,33 @@ class StagePanel(QWidget):
         play_btn = QPushButton(label)
         play_btn.clicked.connect(lambda _checked=False, key=key: self._play_movie(key))
         self._button_rows[column].addWidget(play_btn, 1)
+
+    # -- volumetric mode --------------------------------------------------
+
+    def set_volumetric(self, enabled: bool) -> None:
+        """Switch both columns between the 2D ImageView (``False``) and
+        the 3D VolumeView (``True``). Play Movie buttons are hidden in 3D
+        mode. Safe to call repeatedly / on every data load."""
+        self._volumetric = enabled
+        index = 1 if enabled else 0
+        for key in ("before", "after"):
+            self._stacks[key].setCurrentIndex(index)
+            self._button_containers[key].setVisible(not enabled)
+            if not enabled:
+                self._stacks[key].widget(1).clear()
+
+    def set_before_volume(self, volume: np.ndarray | None) -> None:
+        self._set_volume("before", volume)
+
+    def set_after_volume(self, volume: np.ndarray | None) -> None:
+        self._set_volume("after", volume)
+
+    def _set_volume(self, key: str, volume: np.ndarray | None) -> None:
+        view = self._stacks[key].widget(1)
+        if volume is None:
+            view.clear()
+        else:
+            view.set_volume(volume)
 
     def set_movie(self, key: str, movie: np.ndarray | None) -> None:
         self._movies[key] = movie

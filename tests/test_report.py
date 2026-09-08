@@ -93,6 +93,24 @@ def test_generate_report_source_extraction_reports_aggregate_roi_counts():
     assert "2" in tex  # two committed ROIs
 
 
+def test_generate_report_includes_source_extraction_metrics():
+    # Regression guard: _section_source_extraction used to hardcode {}
+    # for metrics regardless of what the step actually recorded.
+    state = _full_state()
+    state.steps.append(
+        PipelineStep(
+            stage="source_extraction", label="Real-SEUDO",
+            params={"sigma2": 0.002, "lambda_blob": 10.0},
+            metrics={"rois_committed": 4, "rois_deleted": 7},
+        )
+    )
+    tex = generate_report(state, None)
+
+    assert "sigma2" in tex and "0.002" in tex
+    assert _latex_escape("rois_committed") in tex and _latex_escape("rois_deleted") in tex
+    assert "Validation metrics" in tex
+
+
 def test_source_extraction_key_prefers_cnmf_e_over_cnmf_substring():
     # Regression guard: "cnmf" is itself a substring of "cnmf-e"/"cnmf_e"
     # -- the dispatch must not misclassify CNMF-E's own equation as
