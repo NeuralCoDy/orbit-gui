@@ -25,7 +25,7 @@ dependencies = [
     # graft (this package's algorithm module, not its GUI) unconditionally --
     # a base dependency, not gui-only, even though most other GraFT-adjacent
     # code here is GUI-facing.
-    "pygraft-gui>=0.2.0",
+    "pygraft-gui>=0.3.0",
 ]
 
 [project.optional-dependencies]

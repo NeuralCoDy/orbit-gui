@@ -49,11 +49,11 @@ _MAX_PATCH_WORKERS = 4
 # consistently slower: ~4.3s vs 16's ~3.2s on a real 150x150x150 test,
 # repeated runs each way), comfortably below the crash zone an
 # uncapped/too-high thread count can reach -- see that docstring. Peak
-# memory turned out to have substantial run-to-run variance at every
-# cap tried (roughly 900MB-2GB on a real 250x250x150 test regardless of
-# 8 vs 16 vs 32), too noisy on this machine to treat as a factor in
-# choosing between them -- picked on the reliable (speed, safety)
-# signal instead, not because a memory difference was established.
+# memory had substantial run-to-run variance at every cap tried, too
+# noisy on this machine to treat as a factor -- picked on the reliable
+# (speed, safety) signal instead. (Separately, pygraft-gui >= 0.3.0
+# roughly halved that peak by dropping the per-iteration S/W history
+# extras that this app discards anyway -- see test_memory_usage.py.)
 _WHOLE_FOV_MAX_THREADS = 16
 
 # patch_graft_source_extraction runs _MAX_PATCH_WORKERS (4) of these

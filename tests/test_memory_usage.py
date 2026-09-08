@@ -214,29 +214,28 @@ def test_patch_cnmf_source_extraction_peak_memory_is_bounded():
 
 
 def test_graft_source_extraction_peak_memory_is_bounded():
-    # Whole-FOV GraFT's own compiled solver has a comparable fixed
-    # overhead to the patch-based path below, but with substantially
-    # more run-to-run variance measured at this movie size (repeated
-    # runs ranged roughly 900MB-2GB regardless of which thread cap was
-    # used -- see roi_extraction_graft.py's own _WHOLE_FOV_MAX_THREADS
-    # comment) -- the bound here is wider than patch GraFT's own to
-    # accommodate that noise without flaking, while still catching a
-    # real regression (e.g. several times that, from an accidentally
-    # materialized full-FOV-sized extra copy).
+    # pygraft-gui >= 0.3.0 no longer keeps a per-iteration (n_pix, n_dict)
+    # S/W snapshot in extras (which orbit discards anyway) and chunks the
+    # final reconstruction residual -- whole-FOV peak dropped from the
+    # old ~900MB-2GB to ~680MB at this size, and no longer scales with
+    # iteration count. Bound stays ~2x measured: loose enough for this
+    # method's run-to-run variance, tight enough to catch the history
+    # accumulation returning or a full-FOV extra copy.
     peak_mb = _peak_rss_mb("graft", 250, 250, 150, "float32", timeout=120.0)
-    assert peak_mb < 2500, f"whole-FOV GraFT peak RSS {peak_mb:.0f}MB exceeds bound"
+    assert peak_mb < 1400, f"whole-FOV GraFT peak RSS {peak_mb:.0f}MB exceeds bound"
 
 
 def test_patch_graft_source_extraction_peak_memory_is_bounded():
     # Same reasoning as patch-based CNMF above. GraFT's own compiled
     # solver has a higher fixed overhead per patch-worker than CNMF's
-    # pure-Python/numpy path (confirmed empirically: ~1.0-1.1GB here vs
-    # patch CNMF's much smaller footprint at a comparable size), hence
-    # the wider bound -- still catches a real regression (e.g. a patch
-    # accidentally spanning the whole FOV) without being sensitive to
-    # that fixed cost.
+    # pure-Python/numpy path -- 4 concurrent whole-patch solves, each
+    # with its own thread pool -- so at this (not-large) FOV it's
+    # actually a bit heavier than the whole-FOV path above (~890MB
+    # measured); its advantage is bounded memory as the FOV grows.
+    # Bound catches a patch accidentally spanning the whole FOV without
+    # being sensitive to that per-worker fixed cost.
     peak_mb = _peak_rss_mb("patch_graft", 250, 250, 150, "float32", timeout=60.0)
-    assert peak_mb < 2000, f"patch-based GraFT peak RSS {peak_mb:.0f}MB exceeds bound"
+    assert peak_mb < 1700, f"patch-based GraFT peak RSS {peak_mb:.0f}MB exceeds bound"
 
 
 def test_gui_pipeline_peak_memory_does_not_scale_with_pipeline_depth():
