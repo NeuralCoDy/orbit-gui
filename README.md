@@ -40,9 +40,11 @@ src/orbit/_native/build_native.sh
 ```
 
 Real-SEUDO's own per-cell FISTA solve has a separate optional accelerator (also
-falls back to pure Python if skipped), not yet wired into the automatic/wheel
-build -- needs FFTW3 in addition to a C++14 compiler and pybind11 (Debian/
-Ubuntu: `apt-get install libfftw3-dev`):
+falls back to pure Python if skipped) -- needs FFTW3 in addition to a C++14
+compiler and pybind11 (Debian/Ubuntu: `apt-get install libfftw3-dev`). It builds
+automatically alongside the accelerator above wherever FFTW3 is found (including
+in PyPI's published wheels, on the platforms where FFTW3 could be provisioned in
+CI). To rebuild it in place after editing the `.cpp` source, without reinstalling:
 
 ```bash
 src/orbit/seudo/_native/build_native.sh

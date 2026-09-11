@@ -78,22 +78,23 @@ jobs:
             (dnf install -y epel-release || true) &&
             (dnf install -y fftw-devel || true)
           # Homebrew's fftw on macos-14 (an Apple Silicon runner) only
-          # gives the arm64 dylib; CIBW_ARCHS_MACOS below cross-compiles
-          # an x86_64 wheel too via Xcode, which needs its own x86_64
-          # FFTW3 -- installed via an x86_64 Homebrew under Rosetta,
-          # alongside the native arm64 one. Unverified end-to-end (no
-          # macOS access here); if the Rosetta/arch-prefixed brew call
-          # doesn't pan out, that leg's x86_64 wheel builds fine but
-          # falls back to pure-Python FISTA (arm64 wheel is unaffected).
+          # gives the arm64 dylib; CIBW_ARCHS_MACOS below also
+          # cross-compiles an x86_64 wheel via Xcode, which would need
+          # its own x86_64 FFTW3 -- tried an x86_64 Homebrew under
+          # Rosetta for that first, but Homebrew now refuses outright
+          # ("Homebrew on macOS is only supported on Apple Silicon
+          # processors!", confirmed against a real run) -- so the x86_64
+          # wheel just doesn't get the compiled FISTA solver
+          # (optional=True; pure-Python fallback, same as any other
+          # platform where FFTW3 isn't found). Only the native arm64
+          # install is attempted.
           CIBW_BEFORE_ALL_MACOS: >
-            brew install fftw || true;
-            (arch -x86_64 /usr/local/bin/brew install fftw ||
-             arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" </dev/null &&
-             arch -x86_64 /usr/local/bin/brew install fftw) || true
+            brew install fftw || true
           # windows-latest ships vcpkg with VCPKG_INSTALLATION_ROOT set.
-          # Entirely unverified (no Windows access here) -- this is the
-          # leg most likely to need real iteration; see this file's own
-          # header comment.
+          # Confirmed against a real run: vcpkg installs fftw3 fine, and
+          # both extensions compile and link against it (the wheel
+          # itself built successfully) -- the only real Windows failure
+          # was in the repair-wheel step below, now fixed.
           CIBW_BEFORE_ALL_WINDOWS: >
             vcpkg install fftw3:x64-windows || true
           # Linux/macOS need no CIBW_ENVIRONMENT_* here -- setup.py's own
@@ -109,12 +110,28 @@ jobs:
           # there) needs an explicit --add-path to find fftw3.dll, since
           # DLL resolution isn't RPATH-based like Linux/macOS; {dest_dir}
           # and {wheel} are cibuildwheel's own repair-command
-          # placeholders (see its docs), substituted at run time.
+          # placeholders (see its docs), substituted at run time. Fully
+          # overriding this setting bypasses cibuildwheel's automatic
+          # delvewheel provisioning, so install it explicitly first
+          # (confirmed against a real run: "'delvewheel' is not
+          # recognized..." without this). cibuildwheel runs this command
+          # through a POSIX-style shell even on Windows (confirmed via a
+          # real run's trace output showing %VAR% passed through
+          # unexpanded) -- so $VCPKG_INSTALLATION_ROOT, not
+          # %VCPKG_INSTALLATION_ROOT%, matching CIBW_ENVIRONMENT_WINDOWS
+          # above.
           CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: >
-            delvewheel repair --add-path "%VCPKG_INSTALLATION_ROOT%\installed\x64-windows\bin" -w {dest_dir} {wheel}
+            pip install delvewheel &&
+            delvewheel repair --add-path "$VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin" -w {dest_dir} {wheel}
           # macos-14 is an Apple Silicon runner; Xcode can cross-compile
           # the x86_64 wheel from there too, so one runner covers both.
           CIBW_ARCHS_MACOS: "x86_64 arm64"
+          # Homebrew's arm64 fftw bottle is built against Sonoma (14.0+),
+          # so delocate refuses to bundle it into a wheel stamped with a
+          # lower default deployment target (confirmed against a real
+          # run: "DelocationError: ... libfftw3.3.dylib has a minimum
+          # target of 14.0"). This is delocate's own suggested fix.
+          CIBW_ENVIRONMENT_MACOS: MACOSX_DEPLOYMENT_TARGET=14.0
           # This repo's [project] dependencies alone (no [gui] extra) are
           # enough to import orbit and exercise both native extensions --
           # PySide6/orbitapp aren't needed for this smoke test. Prints
