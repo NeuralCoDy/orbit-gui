@@ -18,20 +18,31 @@ source identification, demixing, ...), not bolted on at the end.
 ## Install
 
 ```bash
-pip install -e ".[test,gui,native]"
+pip install orbit-gui[gui]
 ```
 
-Optionally build the native (C++) accelerators for the slower per-pixel/per-trace
-operations (local correlation and mode projections, OASIS deconvolution, the
-per-pixel Ljung-Box test) -- falls back to pure numpy/Python if skipped:
+or, for a development checkout:
+
+```bash
+pip install -e ".[test,gui]"
+```
+
+`orbit`'s native (C++) accelerator for the slower per-pixel/per-trace operations
+(local correlation and mode projections, OASIS deconvolution, the per-pixel
+Ljung-Box test) builds automatically whenever a C++ compiler is available (via
+`setup.py`'s `ext_modules` -- see PyPI's published wheels, which ship it
+prebuilt) -- falls back to pure numpy/Python if no compiler is found, so this
+never blocks `pip install`. To rebuild it in place after editing the `.cpp`
+source, without reinstalling:
 
 ```bash
 src/orbit/_native/build_native.sh
 ```
 
 Real-SEUDO's own per-cell FISTA solve has a separate optional accelerator (also
-falls back to pure Python if skipped) -- needs FFTW3 in addition to a C++14
-compiler and pybind11 (Debian/Ubuntu: `apt-get install libfftw3-dev`):
+falls back to pure Python if skipped), not yet wired into the automatic/wheel
+build -- needs FFTW3 in addition to a C++14 compiler and pybind11 (Debian/
+Ubuntu: `apt-get install libfftw3-dev`):
 
 ```bash
 src/orbit/seudo/_native/build_native.sh

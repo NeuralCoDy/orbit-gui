@@ -1,0 +1,142 @@
+name: Build wheels
+
+# Builds platform wheels (manylinux/macOS/Windows x Python 3.10-3.13) via
+# cibuildwheel, plus the sdist -- but does NOT publish to PyPI. Artifacts
+# land as downloadable GitHub Actions run artifacts for a human to review
+# and upload with `twine upload` (or wire up trusted publishing later,
+# once the manual flow is comfortable). Triggered by pushing a `v*` tag
+# or manually via the Actions tab (workflow_dispatch).
+#
+# Two native extensions get built here (both optional -- see setup.py):
+#   orbit._native._orbit_native        -- std::thread only, no system
+#                                          dependency beyond a compiler.
+#   orbit.seudo._native._fista_native  -- needs FFTW3, so each platform
+#                                          below installs it before the
+#                                          build; setup.py itself finds
+#                                          it (common package-manager
+#                                          prefixes, or FFTW_INCLUDE_DIR/
+#                                          FFTW_LIB_DIR on Windows, set
+#                                          below where there's no
+#                                          standard prefix to guess).
+#
+# The FFTW3 wiring is unverified on macOS/Windows (this was put together
+# without access to either platform to actually run it) -- Linux was
+# confirmed locally (built + linked + imported + ran in a clean venv, ldd
+# resolving the system libfftw3.so.3), so CIBW_BEFORE_ALL_LINUX below is
+# on solid ground; expect the macOS/Windows legs to need real iteration
+# against actual CI runs. If a leg's FFTW3 step doesn't pan out, that
+# extension is `optional=True` and the wheel still builds -- just with
+# orbit.seudo._native.NATIVE_AVAILABLE False on that platform, same as
+# not having built it at all.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build_wheels:
+    name: Build wheels on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.21
+        env:
+          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-*"
+          # Skip 32-bit and musllinux targets to keep CI time reasonable
+          # for a first release -- can add back if there's real demand.
+          CIBW_SKIP: "*-win32 *_i686 *-musllinux*"
+          # cibuildwheel's default manylinux2014 (CentOS 7-based) test
+          # container is too old for current scikit-image's dependency
+          # chain -- see pygraft-gui's own wheels.yml for the exact
+          # failure mode (Pillow dragged into a from-source build that
+          # then fails for missing libjpeg/zlib dev headers). Same fix.
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          # manylinux_2_28 is AlmaLinux 8-based: fftw-devel isn't in the
+          # base/AppStream repos enabled by default. Tries every repo
+          # that might carry it (PowerTools on EL8, its EL9 rename "crb",
+          # and EPEL as a further fallback source) before installing --
+          # each guarded so a repo-layout surprise just means no
+          # PowerTools/crb/epel step, not a hard failure, and the whole
+          # line's `|| true` means "no compiled FISTA solver"
+          # (optional=True in setup.py) rather than failing the wheel
+          # build if fftw-devel still isn't found anywhere. Confirmed
+          # this exact package's *linking* end-to-end locally (see this
+          # file's own header comment); the repo-enable step itself is
+          # the one part not run against the real container.
+          CIBW_BEFORE_ALL_LINUX: >
+            (dnf install -y dnf-plugins-core || true) &&
+            (dnf config-manager --set-enabled powertools || dnf config-manager --set-enabled crb || true) &&
+            (dnf install -y epel-release || true) &&
+            (dnf install -y fftw-devel || true)
+          # Homebrew's fftw on macos-14 (an Apple Silicon runner) only
+          # gives the arm64 dylib; CIBW_ARCHS_MACOS below cross-compiles
+          # an x86_64 wheel too via Xcode, which needs its own x86_64
+          # FFTW3 -- installed via an x86_64 Homebrew under Rosetta,
+          # alongside the native arm64 one. Unverified end-to-end (no
+          # macOS access here); if the Rosetta/arch-prefixed brew call
+          # doesn't pan out, that leg's x86_64 wheel builds fine but
+          # falls back to pure-Python FISTA (arm64 wheel is unaffected).
+          CIBW_BEFORE_ALL_MACOS: >
+            brew install fftw || true;
+            (arch -x86_64 /usr/local/bin/brew install fftw ||
+             arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" </dev/null &&
+             arch -x86_64 /usr/local/bin/brew install fftw) || true
+          # windows-latest ships vcpkg with VCPKG_INSTALLATION_ROOT set.
+          # Entirely unverified (no Windows access here) -- this is the
+          # leg most likely to need real iteration; see this file's own
+          # header comment.
+          CIBW_BEFORE_ALL_WINDOWS: >
+            vcpkg install fftw3:x64-windows || true
+          # Linux/macOS need no CIBW_ENVIRONMENT_* here -- setup.py's own
+          # _FFTW_CANDIDATE_DIRS already covers their common
+          # package-manager prefixes (including both of Homebrew's, for
+          # the arm64/x86_64 cross-compile split below). Windows has no
+          # equivalent standard prefix to guess, so it's the one platform
+          # pointed at explicitly, from vcpkg's own install layout.
+          CIBW_ENVIRONMENT_WINDOWS: >
+            FFTW_INCLUDE_DIR="$VCPKG_INSTALLATION_ROOT\\installed\\x64-windows\\include"
+            FFTW_LIB_DIR="$VCPKG_INSTALLATION_ROOT\\installed\\x64-windows\\lib"
+          # Windows' delvewheel (cibuildwheel's default repair tool
+          # there) needs an explicit --add-path to find fftw3.dll, since
+          # DLL resolution isn't RPATH-based like Linux/macOS; {dest_dir}
+          # and {wheel} are cibuildwheel's own repair-command
+          # placeholders (see its docs), substituted at run time.
+          CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: >
+            delvewheel repair --add-path "%VCPKG_INSTALLATION_ROOT%\installed\x64-windows\bin" -w {dest_dir} {wheel}
+          # macos-14 is an Apple Silicon runner; Xcode can cross-compile
+          # the x86_64 wheel from there too, so one runner covers both.
+          CIBW_ARCHS_MACOS: "x86_64 arm64"
+          # This repo's [project] dependencies alone (no [gui] extra) are
+          # enough to import orbit and exercise both native extensions --
+          # PySide6/orbitapp aren't needed for this smoke test. Prints
+          # rather than asserts (matching pygraft-gui's own wheels.yml):
+          # both extensions are optional, so a False here is a visible,
+          # inspectable signal in the run log, not a build failure.
+          CIBW_TEST_COMMAND: >
+            python -c "import orbit._native as n, orbit.seudo._native as sn; print('orbit._native available:', n.NATIVE_AVAILABLE); print('orbit.seudo._native (FISTA) available:', sn.NATIVE_AVAILABLE)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: ./wheelhouse/*.whl
+
+  build_sdist:
+    name: Build source distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build sdist
+        run: pipx run build --sdist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz

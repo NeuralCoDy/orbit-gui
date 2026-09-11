@@ -1,15 +1,40 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=68", "wheel", "pybind11>=2.11"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "orbit"
+# PyPI project/distribution name -- distinct from the importable package
+# name, which stays "orbit" (== `import orbit`), same split as this
+# project's own pygraft-gui dependency (PyPI name) / graft (import name).
+# "orbit" itself is already taken on PyPI by an unrelated package.
+name = "orbit-gui"
 version = "0.1.0"
 description = "Assessment-forward analysis pipeline and GUI for functional neural optical imaging"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Adam Charles" }]
+keywords = [
+    "calcium-imaging",
+    "neuroscience",
+    "microscopy",
+    "source-extraction",
+    "roi",
+    "image-processing",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
 dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
@@ -28,9 +53,13 @@ dependencies = [
     "pygraft-gui>=0.3.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/NeuralCoDy/orbit-gui"
+Repository = "https://github.com/NeuralCoDy/orbit-gui"
+Issues = "https://github.com/NeuralCoDy/orbit-gui/issues"
+
 [project.optional-dependencies]
 test = ["pytest>=7.0"]
-native = ["pybind11>=2.11"]
 gui = [
     "PySide6>=6.5",
     "pyqtgraph>=0.13",
