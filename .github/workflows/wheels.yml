@@ -114,15 +114,22 @@ jobs:
           # overriding this setting bypasses cibuildwheel's automatic
           # delvewheel provisioning, so install it explicitly first
           # (confirmed against a real run: "'delvewheel' is not
-          # recognized..." without this). cibuildwheel runs this command
-          # through a POSIX-style shell even on Windows (confirmed via a
-          # real run's trace output showing %VAR% passed through
-          # unexpanded) -- so $VCPKG_INSTALLATION_ROOT, not
-          # %VCPKG_INSTALLATION_ROOT%, matching CIBW_ENVIRONMENT_WINDOWS
-          # above.
+          # recognized..." without this). Whether this command string
+          # runs through cmd.exe or a POSIX-style shell on the
+          # windows-latest runner turned out to be ambiguous even from
+          # real run output ($VCPKG_INSTALLATION_ROOT built+linked fine
+          # via CIBW_ENVIRONMENT_WINDOWS -- a separate, cibuildwheel-
+          # internal parser -- but the identical $VAR syntax here still
+          # left delvewheel unable to find fftw3.dll) -- so this reads
+          # VCPKG_INSTALLATION_ROOT from os.environ in Python instead,
+          # which needs no shell-specific expansion syntax at all and
+          # works identically under cmd.exe or bash. Prints the resolved
+          # bin dir and whether it exists, so a still-missing DLL shows
+          # up directly in the run log rather than as another blind
+          # guess.
           CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: >
             pip install delvewheel &&
-            delvewheel repair --add-path "$VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin" -w {dest_dir} {wheel}
+            python -c "import os, subprocess, sys; root = os.environ.get('VCPKG_INSTALLATION_ROOT'); bindir = os.path.join(root, 'installed', 'x64-windows', 'bin') if root else None; print('vcpkg bin dir:', bindir, '-- exists:', bool(bindir and os.path.isdir(bindir))); args = ['--add-path', bindir] if bindir and os.path.isdir(bindir) else []; subprocess.check_call(['delvewheel', 'repair', *args, '-w', sys.argv[1], sys.argv[2]])" {dest_dir} {wheel}
           # macos-14 is an Apple Silicon runner; Xcode can cross-compile
           # the x86_64 wheel from there too, so one runner covers both.
           CIBW_ARCHS_MACOS: "x86_64 arm64"
