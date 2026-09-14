@@ -8,7 +8,7 @@ build-backend = "setuptools.build_meta"
 # project's own pygraft-gui dependency (PyPI name) / graft (import name).
 # "orbit" itself is already taken on PyPI by an unrelated package.
 name = "orbit-gui"
-version = "0.1.0"
+version = "0.1.1"
 description = "Assessment-forward analysis pipeline and GUI for functional neural optical imaging"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -76,6 +76,9 @@ orbitapp = "orbitapp.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+orbitapp = ["img/*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
