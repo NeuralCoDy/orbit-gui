@@ -77,3 +77,17 @@ pytest
 Later phases add source identification and demixing/contamination assessment -- see
 project memory for the full roadmap.
 
+## Changelog
+
+### 0.1.1
+
+- Fix the splash screen and header logo not appearing after `pip install orbit-gui`
+  -- the image lived outside `src/` and was never included in the published wheels
+  or sdist, so it silently vanished on any real install (as opposed to a dev
+  checkout, where the file happened to still be reachable).
+
+### 0.1.0
+
+- Initial PyPI release, with cross-platform wheel builds (Linux/macOS/Windows) for
+  both optional native C++ extensions.
+
