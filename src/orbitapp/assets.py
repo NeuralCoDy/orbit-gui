@@ -1,6 +1,6 @@
 """Shared asset paths (logo, ...) for the splash screen and header
-branding -- one place to resolve `imgs/` relative to the repo root so
-both call sites agree, rather than each re-deriving the path.
+branding -- one place to resolve the packaged img/ dir so both call
+sites agree, rather than each re-deriving the path.
 """
 
 from __future__ import annotations
@@ -10,9 +10,11 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPainter, QPixmap
 
-# src/orbitapp/assets.py -> orbitapp/ -> src/ -> repo root
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-LOGO_PATH = _REPO_ROOT / "imgs" / "orbitlogoclean.png"
+# Packaged alongside this module (src/orbitapp/img/) rather than a
+# repo-root-relative imgs/ -- a path outside src/ is invisible to an
+# actual `pip install orbit-gui` (only present in a dev/editable
+# checkout), so the splash/logo silently vanished on any real install.
+LOGO_PATH = Path(__file__).resolve().parent / "img" / "orbitlogoclean.png"
 
 
 def load_logo(height_px: int) -> QPixmap:

@@ -1,1 +1,2 @@
 include src/orbit/_native/orbit_native.cpp
+include src/orbitapp/img/orbitlogoclean.png
