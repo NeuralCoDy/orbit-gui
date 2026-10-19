@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from scipy.ndimage import fourier_shift, gaussian_filter, map_coordinates
 
-from orbit.motion_correction import _pad_to_fast_len, motion_correct, patch_motion_correct, rigid_motion_correct
+from orbit.motion_correction import _apply_shift, _pad_to_fast_len, motion_correct, patch_motion_correct, rigid_motion_correct
 
 
 def _mean_corr(mov: np.ndarray, ref: np.ndarray) -> float:
@@ -51,7 +51,11 @@ def test_rigid_motion_correct_with_no_motion_is_near_identity():
 def test_rigid_motion_correct_shifts_are_cumulative_across_iterations():
     rng = np.random.default_rng(3)
     H, W, T = 40, 40, 8
-    base = gaussian_filter(rng.standard_normal((H, W)), 2)
+    # Content is kept 10 px from every edge (more than any shift reaches), so a
+    # circular reference shift equals _apply_shift's non-wrapping one exactly.
+    base = np.zeros((H, W))
+    base[10:-10, 10:-10] = gaussian_filter(rng.standard_normal((H - 20, W - 20)), 2)
+    base = gaussian_filter(base, 1)
 
     true_shifts = rng.uniform(-4, 4, size=(T, 2))
     movie = np.zeros((H, W, T))
@@ -65,7 +69,9 @@ def test_rigid_motion_correct_shifts_are_cumulative_across_iterations():
 
     for t in range(T):
         reconstructed = np.real(np.fft.ifftn(fourier_shift(np.fft.fftn(movie[:, :, t]), shifts[t])))
-        np.testing.assert_allclose(reconstructed, registered[:, :, t], atol=1e-6)
+        # Chained float32 subpixel shifts on a padded (non-periodic) frame
+        # compose to ~1e-4 here, not bit-exactly (see the 3D version's 1e-3).
+        np.testing.assert_allclose(reconstructed, registered[:, :, t], atol=2e-4)
 
     np.testing.assert_array_equal(initial_template, base)
     assert not np.array_equal(initial_template, template)
@@ -216,6 +222,35 @@ def test_rigid_motion_correct_output_param_reads_from_movie_not_uninitialized_ou
         movie, bin_width=4, n_iter=1, upsample_factor=10, init_batch=6, output=output
     )
     assert np.all(np.isfinite(registered))
+
+
+def test_apply_shift_does_not_wrap_content_around_the_edges():
+    # A Fourier shift is circular: before the fix, a 90x90 frame (90 is
+    # FFT-fast, so no padding happened) shifted up by 5 px put the top
+    # rows of a square into rows 85-89.
+    frame = np.zeros((90, 90), np.float32)
+    frame[2:12, 40:50] = 1.0
+    shifted = _apply_shift(frame, np.array([-5.0, 0.0]))
+    assert np.abs(shifted[60:]).max() < 1e-4
+    np.testing.assert_allclose(shifted[:7, 40:50], 1.0, atol=1e-4)
+
+
+def test_apply_shift_matches_an_integer_roll_in_the_interior_and_edge_fills_the_rest():
+    rng = np.random.default_rng(0)
+    frame = rng.standard_normal((64, 50)).astype(np.float32)
+    shifted = _apply_shift(frame, np.array([3.0, -4.0]))
+    np.testing.assert_allclose(shifted[3:, :-4], frame[:-3, 4:], atol=1e-4)
+    np.testing.assert_allclose(shifted[:3, :-4], np.broadcast_to(frame[0, 4:], (3, 46)), atol=1e-4)
+    np.testing.assert_allclose(shifted[3:, -4:], np.broadcast_to(frame[:-3, -1:], (61, 4)), atol=1e-4)
+
+
+def test_apply_shift_does_not_wrap_in_3d():
+    # motion_correction_3d.py reuses _apply_shift on whole volumes.
+    volume = np.zeros((20, 30, 30), np.float32)
+    volume[-3:] = 1.0
+    shifted = _apply_shift(volume, np.array([2.0, 0.0, 0.0]))
+    assert np.abs(shifted[:10]).max() < 1e-4
+    np.testing.assert_allclose(shifted[-1], 1.0, atol=1e-4)
 
 
 def test_pad_to_fast_len_is_a_true_noop_for_an_already_fast_size():

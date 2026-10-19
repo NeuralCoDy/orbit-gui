@@ -13,9 +13,9 @@ def _mean_corr_3d(mov: np.ndarray, ref: np.ndarray) -> float:
 
 def test_rigid_motion_correct_3d_recovers_known_shifts_and_improves_correlation():
     rng = np.random.default_rng(0)
-    L, W, D, T = 30, 30, 12, 15
+    L, W, D, T = 30, 30, 20, 15                                           # content stays clear of the edges at any shift
     base = np.zeros((L, W, D))
-    base[10:20, 10:20, 4:8] = 1.0
+    base[10:20, 10:20, 8:12] = 1.0
     base = gaussian_filter(base, 2)
 
     true_shifts = rng.uniform(-4, 4, size=(T, 3))
@@ -50,8 +50,12 @@ def test_rigid_motion_correct_3d_with_no_motion_is_near_identity():
 
 def test_rigid_motion_correct_3d_shifts_are_cumulative_across_iterations():
     rng = np.random.default_rng(3)
-    L, W, D, T = 20, 20, 10, 8
-    base = gaussian_filter(rng.standard_normal((L, W, D)), 2)
+    L, W, D, T = 30, 30, 30, 8
+    # Content is kept 9 voxels from every edge (more than any shift reaches),
+    # so a circular reference shift equals _apply_shift's non-wrapping one.
+    base = np.zeros((L, W, D))
+    base[9:-9, 9:-9, 9:-9] = gaussian_filter(rng.standard_normal((L - 18, W - 18, D - 18)), 2)
+    base = gaussian_filter(base, 1)
 
     true_shifts = rng.uniform(-3, 3, size=(T, 3))
     movie = np.zeros((T, L, W, D))

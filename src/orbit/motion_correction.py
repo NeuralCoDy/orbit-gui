@@ -124,12 +124,19 @@ def _apply_shift(frame: np.ndarray, shift: np.ndarray) -> np.ndarray:
     which reuses this unchanged). ``overwrite_x``/``output=`` let fftn,
     fourier_shift, and ifftn all reuse the same complex buffer rather
     than each allocating their own -- one whole-volume complex64 array
-    (gigabytes at a real volume's size) instead of three."""
-    padded = _pad_to_fast_len(frame, mode="edge")
+    (gigabytes at a real volume's size) instead of three.
+
+    A Fourier shift is circular: content moved past one edge would wrap
+    around into the opposite edge. So every side is first edge-padded by
+    the shift's whole-pixel extent plus one (a margin the shifted content
+    never crosses), and the pixels the shift uncovers take the nearest
+    edge value instead of wrapped content. This padding always copies."""
+    margin = [int(np.ceil(abs(s))) + 1 for s in np.ravel(shift)]
+    padded = _pad_to_fast_len(np.pad(frame, [(m, m) for m in margin], mode="edge"), mode="edge")
     spectrum = fftn(padded, overwrite_x=True)
     fourier_shift(spectrum, shift, output=spectrum)
     shifted = np.real(ifftn(spectrum, overwrite_x=True))
-    return shifted[tuple(slice(0, n) for n in frame.shape)].astype(frame.dtype, copy=False)
+    return shifted[tuple(slice(m, m + n) for m, n in zip(margin, frame.shape))].astype(frame.dtype, copy=False)
 
 
 def _apply_displacement_field(frame: np.ndarray, disp_y: np.ndarray, disp_x: np.ndarray) -> np.ndarray:
