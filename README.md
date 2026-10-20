@@ -79,6 +79,13 @@ project memory for the full roadmap.
 
 ## Changelog
 
+### 0.1.2
+
+- Fix rigid motion correction wrapping content around the frame edges: the Fourier
+  sub-pixel shift is circular, so a shifted frame used to pull pixels from the
+  opposite border. Frames are now edge-padded by the shift before shifting and
+  cropped back, so uncovered borders are filled with the nearest edge values.
+
 ### 0.1.1
 
 - Fix the splash screen and header logo not appearing after `pip install orbit-gui`
