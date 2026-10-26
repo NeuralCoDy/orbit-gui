@@ -170,6 +170,10 @@ class ROIReviewPanel(QWidget):
         self._preview_roi = roi
         self._refresh_table()
         if roi is not None:
+            # A replacement preview reuses the already-selected last row, so
+            # clear first -- otherwise selectionChanged never fires and the
+            # trace plot keeps showing the previous preview's trace.
+            self.table.clearSelection()
             self.table.selectRow(len(self._rois))  # preview is always the last row
         self._refresh_selected_view(roi)
 

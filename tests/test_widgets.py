@@ -561,6 +561,16 @@ def test_roi_review_panel_set_preview_roi_highlights_fov_panel():
     assert panel.table.rowCount() == 0
 
 
+def test_roi_review_panel_replacing_the_preview_replots_its_trace():
+    # The replacement reuses the already-selected last row; the plot must
+    # still switch to the new preview's trace, not keep the old one.
+    panel = ROIReviewPanel()
+    mask = np.ones((5, 5), dtype=bool)
+    for trace in (np.zeros(10), np.arange(10, dtype=float)):
+        panel.set_preview_roi(ROI(id=-1, mask=mask, trace=trace, source_method="correlation", status="preview"))
+        assert np.array_equal(panel.trace_plot.listDataItems()[0].yData, trace)
+
+
 def test_roi_review_panel_selecting_a_roi_highlights_it_in_the_fov_panel():
     # The merged FOV/Selected-ROI panel highlights whichever ROI is
     # selected -- from the table or the Current ROIs view -- and clears
