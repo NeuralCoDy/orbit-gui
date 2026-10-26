@@ -21,7 +21,8 @@ Three growth strategies, selected via ``growth_method``:
   whichever pass threshold, until nothing new is added.
 
 All three support the same auto-threshold search: when no explicit
-threshold is given, sweeps a fixed threshold range and picks whichever
+threshold is given, sweeps a fixed threshold range (0.6-0.9, falling back
+to 0.05-0.59 when nothing in it grows a mask) and picks whichever
 maximizes an auto-threshold objective (see ``_method_objective``) computed
 against a neuropil-ring trace -- used only to pick the best threshold
 during the search, not to correct the final returned trace (see
@@ -43,6 +44,10 @@ from ._peak_picking import select_separated_pixels
 from .neuropil import neuropil_ring_mask
 
 _THRESH_RANGE = np.linspace(0.6, 0.9, 31)  # 0.6:0.01:0.9 inclusive
+# Fallback sweep when no threshold in _THRESH_RANGE grows a mask at all --
+# low-SNR movies (e.g. fast voltage imaging) whose local-correlation image
+# peaks well below 0.6 would otherwise always get an empty ROI.
+_LOW_THRESH_RANGE = np.linspace(0.05, 0.59, 55)  # 0.05:0.01:0.59 inclusive
 _SEARCH_FRAME_LIMIT = 1000  # cap frames used during the auto-threshold search for speed
 
 
@@ -51,16 +56,6 @@ class CorrMaskResult:
     mask: np.ndarray  # (H, W) bool
     trace: np.ndarray  # (T,) float, plain masked-mean of the fluorescence movie
     thresh: float
-
-
-def _safe_nanargmax(values: np.ndarray) -> int:
-    """Like np.nanargmax, but returns 0 instead of raising when every value
-    is NaN (reachable when a block-averaged seed's self-correlation isn't
-    guaranteed to exceed every candidate threshold, making every sweep
-    candidate's mask empty)."""
-    if np.all(np.isnan(values)):
-        return 0
-    return int(np.nanargmax(values))
 
 
 def _make_distance_map(height: int, width: int, pix_loc: tuple[int, int], max_dist: float) -> np.ndarray:
@@ -220,13 +215,15 @@ def _method_objective(method: str, trace: np.ndarray, nptrace: np.ndarray) -> fl
 
 
 def _search_best_threshold(
-    movie: np.ndarray, pix_loc: tuple[int, int], disk_mask: np.ndarray, method: str, candidate_mask_fn
-) -> float:
-    """Sweeps _THRESH_RANGE, scoring each candidate mask's cell trace
+    movie: np.ndarray, pix_loc: tuple[int, int], disk_mask: np.ndarray, method: str, candidate_mask_fn,
+    thresh_range: np.ndarray = _THRESH_RANGE,
+) -> float | None:
+    """Sweeps ``thresh_range``, scoring each candidate mask's cell trace
     against its neuropil-ring trace, and returns the threshold maximizing
-    _method_objective. ``candidate_mask_fn(thresh) -> (H, W) bool``."""
-    objective_vals = np.full(len(_THRESH_RANGE), np.nan)
-    for n, candidate in enumerate(_THRESH_RANGE):
+    _method_objective -- or None when no candidate could be scored (every
+    mask, or its neuropil ring, empty). ``candidate_mask_fn(thresh) -> (H, W) bool``."""
+    objective_vals = np.full(len(thresh_range), np.nan)
+    for n, candidate in enumerate(thresh_range):
         candidate_mask = candidate_mask_fn(candidate)
         if not candidate_mask.any():
             continue
@@ -236,7 +233,9 @@ def _search_best_threshold(
         trace = masked_mean_trace(movie, candidate_mask, _SEARCH_FRAME_LIMIT)
         nptrace = masked_mean_trace(movie, ring, _SEARCH_FRAME_LIMIT)
         objective_vals[n] = _method_objective(method, trace, nptrace)
-    return float(_THRESH_RANGE[_safe_nanargmax(objective_vals)])
+    if np.all(np.isnan(objective_vals)):
+        return None
+    return float(thresh_range[np.nanargmax(objective_vals)])
 
 
 def roi_from_seed(
@@ -279,7 +278,12 @@ def roi_from_seed(
         candidate_fn = lambda t: _clean_roi(corr_map > t, (row, col))  # noqa: E731
 
     if thresh is None:
-        thresh = _search_best_threshold(movie, (row, col), disk_mask, method, candidate_fn)
+        for thresh_range in (_THRESH_RANGE, _LOW_THRESH_RANGE):
+            thresh = _search_best_threshold(movie, (row, col), disk_mask, method, candidate_fn, thresh_range)
+            if thresh is not None:
+                break
+        else:
+            thresh = float(_THRESH_RANGE[0])  # nothing grows at any threshold: an empty mask
 
     mask = candidate_fn(thresh)
     trace = masked_mean_trace(movie, mask)

@@ -652,9 +652,13 @@ class SourceExtractionTab(QWidget):
             seed_loc=r["seed_loc"], params={**self._pending_corr_params, "threshold": r["thresh"]},
         )
         self.review_panel.set_preview_roi(self._preview_roi)
-        self.add_roi_btn.setEnabled(True)
+        grew = bool(r["mask"].any())
+        self.add_roi_btn.setEnabled(grew)
         self.busy_bar.stop("")
-        self.status_label.setText("Preview ready as 'ROI -1' -- click 'Add ROI' to keep it, or click elsewhere to replace it.")
+        self.status_label.setText(
+            "Preview ready as 'ROI -1' -- click 'Add ROI' to keep it, or click elsewhere to replace it." if grew else
+            f"No ROI grew from {r['seed_loc']} at threshold {r['thresh']:.2f} -- click elsewhere or lower the threshold."
+        )
 
     def _on_add_roi_clicked(self) -> None:
         if self._preview_roi is None:

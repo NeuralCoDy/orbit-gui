@@ -49,6 +49,21 @@ def test_roi_from_seed_auto_threshold_search_picks_a_valid_threshold():
     assert 0.6 <= result.thresh <= 0.9
 
 
+def test_roi_from_seed_auto_threshold_falls_back_below_0_6_for_a_low_correlation_movie():
+    # A dim cell whose local correlation peaks ~0.32: nothing in 0.6-0.9
+    # grows a mask, so the search must fall back to the low range.
+    rng = np.random.default_rng(0)
+    movie = rng.standard_normal((30, 30, 400)) + 5.0
+    movie[5:12, 5:12, :] += 0.35 * rng.standard_normal(400)
+    corr_image = local_correlation_projection(movie)
+    result = roi_from_seed(movie, pix_loc=(8, 8), max_dist=10, thresh=None,
+                            growth_method="local_corr_threshold", local_corr_image=corr_image)
+    assert result.thresh < 0.6
+    assert result.mask[8, 8]
+    assert result.mask[5:12, 5:12].sum() >= result.mask.sum() * 0.8
+    assert result.trace.std() > 0
+
+
 def test_roi_from_seed_rejects_threshold_above_one():
     movie = _synthetic_cell_movie(height=10, width=10, n_frames=10)
     corr_image = local_correlation_projection(movie)
