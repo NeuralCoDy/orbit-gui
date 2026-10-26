@@ -79,6 +79,15 @@ project memory for the full roadmap.
 
 ## Changelog
 
+### 0.1.3
+
+- Source Extraction: the trace plot now redraws when a click replaces the ROI
+  preview. It used to keep showing the first preview's trace.
+- Correlation auto-threshold: when no threshold in 0.6-0.9 grows a mask (low-SNR
+  movies whose local correlation peaks below 0.6), the search falls back to
+  0.05-0.59 instead of returning an empty ROI with an all-zero trace. If nothing
+  grows at all, the status bar says so and Add ROI stays disabled.
+
 ### 0.1.2
 
 - Fix rigid motion correction wrapping content around the frame edges: the Fourier
