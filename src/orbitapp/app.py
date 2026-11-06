@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 
 from . import io as orbitapp_io
 from . import report
-from .assets import LOGO_PATH, load_logo_on_black
+from .assets import LOGO_PATH, load_app_icon, load_logo_on_black
 from .format import format_header_summary
 from .state import AppState
 from .tabs import (
@@ -268,6 +268,7 @@ def run() -> None:
 
     splash = None
     if LOGO_PATH.exists():
+        app.setWindowIcon(load_app_icon())
         splash = QSplashScreen(load_logo_on_black(_SPLASH_HEIGHT_PX))
         splash.show()
         app.processEvents()
